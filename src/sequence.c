@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: sequence.c 224951 2022-10-08 20:03:19Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -28,6 +27,8 @@ static char rcsid[] = "$Id: sequence.c 224951 2022-10-08 20:03:19Z twu $";
 #include "complement.h"
 #include "intlist.h"
 #include "fopen.h"
+#include "getline.h"
+
 #include "md5.h"
 #ifdef PMAP
 #include "dynprog.h"
@@ -506,12 +507,6 @@ Sequence_count_bad (T this, int pos, int max, int direction) {
 #endif
 
 
-#define HEADERLEN 512
-#define DISCARDLEN 8192
-
-static char Header[HEADERLEN];
-static char Discard[DISCARDLEN];
-
 static char Sequence[1+MAXSEQLEN+1]; /* Used by Sequence_read_unlimited */
 static char Sequence1[HALFLEN+1]; /* 1 at end for '\0' */
 static char Sequence2[HALFLEN+3]; /* 1 at end for '\0' and 2 extra in cyclic part for '\n' and '\0' */
@@ -536,7 +531,7 @@ Sequence_input_init (FILE *fp) {
   int c;
   bool okayp = false;
 
-  Header[0] = '\0';
+  /* Header[0] = '\0'; */
   Sequence[0] = '\0';
   Firsthalf = &(Sequence1[0]);
   Secondhalf = &(Sequence2[0]);
@@ -564,7 +559,7 @@ Sequence_input_init_gzip (gzFile fp) {
   int c;
   bool okayp = false;
 
-  Header[0] = '\0';
+  /* Header[0] = '\0'; */
   Sequence[0] = '\0';
   Firsthalf = &(Sequence1[0]);
   Secondhalf = &(Sequence2[0]);
@@ -593,7 +588,7 @@ Sequence_input_init_bzip2 (Bzip2_T fp) {
   int c;
   bool okayp = false;
 
-  Header[0] = '\0';
+  /* Header[0] = '\0'; */
   Sequence[0] = '\0';
   Firsthalf = &(Sequence1[0]);
   Secondhalf = &(Sequence2[0]);
@@ -627,45 +622,52 @@ blank_header (T this) {
 
 static char *
 input_header (FILE *fp, T this) {
-  char *p;
+  char *header, *p;
   size_t length;
 
   if (feof(fp)) {
     return NULL;
-  } else if (fgets(&(Header[0]),HEADERLEN,fp) == NULL) {
+
+  } else if ((header = Getline(fp)) == NULL) {
+    /* Was fgets(&(Header[0]),HEADERLEN,fp) */
     /* File must terminate after > */
     return NULL;
   }
 
-  if (Header[0] == '\n') {
-    Header[0] = '\0';
-  } else if ((p = rindex(&(Header[0]),'\n')) != NULL) {
+  if (header[0] == '\n') {
+    /* Blank line */
+    header[0] = '\0';
+#if 0
+  } else if ((p = rindex(&(header[0]),'\n')) != NULL) {
+    /* Getline takes care of this */
     if (p[-1] == '\r') {
       p--;
     }
     *p = '\0';
   } else {
+    /* Getline takes care of this */
     /* Eliminate rest of header from input */
     while (fgets(&(Discard[0]),DISCARDLEN,fp) != NULL &&
 	   rindex(&(Discard[0]),'\n') == NULL) ;
+#endif
   }
 
-  p = &(Header[0]);
+  p = &(header[0]);
   while (*p != '\0' && !isspace((int) *p)) {
     p++;
   }
   if (*p == '\0') {
     /* Accession only */
-    length = (p - &(Header[0]))/sizeof(char);
+    length = (p - &(header[0]))/sizeof(char);
     this->acc = (char *) CALLOC_IN(length+1,sizeof(char));
-    strcpy(this->acc,Header);
+    strcpy(this->acc,header);
     this->restofheader = (char *) CALLOC_IN(1,sizeof(char));
     this->restofheader[0] = '\0';
   } else {
     *p = '\0';
-    length = (p - &(Header[0]))/sizeof(char);
+    length = (p - &(header[0]))/sizeof(char);
     this->acc = (char *) CALLOC_IN(length+1,sizeof(char));
-    strcpy(this->acc,Header);
+    strcpy(this->acc,header);
     p++;
     this->restofheader = (char *) CALLOC_IN(strlen(p)+1,sizeof(char));
     strcpy(this->restofheader,p);
@@ -707,19 +709,24 @@ input_header_unlimited (T this) {
 
 static bool
 skip_header (FILE *fp) {
+  char *header;
 
   if (feof(fp)) {
     return false;
-  } else if (fgets(&(Header[0]),HEADERLEN,fp) == NULL) {
+  } else if ((header = Getline(fp)) == NULL) {
+    /* Was fgets(&(Header[0]),HEADERLEN,fp) */
     /* File must terminate after > */
     return false;
   }
 
-  if (rindex(&(Header[0]),'\n') == NULL) {
+#if 0
+  if (rindex(&(header[0]),'\n') == NULL) {
+    /* Getline takes care of this */
     /* Eliminate rest of header from input */
     while (fgets(&(Discard[0]),DISCARDLEN,fp) != NULL &&
 	   rindex(&(Discard[0]),'\n') == NULL) ;
   }
+#endif
 
   return true;
 } 
