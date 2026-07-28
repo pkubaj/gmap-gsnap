@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 97748e40c79db2f3f378e26db2d55f87c364958e $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -407,6 +406,16 @@ Intlist_last_value (T this) {
   return last->first;
 }
 
+T
+Intlist_last_elt (T this) {
+  T last = NULL, r;
+
+  for (r = this; r != NULL; r = r->rest) {
+    last = r;
+  }
+  return last;
+}
+
 void
 Intlist_last_value_set (T this, int x) {
   T last = NULL, r;
@@ -419,6 +428,16 @@ Intlist_last_value_set (T this, int x) {
   return;
 }
 
+
+T
+Intlist_penultimate_elt (T this) {
+  T last = NULL, r;
+
+  for (r = this; r->rest != NULL; r = r->rest) {
+    last = r;
+  }
+  return last;
+}
 
 int
 Intlist_penultimate_value (T this) {

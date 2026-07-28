@@ -1,4 +1,3 @@
-/* $Id: iit-write-univ.h 157221 2015-01-22 18:38:57Z twu $ */
 #ifndef IIT_WRITE_UNIV_INCLUDED
 #define IIT_WRITE_UNIV_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: pair.h 224673 2021-10-25 14:58:40Z twu $ */
 #ifndef PAIR_INCLUDED
 #define PAIR_INCLUDED
 

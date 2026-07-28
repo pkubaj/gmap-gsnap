@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 6ebab9432e0e209e3de1056c9ea10365cd10309c $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -26,7 +25,12 @@ static char rcsid[] = "$Id: 6ebab9432e0e209e3de1056c9ea10365cd10309c $";
 #include "intersect-approx-uint4.h" /* For Intersect_approx_uint4 */
 #include "intersect-indices-small.h" /* For Transcriptome_anypair */
 
+#include "merge-method.h"
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint4.h"
+#elif defined(USE_SIMD_MERGE)
 #include "merge-diagonals-simd-uint4.h"
+#endif
 
 #include "transcript.h"
 #include "junction.h"
@@ -1110,7 +1114,7 @@ Transcriptome_anypair (Trnum_T **sense_trnums, Trcoord_T **sense_troffsets, Trco
     *sense_trnums = (Trnum_T *) MALLOC(nseparated_tplus * sizeof(int));
     *sense_troffsets = (Trcoord_T *) MALLOC(nseparated_tplus * sizeof(Trcoord_T));
     *sense_trhighs = (Trcoord_T *) MALLOC(nseparated_tplus * sizeof(Trcoord_T));
-    MALLOC_ALIGN(*_sense_trdiagonals,nseparated_tplus * sizeof(Trcoord_T));
+    *_sense_trdiagonals = (Trcoord_T *) MALLOC_ALIGN(nseparated_tplus * sizeof(Trcoord_T));
     *sense_tstarts = (int *) MALLOC(nseparated_tplus * sizeof(int));
     *sense_tends = (int *) MALLOC(nseparated_tplus * sizeof(int));
     
@@ -1170,7 +1174,7 @@ Transcriptome_anypair (Trnum_T **sense_trnums, Trcoord_T **sense_troffsets, Trco
     *antisense_trnums = (Trnum_T *) MALLOC(nseparated_tminus * sizeof(Trnum_T));
     *antisense_troffsets = (Trcoord_T *) MALLOC(nseparated_tminus * sizeof(Trcoord_T));
     *antisense_trhighs = (Trcoord_T *) MALLOC(nseparated_tminus * sizeof(Trcoord_T));
-    MALLOC_ALIGN(*_antisense_trdiagonals,nseparated_tminus * sizeof(Trcoord_T));
+    *_antisense_trdiagonals = (Trcoord_T *) MALLOC_ALIGN(nseparated_tminus * sizeof(Trcoord_T));
     *antisense_tstarts = (int *) MALLOC(nseparated_tminus * sizeof(int));
     *antisense_tends = (int *) MALLOC(nseparated_tminus * sizeof(int));
     
@@ -1280,25 +1284,31 @@ keep_prevalence (int *ndiagonals, Trcoord_T *all_diagonals, int all_ndiagonals,
   debug9(printf("keep_prevalence found %d diagonals with %d kmers\n",k,prevalence));
 
   /* Allocate new array.  Needs to be aligned for later merging with Stage1_T all_trdiagonals */
-  MALLOC_ALIGN(diagonals,k*sizeof(Trcoord_T));
+  if (k == 0) {
+    *ndiagonals = 0;
+    return (Trcoord_T *) NULL;
 
-  /* Save diagonals if there are prevalence or more of them */
-  k = 0;
-  i = 0;
-  while (i < all_ndiagonals) {
-    j = i + 1;
-    while (j < all_ndiagonals && all_diagonals[j] == all_diagonals[i]) {
-      j++;
+  } else {
+    diagonals = (Trcoord_T *) MALLOC_ALIGN(k*sizeof(Trcoord_T));
+
+    /* Save diagonals if there are prevalence or more of them */
+    k = 0;
+    i = 0;
+    while (i < all_ndiagonals) {
+      j = i + 1;
+      while (j < all_ndiagonals && all_diagonals[j] == all_diagonals[i]) {
+	j++;
+      }
+      if (j - i >= prevalence) {
+	diagonals[k++] = all_diagonals[i];
+      }
+      
+      i = j;
     }
-    if (j - i >= prevalence) {
-      diagonals[k++] = all_diagonals[i];
-    }
-    
-    i = j;
+
+    *ndiagonals = k;
+    return diagonals;
   }
-
-  *ndiagonals = k;
-  return diagonals;
 }
 
 

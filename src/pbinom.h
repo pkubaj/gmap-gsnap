@@ -1,4 +1,3 @@
-/* $Id: pbinom.h 40271 2011-05-28 02:29:18Z twu $ */
 #ifndef PBINOM_INCLUDED
 #define PBINOM_INCLUDED
 

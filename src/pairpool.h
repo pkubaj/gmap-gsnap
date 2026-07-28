@@ -1,4 +1,3 @@
-/* $Id: pairpool.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef PAIRPOOL_INCLUDED
 #define PAIRPOOL_INCLUDED
 

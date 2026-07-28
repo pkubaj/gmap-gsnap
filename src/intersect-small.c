@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 7a81987e19a8bad50026f6e7ee6b473d8039cc36 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -986,7 +985,7 @@ Intersect_small (int *ndiagonals,
     debug(printf("Using SIMDgalloping method\n"));
     if (length1 <= length2) {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length1 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length1 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length1 * sizeof(unsigned int));
       }
@@ -995,7 +994,7 @@ Intersect_small (int *ndiagonals,
 				  /*diagterm_rare*/diagterm1);
     } else {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length2 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length2 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length2 * sizeof(unsigned int));
       }
@@ -1024,7 +1023,7 @@ Intersect_small (int *ndiagonals,
     debug(printf("Using v3 method\n"));
     if (length1 <= length2) {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length1 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length1 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length1 * sizeof(unsigned int));
       }
@@ -1033,7 +1032,7 @@ Intersect_small (int *ndiagonals,
 		       /*diagterm_rare*/diagterm1);
     } else {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length2 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length2 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length2 * sizeof(unsigned int));
       }
@@ -1062,7 +1061,7 @@ Intersect_small (int *ndiagonals,
     debug(printf("Using v1 method\n"));
     if (length1 <= length2) {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length1 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length1 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length1 * sizeof(unsigned int));
       }
@@ -1071,7 +1070,7 @@ Intersect_small (int *ndiagonals,
 		       /*diagterm_rare*/diagterm1);
     } else {
       if (alignp == true) {
-	MALLOC_ALIGN(diagonals,length2 * sizeof(unsigned int));
+	diagonals = (unsigned int *) MALLOC_ALIGN(length2 * sizeof(unsigned int));
       } else {
 	diagonals = (unsigned int *) MALLOC(length2 * sizeof(unsigned int));
       }

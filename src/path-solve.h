@@ -1,4 +1,4 @@
-/* $Id: deb9b58c9cd5445c68d12e911889616987c71129 $ */
+/* $Id: 9974f6eb61ea9b16530bffee3f1ea629b48b79d5 $ */
 #ifndef PATH_SOLVE_INCLUDED
 #define PATH_SOLVE_INCLUDED
 
@@ -59,15 +59,18 @@ Path_solve_from_diagonals (int *found_score,
 			   List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
 			   List_T *sense_paths, List_T *antisense_paths,
 
-			   Univcoord_T middle_diagonal_univdiagonal, Auxinfo_T auxinfo,
+			   Univcoord_T middle_univdiagonal, Auxinfo_T auxinfo,
 			   
 			   Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			   int localdb_nmismatches_allowed,
 
 			   Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
-			   bool plusp, int genestrand, int localdb_nmismatches_allowed,
+			   bool plusp, int genestrand,
 			   bool paired_end_p, bool first_read_p,
 
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -100,9 +103,12 @@ Path_solve_from_univdiagonal (int *found_score,
 			      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			      bool plusp, int querylength, int *mismatch_positions_alloc,
 			      
+			      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			      int localdb_nmismatches_allowed,
+
 			      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
-			      int localdb_nmismatches_allowed, bool paired_end_p, bool first_read_p,
+			      bool paired_end_p, bool first_read_p,
 
 			      Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			      Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -114,11 +120,13 @@ Path_solve_from_univdiagonal (int *found_score,
 extern List_T
 Path_extend (int *found_score, List_T *global_unextended_paths,
 	     T original_path, Shortread_T queryseq, char *queryptr, int querylength,
-	     int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-	     Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	     int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	     int localdb_nmismatches_allowed,
+
 	     Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 	     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-	     int genestrand, int localdb_nmismatches_allowed, bool paired_end_p, bool lowp,
+	     int genestrand, bool paired_end_p, bool lowp,
 	     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 	     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
@@ -126,24 +134,26 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
 
 extern void
 Path_qstart_resolve (int *found_score, T path,
-		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
-		     char *queryptr, int querylength,
+		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal, char *queryptr, int querylength,
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     int localdb_nmismatches_allowed,
+
 		     Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
-		     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		     int genestrand, int localdb_nmismatches_allowed,
+		     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev, int genestrand, 
 		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool);
 
 extern void
 Path_qend_resolve (int *found_score, T path,
-		   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
-		   char *queryptr, int querylength,
+		   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal, char *queryptr, int querylength,
+		   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		   int localdb_nmismatches_allowed,
+
 		   Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
-		   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		   int genestrand, int localdb_nmismatches_allowed,
+		   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev, int genestrand,
 		   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		   Univdiagpool_T univdiagpool, Vectorpool_T vectorpool);
@@ -152,7 +162,12 @@ extern T
 Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 		      Compress_T query_compress,
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		      Shortread_T queryseq, int querylength,
+		      Shortread_T queryseq, char *queryptr, int querylength,
+
+		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		      Stage1_T stage1, Knownsplicing_T knownsplicing,
 		      Uintlistpool_T uintlistpool, Intlistpool_T intlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -161,9 +176,12 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 extern void
 Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T chromosome_ef64_in,
 		  Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in, Univcoord_T genomelength_in,
-		  int index1part_in, Localdb_T localdb_in, int min_intronlength_in,
+		  int index1part_in, int min_intronlength_in,
 		  int max_insertionlen_in, int max_deletionlen_in,
 		  bool novelsplicingp, bool knownsplicingp);
+
+extern void
+Path_solve_localdb_setup (Localdb_T localdb_in);
 
 #undef T
 #endif

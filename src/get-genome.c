@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: get-genome.c 226315 2023-02-28 18:22:20Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -586,7 +585,8 @@ make_complement_inplace (char *sequence, Chrpos_T length) {
 
 
 static void
-genemap_print_exons (char *annot, Univcoord_T chroffset, Genome_T genome) {
+genemap_print_exons (char *annot, Univcoord_T chroffset, Chrpos_T chrlength,
+		     Genome_T genome) {
   char *p;
   char *gbuffer;
   Chrpos_T exonstart, exonend, exonlow, exonhigh, exonlength;
@@ -604,6 +604,8 @@ genemap_print_exons (char *annot, Univcoord_T chroffset, Genome_T genome) {
     if (sscanf(p,"%u %u",&exonstart,&exonend) != 2) {
       fprintf(stderr,"Can't parse exon coordinates in %s\n",p);
       abort();
+    } else if (exonstart > chrlength || exonend > chrlength) {
+      fprintf(stderr,"Exon coordinates exceed chromosome length in %s\n",annot);
     } else {
       if (exonstart <= exonend) {
 	exonlow = exonstart;
@@ -632,7 +634,8 @@ genemap_print_exons (char *annot, Univcoord_T chroffset, Genome_T genome) {
 
 
 static void
-genemap_print_sequence (char *annot, Univcoord_T chroffset, Genome_T genome) {
+genemap_print_sequence (char *annot, Univcoord_T chroffset, Chrpos_T chrlength,
+			Genome_T genome) {
   char *p;
   char *gbuffer;
   Chrpos_T exonstart, exonend, exonlow, exonhigh, exonlength;
@@ -653,6 +656,8 @@ genemap_print_sequence (char *annot, Univcoord_T chroffset, Genome_T genome) {
     if (sscanf(p,"%u %u",&exonstart,&exonend) != 2) {
       fprintf(stderr,"Can't parse exon coordinates in %s\n",p);
       abort();
+    } else if (exonstart > chrlength || exonend > chrlength) {
+      fprintf(stderr,"Exon coordinates exceed chromosome length in %s\n",annot);
     } else {
       if (exonstart <= exonend) {
 	exonlow = exonstart;
@@ -692,7 +697,8 @@ genemap_print_sequence (char *annot, Univcoord_T chroffset, Genome_T genome) {
 
 
 static void
-genemap_print_gsequence (char *annot, Univcoord_T chroffset, Genome_T genome) {
+genemap_print_gsequence (char *annot, Univcoord_T chroffset, Chrpos_T chrlength,
+			 Genome_T genome) {
   char *p;
   char *gbuffer;
   Chrpos_T exonstart, exonend, exonlow, exonhigh, exonlength, intronlength,
@@ -712,6 +718,8 @@ genemap_print_gsequence (char *annot, Univcoord_T chroffset, Genome_T genome) {
     if (sscanf(p,"%u %u",&exonstart,&exonend) != 2) {
       fprintf(stderr,"Can't parse exon coordinates in %s\n",p);
       abort();
+    } else if (exonstart > chrlength || exonend > chrlength) {
+      fprintf(stderr,"Exon coordinates exceed chromosome length in %s\n",annot);
     } else {
       if (exonstart <= exonend) {
 	exonlow = exonstart;
@@ -818,6 +826,7 @@ print_interval (char *divstring, int index, IIT_T iit, int ndivs, Univ_IIT_T chr
   bool annotationonlyp = false, signed_output_p = true;
   int divno;
   Univcoord_T chroffset;
+  Chrpos_T chrlength;
   Intlist_T unique_positions, unique_splicep;
 
   if (exonsp == true || sequencep == true || genome_sequence_p == true || uniquep == true) {
@@ -846,12 +855,14 @@ print_interval (char *divstring, int index, IIT_T iit, int ndivs, Univ_IIT_T chr
     } else {
       chr_interval = Univ_IIT_interval(chromosome_iit,divno);
       chroffset = Univinterval_low(chr_interval);
+      chrlength = Univ_IIT_length(chromosome_iit,divno);
+      
       if (exonsp == true) {
-	genemap_print_exons(annotation,chroffset,genome);
+	genemap_print_exons(annotation,chroffset,chrlength,genome);
       } else if (sequencep == true) {
-	genemap_print_sequence(annotation,chroffset,genome);
+	genemap_print_sequence(annotation,chroffset,chrlength,genome);
       } else if (genome_sequence_p == true) {
-	genemap_print_gsequence(annotation,chroffset,genome);
+	genemap_print_gsequence(annotation,chroffset,chrlength,genome);
       } else if (uniquep == true) {
 	unique_positions = IIT_unique_positions(iit,index,divno);
 	unique_splicep = IIT_unique_splicep(iit,index,divno);
@@ -1393,12 +1404,12 @@ main (int argc, char *argv[]) {
 		FREE(string);
 	      }
 
-	      genemap_print_sequence(annot,chroffset,genome);
+	      genemap_print_sequence(annot,chroffset,chrlength,genome);
 	      FREE(annot);
 	      List_free(&lines);
 	    }
 
-	    /* Parse header to get accession and chroffset */
+	    /* Parse header to get accession, chroffset, and chrlength */
 	    p = line;
 	    while (*p != '\0' && *p != ' ') {
 	      p++;
@@ -1429,6 +1440,7 @@ main (int argc, char *argv[]) {
 		} else {
 		  chr_interval = Univ_IIT_interval(chromosome_iit,divno);
 		  chroffset = Univinterval_low(chr_interval);
+		  chrlength = Univ_IIT_length(chromosome_iit,divno);
 		  chr_valid_p = true;
 		}
 		FREE(divstring);
@@ -1463,7 +1475,7 @@ main (int argc, char *argv[]) {
 	    FREE(string);
 	  }
 
-	  genemap_print_sequence(annot,chroffset,genome);
+	  genemap_print_sequence(annot,chroffset,chrlength,genome);
 	  FREE(annot);
 	  List_free(&lines);
 	}

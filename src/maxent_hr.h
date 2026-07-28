@@ -1,4 +1,3 @@
-/* $Id: maxent_hr.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef MAXENT_HR_INCLUDED
 #define MAXENT_HR_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: assert.h 40271 2011-05-28 02:29:18Z twu $ */
 #ifndef ASSERT_INCLUDED
 #define ASSERT_INCLUDED
 

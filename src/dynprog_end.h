@@ -1,4 +1,3 @@
-/* $Id: dynprog_end.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef DYNPROG_END_INCLUDED
 #define DYNPROG_END_INCLUDED
 

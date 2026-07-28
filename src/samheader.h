@@ -1,4 +1,3 @@
-/* $Id: samheader.h 224935 2022-10-08 19:05:51Z twu $ */
 #ifndef SAMHEADER_INCLUDED
 #define SAMHEADER_INCLUDED
 

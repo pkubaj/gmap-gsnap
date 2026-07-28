@@ -4,15 +4,15 @@ if FULLDIST
 bin_SCRIPTS = gmap_process gmap_build gmap_cat md_coords fa_coords \
               psl_splicesites psl_introns psl_genes \
               ensembl_genes \
-              gtf_splicesites gtf_introns gtf_genes gtf_transcript_splicesites \
-              gff3_splicesites gff3_introns gff3_genes \
+              gtf_splicesites gtf_exons gtf_introns gtf_genes gtf_transcript_splicesites \
+              gff3_splicesites gff3_exons gff3_introns gff3_genes gff3_parts \
               dbsnp_iit gvf_iit vcf_iit
 else
 bin_SCRIPTS = gmap_process gmap_build gmap_cat md_coords fa_coords \
               psl_splicesites psl_introns psl_genes \
               ensembl_genes \
-              gtf_splicesites gtf_introns gtf_genes gtf_transcript_splicesites \
-              gff3_splicesites gff3_introns gff3_genes \
+              gtf_splicesites gtf_exons gtf_introns gtf_genes gtf_transcript_splicesites \
+              gff3_splicesites gff3_exons gff3_introns gff3_genes gff3_parts \
               dbsnp_iit gvf_iit vcf_iit
 endif
 
@@ -61,6 +61,10 @@ gtf_splicesites: gtf_splicesites.pl
 	cp gtf_splicesites.pl gtf_splicesites
 	chmod +x gtf_splicesites
 
+gtf_exons: gtf_exons.pl
+	cp gtf_exons.pl gtf_exons
+	chmod +x gtf_exons
+
 gtf_introns: gtf_introns.pl
 	cp gtf_introns.pl gtf_introns
 	chmod +x gtf_introns
@@ -77,6 +81,10 @@ gff3_splicesites: gff3_splicesites.pl
 	cp gff3_splicesites.pl gff3_splicesites
 	chmod +x gff3_splicesites
 
+gff3_exons: gff3_exons.pl
+	cp gff3_exons.pl gff3_exons
+	chmod +x gff3_exons
+
 gff3_introns: gff3_introns.pl
 	cp gff3_introns.pl gff3_introns
 	chmod +x gff3_introns
@@ -84,6 +92,10 @@ gff3_introns: gff3_introns.pl
 gff3_genes: gff3_genes.pl
 	cp gff3_genes.pl gff3_genes
 	chmod +x gff3_genes
+
+gff3_parts: gff3_parts.pl
+	cp gff3_parts.pl gff3_parts
+	chmod +x gff3_parts
 
 
 dbsnp_iit: dbsnp_iit.pl
@@ -102,15 +114,15 @@ if FULLDIST
 CLEANFILES = gmap_process gmap_build gmap_cat md_coords fa_coords \
              psl_splicesites psl_introns psl_genes \
              ensembl_genes \
-             gtf_splicesites gtf_introns gtf_genes gtf_transcript_splicesites \
-             gff3_splicesites gff3_introns gff3_genes \
+             gtf_splicesites gtf_exons gtf_introns gtf_genes gtf_transcript_splicesites \
+             gff3_splicesites gff3_exons gff3_introns gff3_genes gff3_parts \
              dbsnp_iit gvf_iit vcf_iit
 else
 CLEANFILES = gmap_process gmap_build gmap_cat md_coords fa_coords \
              psl_splicesites psl_introns psl_genes \
              ensembl_genes \
-             gtf_splicesites gtf_introns gtf_genes gtf_transcript_splicesites \
-             gff3_splicesites gff3_introns gff3_genes \
+             gtf_splicesites gtf_exons gtf_introns gtf_genes gtf_transcript_splicesites \
+             gff3_splicesites gff3_exons gff3_introns gff3_genes gff3_parts \
              dbsnp_iit gvf_iit vcf_iit
 endif
 

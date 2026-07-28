@@ -1,4 +1,3 @@
-/* $Id: match.h 157221 2015-01-22 18:38:57Z twu $ */
 #ifndef MATCH_INCLUDED
 #define MATCH_INCLUDED
 

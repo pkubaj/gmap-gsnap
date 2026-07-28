@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 2a18b54edb3e4bdd50b9c042a6489c24851d30aa $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -27,6 +26,9 @@ static int index1part_tr;
 
 
 #define MIN_SUPPORT_INDEL 6	/* Also defined in kmer-search.c */
+
+/* Turns out to worsen results */
+/* #define END_SUPPORT 18		-- Require transcript alignments to go this far to ends */
 
 
 #ifdef CHECK_ASSERTIONS
@@ -673,6 +675,21 @@ combine_leftright_trpaths (T tstart_trpath, T tend_trpath, Compress_T query_comp
 			      intlistpool_trace(__FILE__,__LINE__));
 	Junction_list_gc(&junctions,listpool,pathpool);
 	
+#if 0
+      } else if (Intlist_head(tr_endpoints) > END_SUPPORT || querylength - Intlist_last_value(tr_endpoints) > END_SUPPORT) {
+	/* Want pretty good alignments, especially since we pair up
+	   ends by transcript, which can preclude finding better
+	   genomic alignments */
+	debug13(printf("++ Combined trpath has poor endpoints %s\n",Intlist_to_string(tr_endpoints)));
+	Intlistpool_free_list(&nmismatches,intlistpool
+			      intlistpool_trace(__FILE__,__LINE__));
+	Uintlistpool_free_list(&trdiagonals,uintlistpool
+			       uintlistpool_trace(__FILE__,__LINE__));
+	Intlistpool_free_list(&tr_endpoints,intlistpool
+			      intlistpool_trace(__FILE__,__LINE__));
+	Junction_list_gc(&junctions,listpool,pathpool);
+#endif
+
       } else {
 	trpath = Trpath_create(tr_endpoints,trdiagonals,nmismatches,junctions,
 			       tplusp,tstart_trpath->trnum,tstart_trpath->troffset,tstart_trpath->trhigh,
@@ -717,7 +734,9 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
 
   bool want_lowest_coordinate_tr_p;
 
-  if (transcript_genestrand > 0) {
+  if (middle_trdiagonal < (Trcoord_T) querylength) {
+    return (T) NULL;
+  } else if (transcript_genestrand > 0) {
     /* gplus */
     want_lowest_coordinate_tr_p = true;
   } else {
@@ -925,6 +944,7 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
     *partialp = false;
     Trpath_eval_nmatches(&(*found_score),trpath,querylength,query_compress_tr);
   }
+
   *partialp = false;
 
   debug13(printf("Returning result of combine_leftright_trpaths\n"));

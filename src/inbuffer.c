@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: efecfcbf5f5f3bc753a0d69f85834f01f118b034 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -93,6 +92,7 @@ struct T {
   List_T overflow_tail;
 #endif
 
+  double skip_prob;
   unsigned int part_modulus;
   unsigned int part_interval;
 };
@@ -120,6 +120,7 @@ Inbuffer_cmdline (char *queryseq, int querylength, Genome_T genome, Genome_T gen
   new->user_pairalign_p = false;
   new->user_genomes = (List_T) NULL;
 
+  new->skip_prob = 0.0;
   new->part_modulus = 0;
   new->part_interval = 1;
 
@@ -163,9 +164,14 @@ Inbuffer_new (int nextchar, FILE *input,
 #if !defined(GFILTER) && !defined(GEXACT) && !defined(GSNAP)
 	      bool user_pairalign_p, List_T user_genomes,
 #endif
+	      double skip_prob, unsigned int seed,
 	      unsigned int part_modulus, unsigned int part_interval) {
 
   T new = (T) MALLOC(sizeof(*new));
+
+  if (seed != 0) {
+    srand(seed);			/* Needed for calls to rand() for skip_prob */
+  }
 
   new->input = input;
 #if defined(GEXACT)
@@ -222,6 +228,7 @@ Inbuffer_new (int nextchar, FILE *input,
   new->overflow_tail = (List_T) NULL;
 #endif
 
+  new->skip_prob = skip_prob;
   new->part_modulus = part_modulus;
   new->part_interval = part_interval;
 
@@ -248,6 +255,29 @@ Inbuffer_free (T *old) {
   }
   return;
 }
+
+
+static bool
+determine_skipp (T this) {
+  if (this->skip_prob > 0.0) {
+    if (rand() / (RAND_MAX + 1.0) < this->skip_prob) {
+      return true;
+    } else {
+      return false;
+    }
+
+  } else if (this->part_interval > 0) {
+    if (this->inputid % this->part_interval != this->part_modulus) {
+      return true;
+    } else {
+      return false;
+    }
+
+  } else {
+    return false;
+  }
+}
+
 
 
 #if defined(GEXACT)
@@ -280,7 +310,7 @@ fill_buffer (T this) {
 #endif
 				     /*interleavedp*/false,
 				     this->read_files_command,&this->files,&this->nfiles,single_cell_p,
-				     skipp = (this->inputid % this->part_interval != this->part_modulus))) != NULL) {
+				     skipp = determine_skipp(this))) != NULL) {
     if (skipp) {
 #if 0
       /* Shortread procedures won't allocate in this situation */
@@ -323,7 +353,7 @@ fill_buffer (T this) {
 #endif
 				     this->interleavedp,
 				     this->read_files_command,&this->files,&this->nfiles,single_cell_p,
-				     skipp = (this->inputid % this->part_interval != this->part_modulus))) != NULL) {
+				     skipp = determine_skipp(this))) != NULL) {
     if (skipp) {
 #if 0
       /* Shortread procedures won't allocate in this situation */
@@ -389,7 +419,7 @@ fill_buffer (T this) {
 					       this->read_files_command,&this->files,&this->nfiles)) != NULL) &&
 	 (queryseq = Sequence_read_multifile(&this->nextchar,&this->input,
 					     this->read_files_command,&this->files,&this->nfiles)) != NULL) {
-    if (this->inputid % this->part_interval != this->part_modulus) {
+    if (determine_skipp(this) == true) {
       Sequence_free(&genomeseq);
       Sequence_free(&queryseq);
 

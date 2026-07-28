@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: stage2.c 225436 2022-12-07 01:34:49Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

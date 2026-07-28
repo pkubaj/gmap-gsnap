@@ -1,4 +1,3 @@
-/* $Id: gregion.h 212659 2018-01-20 00:58:14Z twu $ */
 #ifndef GREGION_INCLUDED
 #define GREGION_INCLUDED
 

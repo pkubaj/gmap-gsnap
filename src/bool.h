@@ -1,10 +1,10 @@
-/* $Id: bool.h 223423 2020-11-04 17:38:52Z twu $ */
 #ifndef BOOL_INCLUDED
 #define BOOL_INCLUDED
 
+#if __STDC_VERSION__ < 202311L
 /* typedef enum{false,true} bool; */
-
 typedef unsigned char bool;
+#endif
 
 #define false 0
 #define true 1

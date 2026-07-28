@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 08544b2c6a4e2e35b8d04cfa3b8f2b0d6cbe8242 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -19,6 +18,8 @@ static char rcsid[] = "$Id: 08544b2c6a4e2e35b8d04cfa3b8f2b0d6cbe8242 $";
 #include "mem.h"
 #include "types.h"		/* Needed for HAVE_64_BIT */
 #include "univcoord.h"
+
+#include "genomebits_mismatches.h" /* For MISMATCH_EXTRA */
 
 #include "reader.h"
 #include "oligo.h"
@@ -183,278 +184,118 @@ static Transcriptome_T transcriptome;
 
 
 #define T Stage1_T
-T
-Stage1_new (char *queryuc_ptr, int querylength, bool first_read_p) {
-  T new = (T) MALLOC(sizeof(*new));
 
-  int overhang = index1interval - 1;
-  int overhang_tr = index1interval_tr - 1;
 
-  /* Maximum number of localdb regions possible, based on region size of 65536 bp */
-  int max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
-  int max_nstreams = max_localdb_nregions * querylength;
+static void
+Stage1_init_computation (T this) {
 
-  if (max_nstreams < 2 * querylength) {
-    /* For tplus and tminus */
-    max_nstreams = 2 * querylength;
-  }
+  this->sense_trnums = (Trnum_T *) NULL;
+  this->sense_troffsets = (Trcoord_T *) NULL;
+  this->sense_trhighs = (Trcoord_T *) NULL;
+  this->_sense_trdiagonals = (Trcoord_T *) NULL;
+  this->sense_tstarts = (int *) NULL;
+  this->sense_tends = (int *) NULL;
+  this->n_sense_trdiagonals = 0;
 
-  new->first_read_p = first_read_p;
+  this->antisense_trnums = (Trnum_T *) NULL;
+  this->antisense_troffsets = (Trcoord_T *) NULL;
+  this->antisense_trhighs = (Trcoord_T *) NULL;
+  this->_antisense_trdiagonals = (Trcoord_T *) NULL;
+  this->antisense_tstarts = (int *) NULL;
+  this->antisense_tends = (int *) NULL;
+  this->n_antisense_trdiagonals = 0;
 
-  new->sense_trnums = (Trnum_T *) NULL;
-  new->sense_troffsets = (Trcoord_T *) NULL;
-  new->sense_trhighs = (Trcoord_T *) NULL;
-  new->_sense_trdiagonals = (Trcoord_T *) NULL;
-  new->sense_tstarts = (int *) NULL;
-  new->sense_tends = (int *) NULL;
-  new->n_sense_trdiagonals = 0;
+  this->partial_sense_trpaths = (List_T) NULL;
+  this->partial_antisense_trpaths = (List_T) NULL;
+  this->sense_trpaths = (List_T) NULL;
+  this->antisense_trpaths = (List_T) NULL;
+  this->exact_paths_computed_p = false;
 
-  new->antisense_trnums = (Trnum_T *) NULL;
-  new->antisense_troffsets = (Trcoord_T *) NULL;
-  new->antisense_trhighs = (Trcoord_T *) NULL;
-  new->_antisense_trdiagonals = (Trcoord_T *) NULL;
-  new->antisense_tstarts = (int *) NULL;
-  new->antisense_tends = (int *) NULL;
-  new->n_antisense_trdiagonals = 0;
+  this->all_univdiagonals_gplus = (Univcoord_T *) NULL;
+  this->all_univdiagonals_gminus = (Univcoord_T *) NULL;
+  this->all_auxinfo_gplus = (Auxinfo_T *) NULL;
+  this->all_auxinfo_gminus = (Auxinfo_T *) NULL;
+  this->all_pathstores_gplus = (Pathstore_T *) NULL;
+  this->all_pathstores_gminus = (Pathstore_T *) NULL;
+  this->all_nunivdiagonals_gplus = 0;
+  this->all_nunivdiagonals_gminus = 0;
 
-  new->partial_sense_trpaths = (List_T) NULL;
-  new->partial_antisense_trpaths = (List_T) NULL;
-  new->sense_trpaths = (List_T) NULL;
-  new->antisense_trpaths = (List_T) NULL;
+  this->extension_gplus = (Univcoord_T *) NULL;
+  this->extension_qstart_gplus = (int *) NULL;
+  this->extension_qend_gplus = (int *) NULL;
+  this->nextension_gplus = 0;
 
-  new->exact_paths_computed_p = false;
+  this->extension_gminus = (Univcoord_T *) NULL;
+  this->extension_qstart_gminus = (int *) NULL;
+  this->extension_qend_gminus = (int *) NULL;
+  this->nextension_gminus = 0;
 
-  new->all_univdiagonals_gplus = (Univcoord_T *) NULL;
-  new->all_univdiagonals_gminus = (Univcoord_T *) NULL;
-  new->all_auxinfo_gplus = (Auxinfo_T *) NULL;
-  new->all_auxinfo_gminus = (Auxinfo_T *) NULL;
-  new->all_pathstores_gplus = (Pathstore_T *) NULL;
-  new->all_pathstores_gminus = (Pathstore_T *) NULL;
-  new->all_nunivdiagonals_gplus = 0;
-  new->all_nunivdiagonals_gminus = 0;
+  this->exhaustive_gplus = (Univcoord_T *) NULL; /* aligned */
+  this->exhaustive_qstart_gplus = (int *) NULL;
+  this->exhaustive_qend_gplus = (int *) NULL;
+  this->exhaustive_counts_gplus = (int *) NULL;
+  this->nexhaustive_gplus = 0;
 
-  new->extension_gplus = (Univcoord_T *) NULL;
-  new->extension_qstart_gplus = (int *) NULL;
-  new->extension_qend_gplus = (int *) NULL;
-  new->nextension_gplus = 0;
+  this->exhaustive_gminus = (Univcoord_T *) NULL; /* aligned */
+  this->exhaustive_qstart_gminus = (int *) NULL;
+  this->exhaustive_qend_gminus = (int *) NULL;
+  this->exhaustive_counts_gminus = (int *) NULL;
+  this->nexhaustive_gminus = 0;
 
-  new->extension_gminus = (Univcoord_T *) NULL;
-  new->extension_qstart_gminus = (int *) NULL;
-  new->extension_qend_gminus = (int *) NULL;
-  new->nextension_gminus = 0;
+  /* this->unsolved_sense_paths_gplus = (List_T) NULL; */
+  /* this->unsolved_sense_paths_gminus = (List_T) NULL; */
+  /* this->unsolved_antisense_paths_gplus = (List_T) NULL; */
+  /* this->unsolved_antisense_paths_gminus = (List_T) NULL; */
 
-  new->exhaustive_gplus = (Univcoord_T *) NULL; /* aligned */
-  new->exhaustive_qstart_gplus = (int *) NULL;
-  new->exhaustive_qend_gplus = (int *) NULL;
-  new->exhaustive_counts_gplus = (int *) NULL;
-  new->nexhaustive_gplus = 0;
-
-  new->exhaustive_gminus = (Univcoord_T *) NULL; /* aligned */
-  new->exhaustive_qstart_gminus = (int *) NULL;
-  new->exhaustive_qend_gminus = (int *) NULL;
-  new->exhaustive_counts_gminus = (int *) NULL;
-  new->nexhaustive_gminus = 0;
-
-  /* new->unsolved_sense_paths_gplus = (List_T) NULL; */
-  /* new->unsolved_sense_paths_gminus = (List_T) NULL; */
-  /* new->unsolved_antisense_paths_gplus = (List_T) NULL; */
-  /* new->unsolved_antisense_paths_gminus = (List_T) NULL; */
-
-  /* new->unextended_sense_paths_gplus = (List_T) NULL; */
-  /* new->unextended_sense_paths_gminus = (List_T) NULL; */
-  /* new->unextended_antisense_paths_gplus = (List_T) NULL; */
-  /* new->unextended_antisense_paths_gminus = (List_T) NULL; */
+  /* this->unextended_sense_paths_gplus = (List_T) NULL; */
+  /* this->unextended_sense_paths_gminus = (List_T) NULL; */
+  /* this->unextended_antisense_paths_gplus = (List_T) NULL; */
+  /* this->unextended_antisense_paths_gminus = (List_T) NULL; */
 
 
   /* Completed paths are stored as arrays */
-  new->sense_paths_gplus = (Path_T *) NULL;
-  new->sense_paths_gminus = (Path_T *) NULL;
-  new->antisense_paths_gplus = (Path_T *) NULL;
-  new->antisense_paths_gminus = (Path_T *) NULL;
+  this->sense_paths_gplus = (Path_T *) NULL;
+  this->sense_paths_gminus = (Path_T *) NULL;
+  this->antisense_paths_gplus = (Path_T *) NULL;
+  this->antisense_paths_gminus = (Path_T *) NULL;
 
-#if 0
-  new->sense_coords_gplus = (Univcoord_T *) NULL; /* aligned */
-  new->sense_coords_gminus = (Univcoord_T *) NULL; /* aligned */
-  new->antisense_coords_gplus = (Univcoord_T *) NULL; /* aligned */
-  new->antisense_coords_gminus = (Univcoord_T *) NULL; /* aligned */
 
-  new->sense_indices_gplus = (int *) NULL;
-  new->sense_indices_gminus = (int *) NULL;
-  new->antisense_indices_gplus = (int *) NULL;
-  new->antisense_indices_gminus = (int *) NULL;
+  /* Uses Listpool_T procedures */
+  this->queryfwd_plus_set = (List_T) NULL;
+  this->queryfwd_minus_set = (List_T) NULL;
+  this->queryrev_plus_set = (List_T) NULL;
+  this->queryrev_minus_set = (List_T) NULL;
 
-  new->n_sense_paths_gplus = 0;
-  new->n_sense_paths_gminus = 0;
-  new->n_antisense_paths_gplus = 0;
-  new->n_antisense_paths_gminus = 0;
+  this->tr_queryfwd_plus_set = (List_T) NULL;
+  this->tr_queryfwd_minus_set = (List_T) NULL;
+  this->tr_queryrev_plus_set = (List_T) NULL;
+  this->tr_queryrev_minus_set = (List_T) NULL;
 
-  new->nunique_sense_coords_gplus = 0;
-  new->nunique_sense_coords_gminus = 0;
-  new->nunique_antisense_coords_gplus = 0;
-  new->nunique_antisense_coords_gminus = 0;
-#endif
+  this->exact_paths_computed_p = false;
+  this->all_oligos_gen_filledp = false;
+  this->all_positions_gen_filledp = false;
 
-  new->reader = Reader_new(queryuc_ptr,/*querystart*/0,/*queryend*/querylength,/*oligosize*/index1part);
+  return;
+}
 
-  new->validp = (bool *) CALLOC(querylength+overhang,sizeof(bool));
 
-  new->all_oligos_gen_filledp = false;
-  new->all_positions_gen_filledp = false;
+T
+Stage1_new (bool first_read_p) {
+  T new = (T) MALLOC(sizeof(*new));
 
-  new->forward_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
-  new->revcomp_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
+  new->first_read_p = first_read_p;
+
+  new->reader = Reader_new(/*oligosize*/index1part);
 
   if (transcriptome == NULL) {
     new->tr_reader = (Reader_T) NULL;
-    new->tr_validp = (bool *) NULL;
-    new->tr_forward_oligos = new->tr_revcomp_oligos = (Oligospace_T *) NULL;
-
   } else if (index1part_tr == index1part) {
     new->tr_reader = new->reader;
-    new->tr_validp = new->validp;
-    new->tr_forward_oligos = new->forward_oligos;
-    new->tr_revcomp_oligos = new->revcomp_oligos;
-
   } else {
-    new->tr_reader = Reader_new(queryuc_ptr,/*querystart*/0,/*queryend*/querylength,/*oligosize*/index1part_tr);
-    new->tr_validp = (bool *) CALLOC(querylength+overhang_tr,sizeof(bool));
-    new->tr_forward_oligos = (Oligospace_T *) MALLOC((querylength+overhang_tr)*sizeof(Oligospace_T));
-    new->tr_revcomp_oligos = (Oligospace_T *) MALLOC((querylength+overhang_tr)*sizeof(Oligospace_T));
+    new->tr_reader = Reader_new(/*oligosize*/index1part_tr);
   }
 
-  new->retrievedp_allocated = (bool *) CALLOC(2 * (querylength+overhang),sizeof(bool));
-  new->plus_retrievedp = &(new->retrievedp_allocated[overhang]);
-  new->minus_retrievedp = &(new->retrievedp_allocated[(querylength+overhang)+overhang]);
-
-#ifdef LARGE_GENOMES
-  new->positions_high_allocated = (unsigned char **) CALLOC(2 * (querylength+overhang),sizeof(unsigned char *));
-  new->plus_positions_high = &(new->positions_high_allocated[overhang]);
-  new->minus_positions_high = &(new->positions_high_allocated[(querylength+overhang)+overhang]);
-#endif
-  new->positions_allocated = (UINT4 **) CALLOC(2 * (querylength+overhang),sizeof(UINT4 *));
-  new->plus_positions = &(new->positions_allocated[overhang]);
-  new->minus_positions = &(new->positions_allocated[(querylength+overhang)+overhang]);
-
-  new->npositions_allocated = (int *) CALLOC(2 * (querylength+overhang),sizeof(int));
-  new->plus_npositions = &(new->npositions_allocated[overhang]);
-  new->minus_npositions = &(new->npositions_allocated[(querylength+overhang)+overhang]);
-  new->plus_diagterms = (int *) MALLOC(querylength*sizeof(int));
-  new->minus_diagterms = (int *) MALLOC(querylength*sizeof(int));
-
-  if (transcriptome == NULL) {
-    new->tr_retrievedp_allocated = (bool *) NULL;
-    new->tr_plus_retrievedp = new->tr_minus_retrievedp = (bool *) NULL;
-
-    new->tr_positions_allocated = (UINT4 **) NULL;
-    new->tr_plus_positions = new->tr_minus_positions = (UINT4 **) NULL;
-
-    new->tr_npositions_allocated = (int *) NULL;
-    new->tr_plus_npositions = new->tr_minus_npositions = (int *) NULL;
-
-  } else {
-    new->tr_retrievedp_allocated = (bool *) CALLOC(2 * (querylength+overhang_tr),sizeof(bool));
-    new->tr_plus_retrievedp = &(new->tr_retrievedp_allocated[overhang_tr]);
-    new->tr_minus_retrievedp = &(new->tr_retrievedp_allocated[(querylength+overhang_tr)+overhang_tr]);
-
-    new->tr_positions_allocated = (UINT4 **) CALLOC(2 * (querylength+overhang_tr),sizeof(UINT4 *));
-    new->tr_plus_positions = &(new->tr_positions_allocated[overhang_tr]);
-    new->tr_minus_positions = &(new->tr_positions_allocated[(querylength+overhang_tr)+overhang_tr]);
-
-    new->tr_npositions_allocated = (int *) CALLOC(2 * (querylength+overhang_tr),sizeof(int));
-    new->tr_plus_npositions = &(new->tr_npositions_allocated[overhang_tr]);
-    new->tr_minus_npositions = &(new->tr_npositions_allocated[(querylength+overhang_tr)+overhang_tr]);
-  }
-  new->tr_plus_diagterms = (int *) MALLOC(querylength*sizeof(int));
-  new->tr_minus_diagterms = (int *) MALLOC(querylength*sizeof(int));
-
-
-  /* Need to allocate (max_mismatches+MISMATCH_EXTRA), where
-     max_mismatches is provided to Genomebits_mismatches_left or
-     Genome_mismatches_right */
-  /* new->mismatch_positions_alloc = (int *) MALLOC((querylength+MISMATCH_EXTR)*sizeof(int)); */
-  new->positions_alloc = (int *) MALLOC((querylength+1)*sizeof(int));
-  new->indelinfo = Indelinfo_new(querylength);
-  new->spliceinfo = Spliceinfo_new(querylength);
-
-  /* mergeinfo_tr used only on trdiagonals, not for localdb */
-  new->mergeinfo_tr = Mergeinfo_uint4_new(querylength,/*max_localdb_distance*/0);
-#ifdef LARGE_GENOMES
-  new->mergeinfo = Mergeinfo_uint8_new(querylength,positive_gap_distance);
-#else
-  new->mergeinfo = Mergeinfo_uint4_new(querylength,positive_gap_distance);
-#endif
-
-  /* Memory previously allocated for Segment_identify in segment-search.c, and
-     Merge_diagonals in kmer-search.c (which needs four sets of
-     arrays) */
-#ifdef LARGE_GENOMES
-  new->stream_high_alloc = (unsigned char **) MALLOC(4*querylength*sizeof(unsigned char *));
-  new->gplus_stream_high_array_5 = &(new->stream_high_alloc[0]);
-  new->gminus_stream_high_array_5 = &(new->stream_high_alloc[querylength]);
-  new->gplus_stream_high_array_3 = &(new->stream_high_alloc[2*querylength]);
-  new->gminus_stream_high_array_3 = &(new->stream_high_alloc[3*querylength]);
-
-  new->stream_low_alloc = (UINT4 **) MALLOC(4*querylength*sizeof(UINT4 *));
-  new->gplus_stream_low_array_5 = &(new->stream_low_alloc[0]);
-  new->gminus_stream_low_array_5 = &(new->stream_low_alloc[querylength]);
-  new->gplus_stream_low_array_3 = &(new->stream_low_alloc[2*querylength]);
-  new->gminus_stream_low_array_3 = &(new->stream_low_alloc[3*querylength]);
-#endif
-
-  new->streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE;
-  MALLOC_ALIGN(new->streamspace_alloc,new->streamspace_max_alloc * sizeof(Univcoord_T)); /* aligned */
-
-  /* Previously allocated 4*querylength, for Kmer_exact2, when shortsplice_dist < 65536 */
-  new->streamptr_alloc = (Univcoord_T **) MALLOC(max_nstreams*sizeof(Univcoord_T *));
-
-#if 0
-  /* Previously used for Kmer_exact2 */
-  new->gplus_stream_array_5 = &(new->streamptr_alloc[0]);
-  new->gminus_stream_array_5 = &(new->streamptr_alloc[querylength]);
-  new->gplus_stream_array_3 = &(new->streamptr_alloc[2*querylength]);
-  new->gminus_stream_array_3 = &(new->streamptr_alloc[3*querylength]);
-
-#ifdef LARGE_GENOMES
-  new->tplus_stream_array = new->gplus_stream_low_array_5;
-  new->tminus_stream_array = new->gminus_stream_low_array_5;
-#else
-  new->tplus_stream_array = new->gplus_stream_array_5;
-  new->tminus_stream_array = new->gminus_stream_array_5;
-#endif
-#endif
-
-  new->streamsize_alloc = (int *) MALLOC(max_nstreams * sizeof(int));
-  new->tplus_streamsize_array = &(new->streamsize_alloc[0]);
-  new->tminus_streamsize_array = &(new->streamsize_alloc[querylength]);
-
-
-  /* Used for Kmer_exact2 */
-  /* new->gplus_streamsize_array_5 = &(new->streamsize_alloc[0]); */
-  /* new->gminus_streamsize_array_5 = &(new->streamsize_alloc[querylength]); */
-  /* new->gplus_streamsize_array_3 = &(new->streamsize_alloc[2*querylength]); */
-  /* new->gminus_streamsize_array_3 = &(new->streamsize_alloc[3*querylength]); */
-
-  /* Previously needed 4*querylength for Kmer_exact2 */
-  new->querypos_diagterm_alloc = (int *) MALLOC(2*querylength*sizeof(int));
-  new->tplus_diagterm_array = &(new->querypos_diagterm_alloc[0]);
-  new->tminus_diagterm_array = &(new->querypos_diagterm_alloc[querylength]);
-
-  /* Used for Kmer_exact2 */
-  /* new->gplus_diagterm_array_5 = &(new->querypos_diagterm_alloc[0]); */
-  /* new->gminus_diagterm_array_5 = &(new->querypos_diagterm_alloc[querylength]); */
-  /* new->gplus_diagterm_array_3 = &(new->querypos_diagterm_alloc[2*querylength]); */
-  /* new->gminus_diagterm_array_3 = &(new->querypos_diagterm_alloc[3*querylength]); */
-
-  /* Uses Listpool_T procedures */
-  new->queryfwd_plus_set = (List_T) NULL;
-  new->queryfwd_minus_set = (List_T) NULL;
-  new->queryrev_plus_set = (List_T) NULL;
-  new->queryrev_minus_set = (List_T) NULL;
-
-  new->tr_queryfwd_plus_set = (List_T) NULL;
-  new->tr_queryfwd_minus_set = (List_T) NULL;
-  new->tr_queryrev_plus_set = (List_T) NULL;
-  new->tr_queryrev_minus_set = (List_T) NULL;
+  Stage1_init_computation(new);
 
   return new;
 }
@@ -1512,9 +1353,9 @@ Stage1_list_all_univdiagonals (T this) {
   Path_T path;
 
   printf("=====%s Dump of all univdiagonals=====\n",this->first_read_p ? "5'" : "3'");
-  printf(">plus all univdiagonals\n");
+  printf(">plus all univdiagonals (%d)\n",this->all_nunivdiagonals_gplus);
   for (i = 0; i < this->all_nunivdiagonals_gplus; i++) {
-    printf("%u\n",this->all_univdiagonals_gplus[i]);
+    printf("%u.  Auxinfo methods:",this->all_univdiagonals_gplus[i]);
     for (auxinfo = this->all_auxinfo_gplus[i]; auxinfo != NULL; auxinfo = auxinfo->rest) {
       printf(" %s",Method_string(auxinfo->method));
     }
@@ -1547,9 +1388,9 @@ Stage1_list_all_univdiagonals (T this) {
     }
   }
 
-  printf(">minus all univdiagonals\n");
+  printf(">minus all univdiagonals (%d)\n",this->all_nunivdiagonals_gminus);
   for (i = 0; i < this->all_nunivdiagonals_gminus; i++) {
-    printf("%u\n",this->all_univdiagonals_gminus[i]);
+    printf("%u.  Auxinfo methods:",this->all_univdiagonals_gminus[i]);
     for (auxinfo = this->all_auxinfo_gminus[i]; auxinfo != NULL; auxinfo = auxinfo->rest) {
       printf(" %s",Method_string(auxinfo->method));
     }
@@ -1594,20 +1435,197 @@ Stage1_trdiagonals_gc (T this) {
   FREE(this->sense_trnums);
   FREE(this->sense_troffsets);
   FREE(this->sense_trhighs);
+  this->sense_trnums = (Trnum_T *) NULL;
+  this->sense_troffsets = (Trcoord_T *) NULL;
+  this->sense_trhighs = (Trcoord_T *) NULL;
 
   FREE_ALIGN(this->_sense_trdiagonals);
+  this->_sense_trdiagonals = (Trcoord_T *) NULL;
+  this->n_sense_trdiagonals = 0;
 
   FREE(this->sense_tstarts);
   FREE(this->sense_tends);
+  this->sense_tstarts = (int *) NULL;
+  this->sense_tends = (int *) NULL;
 
   FREE(this->antisense_trnums);
   FREE(this->antisense_troffsets);
   FREE(this->antisense_trhighs);
+  this->antisense_trnums = (Trnum_T *) NULL;
+  this->antisense_troffsets = (Trcoord_T *) NULL;
+  this->antisense_trhighs = (Trcoord_T *) NULL;
 
   FREE_ALIGN(this->_antisense_trdiagonals);
+  this->_antisense_trdiagonals = (Trcoord_T *) NULL;
+  this->n_antisense_trdiagonals = 0;
 
   FREE(this->antisense_tstarts);
   FREE(this->antisense_tends);
+  this->antisense_tstarts = (int *) NULL;
+  this->antisense_tends = (int *) NULL;
+
+  return;
+}
+
+
+/* Takes care of items that depend on pools or allocated through
+   computations, so need to call this before resetting memory pools.
+   Other fields in Stage3_free_nonpool can be handled after resetting
+   memory pools */
+static void
+Stage1_free_computation (T this, Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
+			 Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool, Intlistpool_T intlistpool,
+			 Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Trpathpool_T trpathpool,
+			 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
+
+  Stage1_trdiagonals_gc(this);
+
+  FREE_ALIGN(this->all_univdiagonals_gplus);
+  FREE_ALIGN(this->all_univdiagonals_gminus);
+  this->all_univdiagonals_gplus = (Univcoord_T *) NULL;
+  this->all_univdiagonals_gminus = (Univcoord_T *) NULL;
+
+  FREE(this->extension_gplus); /* Not aligned */
+  FREE(this->extension_qstart_gplus);
+  FREE(this->extension_qend_gplus);
+  this->extension_gplus = (Univcoord_T *) NULL;
+  this->extension_qstart_gplus = (int *) NULL;
+  this->extension_qend_gplus = (int *) NULL;
+  this->nextension_gplus = 0;
+
+  FREE(this->extension_gminus);
+  FREE(this->extension_qstart_gminus);
+  FREE(this->extension_qend_gminus);
+  this->extension_gminus = (Univcoord_T *) NULL;
+  this->extension_qstart_gminus = (int *) NULL;
+  this->extension_qend_gminus = (int *) NULL;
+  this->nextension_gminus = 0;
+
+  FREE_ALIGN(this->exhaustive_gplus);
+  FREE(this->exhaustive_qstart_gplus);
+  FREE(this->exhaustive_qend_gplus);
+  FREE(this->exhaustive_counts_gplus);
+  this->exhaustive_gplus = (Univcoord_T *) NULL; /* aligned */
+  this->exhaustive_qstart_gplus = (int *) NULL;
+  this->exhaustive_qend_gplus = (int *) NULL;
+  this->exhaustive_counts_gplus = (int *) NULL;
+  this->nexhaustive_gplus = 0;
+
+  FREE_ALIGN(this->exhaustive_gminus);
+  FREE(this->exhaustive_qstart_gminus);
+  FREE(this->exhaustive_qend_gminus);
+  FREE(this->exhaustive_counts_gminus);
+  this->exhaustive_gminus = (Univcoord_T *) NULL; /* aligned */
+  this->exhaustive_qstart_gminus = (int *) NULL;
+  this->exhaustive_qend_gminus = (int *) NULL;
+  this->exhaustive_counts_gminus = (int *) NULL;
+  this->nexhaustive_gminus = 0;
+
+  Pathstore_gc(this->all_pathstores_gplus,this->all_nunivdiagonals_gplus,
+	       pathstorepool,intlistpool,univcoordlistpool,listpool,pathpool,
+	       transcriptpool,hitlistpool);
+  Pathstore_gc(this->all_pathstores_gminus,this->all_nunivdiagonals_gminus,
+	       pathstorepool,intlistpool,univcoordlistpool,listpool,pathpool,
+	       transcriptpool,hitlistpool);
+  this->all_pathstores_gplus = (Pathstore_T *) NULL;
+  this->all_pathstores_gminus = (Pathstore_T *) NULL;
+
+  Auxinfo_gc(this->all_auxinfo_gplus,this->all_nunivdiagonals_gplus,
+	     univdiagpool,auxinfopool);
+  Auxinfo_gc(this->all_auxinfo_gminus,this->all_nunivdiagonals_gminus,
+	     univdiagpool,auxinfopool);
+  this->all_auxinfo_gplus = (Auxinfo_T *) NULL;
+  this->all_auxinfo_gminus = (Auxinfo_T *) NULL;
+
+  Trpath_gc(&this->partial_sense_trpaths,
+	    intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
+  Trpath_gc(&this->partial_antisense_trpaths,
+	    intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
+  this->partial_sense_trpaths = (List_T) NULL;
+  this->partial_antisense_trpaths = (List_T) NULL;
+
+  Trpath_gc(&this->sense_trpaths,
+	    intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
+  Trpath_gc(&this->antisense_trpaths,
+	    intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
+  this->sense_trpaths = (List_T) NULL;
+  this->antisense_trpaths = (List_T) NULL;
+
+  Elt_gc(&this->queryfwd_plus_set,listpool);
+  Elt_gc(&this->queryfwd_minus_set,listpool);
+  Elt_gc(&this->queryrev_plus_set,listpool);
+  Elt_gc(&this->queryrev_minus_set,listpool);
+
+  Tr_elt_gc(&this->tr_queryfwd_plus_set,listpool,trdiagpool);
+  Tr_elt_gc(&this->tr_queryfwd_minus_set,listpool,trdiagpool);
+  Tr_elt_gc(&this->tr_queryrev_plus_set,listpool,trdiagpool);
+  Tr_elt_gc(&this->tr_queryrev_minus_set,listpool,trdiagpool);
+
+  return;
+}
+
+
+
+static void
+Stage1_free_sequence (T this) {
+  FREE(this->mismatch_positions_alloc);
+  FREE(this->positions_alloc);
+  Indelinfo_free(&this->indelinfo);
+  Spliceinfo_free(&this->spliceinfo);
+
+  Mergeinfo_uint4_free(&this->mergeinfo_tr);
+#ifdef LARGE_GENOMES
+  Mergeinfo_uint8_free(&this->mergeinfo);
+#else
+  Mergeinfo_uint4_free(&this->mergeinfo);
+#endif
+
+#ifdef LARGE_GENOMES
+  FREE(this->stream_high_alloc);
+  FREE(this->stream_low_alloc);
+#endif
+
+  FREE(this->streamptr_alloc);
+  FREE(this->streamsize_alloc);
+
+  FREE(this->querypos_diagterm_alloc);
+  FREE(this->retrievedp_allocated);
+
+#ifdef LARGE_GENOMES
+  FREE(this->positions_high_allocated);
+#endif
+  FREE(this->positions_allocated);
+  FREE(this->npositions_allocated);
+
+  FREE(this->plus_diagterms);
+  FREE(this->minus_diagterms);
+
+  if (transcriptome == NULL) {
+    /* Skip */
+
+  } else {
+    FREE(this->tr_retrievedp_allocated);
+    FREE(this->tr_positions_allocated);
+    FREE(this->tr_npositions_allocated);
+
+    FREE(this->tr_plus_diagterms);
+    FREE(this->tr_minus_diagterms);
+  }
+
+  FREE(this->validp);
+  FREE(this->forward_oligos);
+  FREE(this->revcomp_oligos);
+
+  if (transcriptome == NULL) {
+    /* Skip */
+  } else if (index1part_tr == index1part) {
+    /* Skip */
+  } else {
+    FREE(this->tr_validp);
+    FREE(this->tr_forward_oligos);
+    FREE(this->tr_revcomp_oligos);
+ }
 
   return;
 }
@@ -1618,149 +1636,198 @@ Stage1_free (T *old, Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 	     Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool, Intlistpool_T intlistpool,
 	     Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Trpathpool_T trpathpool,
-	     Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool, bool free_paths_p) {
+	     Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
 
-  /* Stage1hr_check(*old); */
+  Stage1_free_sequence(*old);
+  Stage1_free_computation(*old,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+			  intlistpool,uintlistpool,univcoordlistpool,
+			  listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
 
-  if (*old) {
-    Stage1_trdiagonals_gc(*old);
-
-    Pathstore_gc((*old)->all_pathstores_gplus,(*old)->all_nunivdiagonals_gplus,
-		 pathstorepool,intlistpool,univcoordlistpool,listpool,pathpool,
-		 transcriptpool,hitlistpool);
-
-    Pathstore_gc((*old)->all_pathstores_gminus,(*old)->all_nunivdiagonals_gminus,
-		 pathstorepool,intlistpool,univcoordlistpool,listpool,pathpool,
-		 transcriptpool,hitlistpool);
-
-    Auxinfo_gc((*old)->all_auxinfo_gplus,(*old)->all_nunivdiagonals_gplus,
-	       univdiagpool,auxinfopool);
-    Auxinfo_gc((*old)->all_auxinfo_gminus,(*old)->all_nunivdiagonals_gminus,
-	       univdiagpool,auxinfopool);
-
-    FREE_ALIGN((*old)->all_univdiagonals_gplus);
-    FREE_ALIGN((*old)->all_univdiagonals_gminus);
-
-    FREE((*old)->extension_gplus); /* Not aligned */
-    FREE((*old)->extension_qstart_gplus);
-    FREE((*old)->extension_qend_gplus);
-    FREE((*old)->extension_gminus);
-    FREE((*old)->extension_qstart_gminus);
-    FREE((*old)->extension_qend_gminus);
-
-    FREE_ALIGN((*old)->exhaustive_gplus);
-    FREE((*old)->exhaustive_qstart_gplus);
-    FREE((*old)->exhaustive_qend_gplus);
-    FREE((*old)->exhaustive_counts_gplus);
-
-    FREE_ALIGN((*old)->exhaustive_gminus);
-    FREE((*old)->exhaustive_qstart_gminus);
-    FREE((*old)->exhaustive_qend_gminus);
-    FREE((*old)->exhaustive_counts_gminus);
-
-    if (free_paths_p == true) {
-      Trpath_gc(&(*old)->partial_sense_trpaths,
-	       intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
-      Trpath_gc(&(*old)->partial_antisense_trpaths,
-		intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
-
-      Trpath_gc(&(*old)->sense_trpaths,
-	       intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
-      Trpath_gc(&(*old)->antisense_trpaths,
-		intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
-    }
-
-#if 0
-    /* Now pointing to data structure, and not copying values */
-    for (i = 0; i <= query_lastpos; i++) {
-      if ((*old)->plus_retrievedp[i] == true) {
-#ifdef LARGE_GENOMES
-	FREE((*old)->plus_positions_high[i]);
-#endif
-	FREE((*old)->plus_positions[i]);
-      }
-
-      if ((*old)->minus_retrievedp[i] == true) {
-#ifdef LARGE_GENOMES
-	FREE((*old)->minus_positions_high[i]);
-#endif
-	FREE((*old)->minus_positions[i]);
-      }
-    }
-#endif
-
-    /* FREE((*old)->mismatch_positions_alloc); */
-    FREE((*old)->positions_alloc);
-
-    Mergeinfo_uint4_free(&(*old)->mergeinfo_tr);
-#ifdef LARGE_GENOMES
-    Mergeinfo_uint8_free(&(*old)->mergeinfo);
-#else
-    Mergeinfo_uint4_free(&(*old)->mergeinfo);
-#endif
-    Spliceinfo_free(&(*old)->spliceinfo);
-    Indelinfo_free(&(*old)->indelinfo);
-
-#ifdef LARGE_GENOMES
-    FREE((*old)->stream_high_alloc);
-    FREE((*old)->stream_low_alloc);
-#endif
-    FREE_ALIGN((*old)->streamspace_alloc);
-    FREE((*old)->streamptr_alloc);
-    FREE((*old)->streamsize_alloc);
-    FREE((*old)->querypos_diagterm_alloc);
-
-
-    FREE((*old)->retrievedp_allocated);
-#ifdef LARGE_GENOMES
-    FREE((*old)->positions_high_allocated);
-#endif
-    FREE((*old)->positions_allocated);
-    FREE((*old)->npositions_allocated);
-    if (transcriptome == NULL) {
-      /* Skip */
-    } else {
-      FREE((*old)->tr_retrievedp_allocated);
-      FREE((*old)->tr_positions_allocated);
-      FREE((*old)->tr_npositions_allocated);
-    }
-
-    FREE((*old)->plus_diagterms);
-    FREE((*old)->minus_diagterms);
-    FREE((*old)->tr_plus_diagterms);
-    FREE((*old)->tr_minus_diagterms);
-
-    FREE((*old)->revcomp_oligos);
-    FREE((*old)->forward_oligos);
-    FREE((*old)->validp);
-    Reader_free(&(*old)->reader);
-
-    if (transcriptome == NULL) {
-      /* Skip */
-    } else if (index1part_tr == index1part) {
-      /* Skip */
-    } else {
-      FREE((*old)->tr_revcomp_oligos);
-      FREE((*old)->tr_forward_oligos);
-      FREE((*old)->tr_validp);
-      Reader_free(&(*old)->tr_reader);
-    }
-
-    Elt_gc(&(*old)->queryfwd_plus_set,listpool,univdiagpool);
-    Elt_gc(&(*old)->queryfwd_minus_set,listpool,univdiagpool);
-    Elt_gc(&(*old)->queryrev_plus_set,listpool,univdiagpool);
-    Elt_gc(&(*old)->queryrev_minus_set,listpool,univdiagpool);
-
-    Tr_elt_gc(&(*old)->tr_queryfwd_plus_set,listpool,trdiagpool);
-    Tr_elt_gc(&(*old)->tr_queryfwd_minus_set,listpool,trdiagpool);
-    Tr_elt_gc(&(*old)->tr_queryrev_plus_set,listpool,trdiagpool);
-    Tr_elt_gc(&(*old)->tr_queryrev_minus_set,listpool,trdiagpool);
-
-    FREE(*old);
+  if (transcriptome == NULL) {
+    /* Skip */
+  } else if (index1part_tr == index1part) {
+    /* Skip */
+  } else {
+    Reader_free(&(*old)->tr_reader);
   }
+
+  Reader_free(&(*old)->reader);
+  FREE(*old);
 
   return;
 }
+
+
+/* Previously, tried to re-use old memory if querylength has not
+   changed, but this seems to result in growth in virtual memory usage */
+void
+Stage1_set_sequence (T this, Shortread_T queryseq, Localdb_T localdb) {
+
+  char *queryuc_ptr = Shortread_queryuc_ptr(queryseq);
+  int querylength = Shortread_fulllength(queryseq);
+
+  int overhang = index1interval - 1;
+  int overhang_tr = index1interval_tr - 1;
+
+  /* Maximum number of localdb regions possible, based on region size of 65536 bp */
+  int max_nstreams, max_localdb_nregions;
+
+  Reader_set_sequence(this->reader,queryuc_ptr,/*querystart*/0,/*queryend*/querylength);
+
+  /* Need to allocate (max_mismatches+MISMATCH_EXTRA), where
+     max_mismatches is provided to Genomebits_mismatches_left or
+     Genome_mismatches_right */
+  this->mismatch_positions_alloc = (int *) MALLOC((querylength+MISMATCH_EXTRA)*sizeof(int));
+  this->positions_alloc = (int *) MALLOC((querylength+1)*sizeof(int));
+  this->indelinfo = Indelinfo_new(querylength);
+  this->spliceinfo = Spliceinfo_new(querylength);
+
+  this->mergeinfo_tr = Mergeinfo_uint4_new(querylength,/*max_localdb_distance*/0);
+#ifdef LARGE_GENOMES
+  this->mergeinfo = Mergeinfo_uint8_new(querylength,positive_gap_distance);
+#else
+  this->mergeinfo = Mergeinfo_uint4_new(querylength,positive_gap_distance);
+#endif
+
+  /* Memory previously allocated for Segment_identify in segment-search.c, and
+     Merge_diagonals in kmer-search.c (which needs four sets of
+     arrays) */
+#ifdef LARGE_GENOMES
+  this->stream_high_alloc = (unsigned char **) MALLOC(4*querylength*sizeof(unsigned char *));
+  this->gplus_stream_high_array_5 = &(this->stream_high_alloc[0]);
+  this->gminus_stream_high_array_5 = &(this->stream_high_alloc[querylength]);
+  this->gplus_stream_high_array_3 = &(this->stream_high_alloc[2*querylength]);
+  this->gminus_stream_high_array_3 = &(this->stream_high_alloc[3*querylength]);
+
+  this->stream_low_alloc = (UINT4 **) MALLOC(4*querylength*sizeof(UINT4 *));
+  this->gplus_stream_low_array_5 = &(this->stream_low_alloc[0]);
+  this->gminus_stream_low_array_5 = &(this->stream_low_alloc[querylength]);
+  this->gplus_stream_low_array_3 = &(this->stream_low_alloc[2*querylength]);
+  this->gminus_stream_low_array_3 = &(this->stream_low_alloc[3*querylength]);
+#endif
+
+
+  if (querylength == 0) {
+    max_nstreams = 1;
+  } else if (localdb == NULL) {
+    max_nstreams = 1;		/* Should be 0, but don't want to allocate 0 bytes */
+  } else {
+    max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
+    max_nstreams = max_localdb_nregions * querylength;
+  }
+
+  if (transcriptome != NULL) {
+    /* For tplus and tminus */
+    if (max_nstreams < 2 * querylength) {
+      max_nstreams = 2 * querylength;
+    }
+  } else {
+    if (max_nstreams < querylength) {
+      max_nstreams = querylength;
+    }
+  }
+
+  this->max_nstreams = max_nstreams;
+  this->streamptr_alloc = (Univcoord_T **) MALLOC(this->max_nstreams*sizeof(Univcoord_T *));
+  this->streamsize_alloc = (int *) MALLOC(this->max_nstreams * sizeof(int));
+
+  /* Can assign pointers, even if transcriptome is NULL */
+  this->tplus_streamsize_array = &(this->streamsize_alloc[0]);
+  this->tminus_streamsize_array = &(this->streamsize_alloc[querylength]);
+
+  if (querylength == 0) {
+    this->querypos_diagterm_alloc = (int *) NULL;
+    this->tplus_diagterm_array = (int *) NULL;
+    this->tminus_diagterm_array = (int *) NULL;
+  } else {
+    this->querypos_diagterm_alloc = (int *) MALLOC(2*querylength*sizeof(int));
+    this->tplus_diagterm_array = &(this->querypos_diagterm_alloc[0]);
+    this->tminus_diagterm_array = &(this->querypos_diagterm_alloc[querylength]);
+  }
+
+  this->retrievedp_allocated = (bool *) CALLOC(2 * (querylength+overhang),sizeof(bool));
+  this->plus_retrievedp = &(this->retrievedp_allocated[overhang]);
+  this->minus_retrievedp = &(this->retrievedp_allocated[(querylength+overhang)+overhang]);
+
+#ifdef LARGE_GENOMES
+  this->positions_high_allocated = (unsigned char **) CALLOC(2 * (querylength+overhang),sizeof(unsigned char *));
+  this->plus_positions_high = &(this->positions_high_allocated[overhang]);
+  this->minus_positions_high = &(this->positions_high_allocated[(querylength+overhang)+overhang]);
+#endif
+  this->positions_allocated = (UINT4 **) CALLOC(2 * (querylength+overhang),sizeof(UINT4 *));
+  this->plus_positions = &(this->positions_allocated[overhang]);
+  this->minus_positions = &(this->positions_allocated[(querylength+overhang)+overhang]);
+
+  this->npositions_allocated = (int *) CALLOC(2 * (querylength+overhang),sizeof(int));
+  this->plus_npositions = &(this->npositions_allocated[overhang]);
+  this->minus_npositions = &(this->npositions_allocated[(querylength+overhang)+overhang]);
+
+  if (querylength == 0) {
+    this->plus_diagterms = (int *) NULL;
+    this->minus_diagterms = (int *) NULL;
+  } else {
+    this->plus_diagterms = (int *) MALLOC(querylength*sizeof(int));
+    this->minus_diagterms = (int *) MALLOC(querylength*sizeof(int));
+  }
+
+  if (transcriptome == NULL) {
+    this->tr_retrievedp_allocated = (bool *) NULL;
+    this->tr_plus_retrievedp = this->tr_minus_retrievedp = (bool *) NULL;
+
+    this->tr_positions_allocated = (UINT4 **) NULL;
+    this->tr_plus_positions = this->tr_minus_positions = (UINT4 **) NULL;
+
+    this->tr_npositions_allocated = (int *) NULL;
+    this->tr_plus_npositions = this->tr_minus_npositions = (int *) NULL;
+
+    this->tr_plus_diagterms = (int *) NULL;
+    this->tr_minus_diagterms = (int *) NULL;
+
+  } else {
+    this->tr_retrievedp_allocated = (bool *) CALLOC(2 * (querylength+overhang_tr),sizeof(bool));
+    this->tr_plus_retrievedp = &(this->tr_retrievedp_allocated[overhang_tr]);
+    this->tr_minus_retrievedp = &(this->tr_retrievedp_allocated[(querylength+overhang_tr)+overhang_tr]);
+
+    this->tr_positions_allocated = (UINT4 **) CALLOC(2 * (querylength+overhang_tr),sizeof(UINT4 *));
+    this->tr_plus_positions = &(this->tr_positions_allocated[overhang_tr]);
+    this->tr_minus_positions = &(this->tr_positions_allocated[(querylength+overhang_tr)+overhang_tr]);
+
+    this->tr_npositions_allocated = (int *) CALLOC(2 * (querylength+overhang_tr),sizeof(int));
+    this->tr_plus_npositions = &(this->tr_npositions_allocated[overhang_tr]);
+    this->tr_minus_npositions = &(this->tr_npositions_allocated[(querylength+overhang_tr)+overhang_tr]);
+
+    this->tr_plus_diagterms = (int *) MALLOC(querylength*sizeof(int));
+    this->tr_minus_diagterms = (int *) MALLOC(querylength*sizeof(int));
+  }
+
+  Reader_set_sequence(this->reader,queryuc_ptr,/*querystart*/0,/*queryend*/querylength);
+  
+  this->validp = (bool *) CALLOC(querylength+overhang,sizeof(bool));
+  this->forward_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
+  this->revcomp_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
+
+  if (transcriptome == NULL) {
+    this->tr_reader = (Reader_T) NULL;
+    this->tr_validp = (bool *) NULL;
+    this->tr_forward_oligos = this->tr_revcomp_oligos = (Oligospace_T *) NULL;
+
+  } else if (index1part_tr == index1part) {
+    this->tr_validp = this->validp;
+    this->tr_forward_oligos = this->forward_oligos;
+    this->tr_revcomp_oligos = this->revcomp_oligos;
+
+  } else {
+    /* tr_reader is distinct from reader */
+    Reader_set_sequence(this->tr_reader,queryuc_ptr,/*querystart*/0,/*queryend*/querylength);
+
+    this->tr_validp = (bool *) CALLOC(querylength+overhang_tr,sizeof(bool));
+    this->tr_forward_oligos = (Oligospace_T *) MALLOC((querylength+overhang_tr)*sizeof(Oligospace_T));
+    this->tr_revcomp_oligos = (Oligospace_T *) MALLOC((querylength+overhang_tr)*sizeof(Oligospace_T));
+ }
+
+  return;
+}
+
 
 
 bool

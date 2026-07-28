@@ -1,4 +1,3 @@
-/* $Id: knownindels.h 225283 2022-11-07 05:51:06Z twu $ */
 #ifndef KNOWNINDELS_INCLUDED
 #define KNOWNINDELS_INCLUDED
 

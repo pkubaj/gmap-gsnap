@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: b60989c34abb147e97b6c85f7aa2cc1d743884a9 $";
+static char rcsid[] = "$Id: 46aaf008199b78d8c408f9c1103f1ed1476fe420 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -148,6 +148,7 @@ Altsplice_copy (T old, Pathpool_T pathpool, Vectorpool_T vectorpool) {
 
     new->boundedp = old->boundedp;
     new->innerp = old->innerp;
+    new->nmismatches_known_p = old->nmismatches_known_p;
 
     new->splice_qpos = old->splice_qpos;
     new->anchor_qpos = old->anchor_qpos;
@@ -221,10 +222,12 @@ check_descending (Univcoord_T *univdiagonals, int *order_medial_qpos, int n) {
 
 
 Univcoord_T
-Altsplice_qstart_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
+Altsplice_qstart_best (int *distal_trimpos, int splice_qpos, int querylength,
+		       Univcoord_T medial_univdiagonal,
 		       double medial_prob, int medial_support, int medial_nmismatches,
 		       int *distal_support, Univdiag_T *distal_univdiags,
-		       double *distal_probs, int npartners, bool innerp) {
+		       double *distal_probs, int npartners,
+		       bool plusp, bool sense_forward_p, bool innerp) {
   Univcoord_T distal_univdiagonal = 0, first_dist = 0, second_dist = 0, dist;
   int i;
 
@@ -240,11 +243,13 @@ Altsplice_qstart_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
   for (i = 0; i < npartners; i++) {
     assert(distal_univdiags[i]->univdiagonal < medial_univdiagonal);
     /* Need to use distal_support when a distal indel is found by Spliceends */
-    if (Splice_accept_p(medial_prob,distal_probs[i],
-			/*splice_distance*/medial_univdiagonal - distal_univdiags[i]->univdiagonal,
+    if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			/*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			/*univdiagonal_j*/medial_univdiagonal,
 			medial_support,medial_nmismatches,distal_support[i],
 			/* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			distal_univdiags[i]->nmismatches,
+			plusp,sense_forward_p,innerp) == false) {
       /* Skip */
     } else {
       dist = medial_univdiagonal - distal_univdiags[i]->univdiagonal;
@@ -272,10 +277,12 @@ Altsplice_qstart_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
 
 
 Univcoord_T
-Altsplice_qend_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
+Altsplice_qend_best (int *distal_trimpos, int splice_qpos, int querylength,
+		     Univcoord_T medial_univdiagonal,
 		     double medial_prob, int medial_support, int medial_nmismatches,
 		     int *distal_support, Univdiag_T *distal_univdiags,
-		     double *distal_probs, int npartners, bool innerp) {
+		     double *distal_probs, int npartners,
+		     bool plusp, bool sense_forward_p, bool innerp) {
   Univcoord_T distal_univdiagonal = 0, first_dist = 0, second_dist = 0, dist;
   int i;
 
@@ -291,11 +298,12 @@ Altsplice_qend_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
   for (i = 0; i < npartners; i++) {
     assert(medial_univdiagonal < distal_univdiags[i]->univdiagonal);
     /* Need to use distal_support when a distal indel is found by Spliceends */
-    if (Splice_accept_p(medial_prob,distal_probs[i],
-			/*splice_distance*/distal_univdiags[i]->univdiagonal - medial_univdiagonal,
+    if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			/*univdiagonal_i*/medial_univdiagonal,
+			/*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
 			medial_support,medial_nmismatches,distal_support[i],
 			/* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			distal_univdiags[i]->nmismatches,plusp,sense_forward_p,innerp) == false) {
       /* Skip */
     } else {
       dist = distal_univdiags[i]->univdiagonal - medial_univdiagonal;
@@ -323,15 +331,15 @@ Altsplice_qend_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
 
 
 T
-Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos,
+Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos, int querylength,
 		      Univcoord_T medial_univdiagonal, int medial_nmismatches,
 		      double medial_prob, int medial_support, Univcoord_T *distal_positions,
 		      int *distal_support, Univdiag_T *distal_univdiags,
-		      double *distal_probs, int *order_medial_qpos, int npartners, bool innerp,
+		      double *distal_probs, int *order_medial_qpos, int npartners,
+		      bool plusp, bool sense_forward_p, bool innerp,
 		      Pathpool_T pathpool, Vectorpool_T vectorpool, bool sort_bydistal_p) {
-  T new = Pathpool_new_altsplice(pathpool
-				 pathpool_trace(__FILE__,__LINE__));
-  int *order_distal_positions, i, ii, oldi, k;
+  T new;
+  int *order_distal_positions, i, ii, oldi, best_distali, k;
   double best_distal_prob;
 
 
@@ -350,16 +358,6 @@ Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_
   }
 #endif
 
-  new->boundedp = boundedp;
-  new->innerp = innerp;
-
-  new->splice_qpos = splice_qpos;
-  new->anchor_qpos = anchor_qpos;
-  new->medial_univdiagonal = medial_univdiagonal;
-  new->medial_nmismatches = medial_nmismatches;
-  new->medial_prob = medial_prob;
-  new->medial_support = medial_support;
-
   /* Find reasonable values for Path_eval_nmatches based on (1) best
      medial prob and (2) best distal prob for that */
 
@@ -369,20 +367,40 @@ Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_
     i = (order_medial_qpos == NULL) ? ii : order_medial_qpos[ii];
     assert(distal_univdiags[i]->univdiagonal < medial_univdiagonal);
     /* Need to use distal_support when a distal indel is found by Spliceends */
-    if (Splice_accept_p(medial_prob,distal_probs[i],
-			/*splice_distance*/medial_univdiagonal - distal_univdiags[i]->univdiagonal,
+    if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			/*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			/*univdiagonal_j*/medial_univdiagonal,
 			medial_support,medial_nmismatches,distal_support[i],
 			/* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			distal_univdiags[i]->nmismatches,plusp,sense_forward_p,innerp) == false) {
       /* Skip */
     } else {
       if (k == 0 || distal_probs[i] > best_distal_prob) {
-	new->best_distali = k;
+	best_distali = k;
       }
       k++;
     }
   }
-  assert(k > 1);
+
+  if (k == 0) {
+    return (T) NULL;
+  } else {
+    new = Pathpool_new_altsplice(pathpool
+				 pathpool_trace(__FILE__,__LINE__));
+  }
+
+  new->boundedp = boundedp;
+  new->innerp = innerp;
+  new->nmismatches_known_p = true;
+
+  new->splice_qpos = splice_qpos;
+  new->anchor_qpos = anchor_qpos;
+  new->medial_univdiagonal = medial_univdiagonal;
+  new->medial_nmismatches = medial_nmismatches;
+  new->medial_prob = medial_prob;
+  new->medial_support = medial_support;
+
+  new->best_distali = best_distali;
 
   new->nunivdiagonals = k;
 
@@ -401,21 +419,28 @@ Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_
     for (ii = 0; ii < npartners; ii++) {
       i = (order_medial_qpos == NULL) ? ii : order_medial_qpos[ii];
       /* Need to use distal_support when a distal indel is found by Spliceends */
-      if (Splice_accept_p(medial_prob,distal_probs[i],
-			  /*splice_distance*/medial_univdiagonal - distal_univdiags[i]->univdiagonal,
+      if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			  /*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			  /*univdiagonal_j*/medial_univdiagonal,
 			  medial_support,medial_nmismatches,distal_support[i],
 			  /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			  distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			  distal_univdiags[i]->nmismatches,plusp,sense_forward_p,innerp) == false) {
 	/* Skip */
       } else {
 	new->univdiagonals[k] = distal_univdiags[i]->univdiagonal;
 	new->distal_lengths[k] = distal_support[i];
 	new->distal_qpos[k] = distal_univdiags[i]->qend;
 	new->distal_trimpos[k] = distal_univdiags[i]->qstart;
-	if (distal_univdiags[i]->qend != splice_qpos) {
-	  new->distal_nmismatches[k] = -1;
-	} else {
+	if (distal_univdiags[i]->qend == splice_qpos) {
 	  new->distal_nmismatches[k] = distal_univdiags[i]->nmismatches;
+#if 0
+	} else if (distal_univdiags[i]->qend < splice_qpos &&
+		   distal_univdiags[i]->nmismatches == 0) {
+	  new->distal_nmismatches[k] = 0;
+#endif
+	} else {
+	  new->distal_nmismatches[k] = -1;
+	  new->nmismatches_known_p = false;
 	}
 	new->distal_probs[k] = distal_probs[i];
 	new->distal_support[k] = distal_support[i];
@@ -436,21 +461,28 @@ Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_
       oldi = order_distal_positions[i];
 
       /* Need to use distal_support when a distal indel is found by Spliceends */
-      if (Splice_accept_p(medial_prob,distal_probs[oldi],
-			  /*splice_distance*/medial_univdiagonal - distal_univdiags[oldi]->univdiagonal,
+      if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[oldi],
+			  /*univdiagonal_i*/distal_univdiags[oldi]->univdiagonal,
+			  /*univdiagonal_j*/medial_univdiagonal,
 			  medial_support,medial_nmismatches,distal_support[oldi],
 			  /* distal_univdiags[oldi]->qend - distal_univdiags[oldi]->qstart, */
-			  distal_univdiags[oldi]->nmismatches,innerp,/*strictp*/true) == false) {
+			  distal_univdiags[oldi]->nmismatches,plusp,sense_forward_p,innerp) == false) {
 	/* Skip */
       } else {
 	new->univdiagonals[k] = distal_univdiags[oldi]->univdiagonal;
 	new->distal_lengths[k] = distal_univdiags[oldi]->qend - distal_univdiags[oldi]->qstart;
 	new->distal_qpos[k] = distal_univdiags[oldi]->qend;
 	new->distal_trimpos[k] = distal_univdiags[oldi]->qstart;
-	if (distal_univdiags[oldi]->qend != splice_qpos) {
-	  new->distal_nmismatches[k] = -1;
-	} else {
+	if (distal_univdiags[oldi]->qend == splice_qpos) {
 	  new->distal_nmismatches[k] = distal_univdiags[oldi]->nmismatches;
+#if 0
+	} else if (distal_univdiags[oldi]->qend < splice_qpos &&
+		   distal_univdiags[oldi]->nmismatches == 0) {
+	  new->distal_nmismatches[k] = 0;
+#endif
+	} else {
+	  new->distal_nmismatches[k] = -1;
+	  new->nmismatches_known_p = false;
 	}
 	new->distal_probs[k] = distal_probs[oldi];
 	new->distal_support[k] = distal_support[oldi];
@@ -476,15 +508,15 @@ Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_
 
 
 T
-Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos,
+Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos, int querylength,
 		    Univcoord_T medial_univdiagonal, int medial_nmismatches,
 		    double medial_prob, int medial_support, Univcoord_T *distal_positions,
 		    int *distal_support, Univdiag_T *distal_univdiags,
-		    double *distal_probs, int *order_medial_qpos, int npartners, bool innerp,
+		    double *distal_probs, int *order_medial_qpos, int npartners,
+		    bool plusp, bool sense_forward_p, bool innerp,
 		    Pathpool_T pathpool, Vectorpool_T vectorpool, bool sort_bydistal_p) {
-  T new = Pathpool_new_altsplice(pathpool
-				 pathpool_trace(__FILE__,__LINE__));
-  int *order_distal_positions, i, ii, oldi, k;
+  T new;
+  int *order_distal_positions, i, ii, oldi, best_distali, k;
   double best_distal_prob;
 
 
@@ -503,15 +535,6 @@ Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qp
   }
 #endif
 
-  new->boundedp = boundedp;
-  new->innerp = innerp;
-
-  new->splice_qpos = splice_qpos;
-  new->anchor_qpos = anchor_qpos;
-  new->medial_univdiagonal = medial_univdiagonal;
-  new->medial_nmismatches = medial_nmismatches;
-  new->medial_prob = medial_prob;
-  new->medial_support = medial_support;
 
   /* Find reasonable values for Path_eval_nmatches based on (1) best
      medial prob and (2) best distal prob for that */
@@ -522,20 +545,40 @@ Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qp
     i = (order_medial_qpos == NULL) ? ii : order_medial_qpos[ii];
     assert(medial_univdiagonal < distal_univdiags[i]->univdiagonal);
     /* Need to use distal_support when a distal indel is found by Spliceends */
-    if (Splice_accept_p(medial_prob,distal_probs[i],
-			/*splice_distance*/distal_univdiags[i]->univdiagonal - medial_univdiagonal,
+    if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			/*univdiagonal_i*/medial_univdiagonal,
+			/*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
 			medial_support,medial_nmismatches,distal_support[i],
 			/* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			distal_univdiags[i]->nmismatches,plusp,sense_forward_p,innerp) == false) {
       /* Skip */
     } else {
       if (k == 0 || distal_probs[i] > best_distal_prob) {
-	new->best_distali = k;
+	best_distali = k;
       }
       k++;
     }
   }
-  assert(k > 1);
+
+  if (k == 0) {
+    return (T) NULL;
+
+  } else {
+    new = Pathpool_new_altsplice(pathpool
+				 pathpool_trace(__FILE__,__LINE__));
+  }
+
+  new->boundedp = boundedp;
+  new->innerp = innerp;
+  new->nmismatches_known_p = true;
+
+  new->splice_qpos = splice_qpos;
+  new->anchor_qpos = anchor_qpos;
+  new->medial_univdiagonal = medial_univdiagonal;
+  new->medial_nmismatches = medial_nmismatches;
+  new->medial_prob = medial_prob;
+  new->medial_support = medial_support;
+  new->best_distali = best_distali;
 
   new->nunivdiagonals = k;
 
@@ -554,21 +597,28 @@ Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qp
     for (ii = 0; ii < npartners; ii++) {
       i = (order_medial_qpos == NULL) ? ii : order_medial_qpos[ii];
       /* Need to use distal_support when a distal indel is found by Spliceends */
-      if (Splice_accept_p(medial_prob,distal_probs[i],
-			  /*splice_distance*/distal_univdiags[i]->univdiagonal - medial_univdiagonal,
+      if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			  /*univdiagonal_i*/medial_univdiagonal,
+			  /*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
 			  medial_support,medial_nmismatches,distal_support[i],
 			  /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart,*/
-			  distal_univdiags[i]->nmismatches,innerp,/*strictp*/true) == false) {
+			  distal_univdiags[i]->nmismatches,plusp,sense_forward_p,innerp) == false) {
 	/* Skip */
       } else {
 	new->univdiagonals[k] = distal_univdiags[i]->univdiagonal;
 	new->distal_lengths[k] = distal_univdiags[i]->qend - distal_univdiags[i]->qstart;
 	new->distal_qpos[k] = distal_univdiags[i]->qstart;
 	new->distal_trimpos[k] = distal_univdiags[i]->qend;
-	if (distal_univdiags[i]->qstart != splice_qpos) {
-	  new->distal_nmismatches[k] = -1;
-	} else {
+	if (distal_univdiags[i]->qstart == splice_qpos) {
 	  new->distal_nmismatches[k] = distal_univdiags[i]->nmismatches;
+#if 0
+	} else if (distal_univdiags[i]->qstart > splice_qpos &&
+		   distal_univdiags[i]->nmismatches == 0) {
+	  new->distal_nmismatches[k] = 0;
+#endif
+	} else {
+	  new->distal_nmismatches[k] = -1;
+	  new->nmismatches_known_p = false;
 	}
 	new->distal_probs[k] = distal_probs[i];
 	new->distal_support[k] = distal_support[i];
@@ -589,21 +639,28 @@ Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qp
       oldi = order_distal_positions[i];
 
       /* Need to use distal_support when a distal indel is found by Spliceends */
-      if (Splice_accept_p(medial_prob,distal_probs[oldi],
-			  /*splice_distance*/distal_univdiags[oldi]->univdiagonal - medial_univdiagonal,
+      if (Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[oldi],
+			  /*univdiagonal_i*/medial_univdiagonal,
+			  /*univdiagonal_j*/distal_univdiags[oldi]->univdiagonal,
 			  medial_support,medial_nmismatches,distal_support[oldi],
 			  /* distal_univdiags[oldi]->qend - distal_univdiags[oldi]->qstart, */
-			  distal_univdiags[oldi]->nmismatches,innerp,/*strictp*/true) == false) {
+			  distal_univdiags[oldi]->nmismatches,plusp,sense_forward_p,innerp) == false) {
 	/* Skip */
       } else {
 	new->univdiagonals[k] = distal_univdiags[oldi]->univdiagonal;
 	new->distal_lengths[k] = distal_univdiags[oldi]->qend - distal_univdiags[oldi]->qstart;
 	new->distal_qpos[k] = distal_univdiags[oldi]->qstart;
 	new->distal_trimpos[k] = distal_univdiags[oldi]->qend;
-	if (distal_univdiags[oldi]->qstart != splice_qpos) {
-	  new->distal_nmismatches[k] = -1;
-	} else {
+	if (distal_univdiags[oldi]->qstart == splice_qpos) {
 	  new->distal_nmismatches[k] = distal_univdiags[oldi]->nmismatches;
+#if 0
+	} else if (distal_univdiags[oldi]->qstart > splice_qpos &&
+		   distal_univdiags[oldi]->nmismatches == 0) {
+	  new->distal_nmismatches[k] = 0;
+#endif
+	} else {
+	  new->distal_nmismatches[k] = -1;
+	  new->nmismatches_known_p = false;
 	}
 	new->distal_probs[k] = distal_probs[oldi];
 	new->distal_support[k] = distal_support[oldi];
@@ -700,7 +757,8 @@ Altsplice_resolve_qend (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
 			int *medial_nmismatches_L, int *distal_nmismatches_L, 
 			double *medial_prob_L, double *distal_prob_L,
 			T this, int anchor_qpos_L, int querylengthL, int querylengthH,
-			Univcoord_T genomicstartH, Compress_T query_compress, bool plusp, int genestrand) {
+			Univcoord_T genomicstartH, Compress_T query_compress,
+			bool plusp, int genestrand, bool sense_forward_p) {
 
   /* Candidates within max_insertlength are in starti..endi */
   int besti = -1, starti, endi, i;
@@ -782,11 +840,12 @@ Altsplice_resolve_qend (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
     for (i = endi; i >= starti; i--) {
       assert(this->medial_univdiagonal < this->univdiagonals[i]);
       if ((this->distal_trimpos[i] - this->splice_qpos) - this->distal_nmismatches[i] == best_nmatches_continuous &&
-	  Splice_accept_p(this->medial_prob,this->distal_probs[i],
-			  /*splice_distance*/this->univdiagonals[i] - this->medial_univdiagonal,
+	  Splice_accept_p(this->splice_qpos,querylengthL,this->medial_prob,this->distal_probs[i],
+			  /*univdiagonal_i*/this->medial_univdiagonal,
+			  /*univdiagonal_j*/this->univdiagonals[i],
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[i],this->distal_nmismatches[i],
-			  this->innerp,/*strictp*/true) == true) {
+			  plusp,sense_forward_p,this->innerp) == true) {
 	if (ncandidates++ == 0) {
 	  besti = i;
 	}
@@ -801,17 +860,20 @@ Altsplice_resolve_qend (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
     for (i = endi - 1; i >= 0; i--) {
       assert(this->medial_univdiagonal < this->univdiagonals[i]);
       if ((this->distal_trimpos[i] - this->splice_qpos) - this->distal_nmismatches[i] == best_nmatches_intervening &&
-	  Splice_accept_p(this->medial_prob,this->distal_probs[i],
-			  /*splice_distance*/this->univdiagonals[i] - this->medial_univdiagonal,
+	  Splice_accept_p(this->splice_qpos,querylengthL,this->medial_prob,this->distal_probs[i],
+			  /*univdiagonal_i*/this->medial_univdiagonal,
+			  /*univdiagonal_j*/this->univdiagonals[i],
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[i],this->distal_nmismatches[i],
-			  this->innerp,/*strictp*/true) == true &&
+			  plusp,sense_forward_p,this->innerp) == true &&
 	  (prob = this->distal_probs[i]) > best_prob) {
 	besti = i;
 	best_prob = prob;
       }
     }
   }
+
+  this->nmismatches_known_p = true;
 
   if (besti < 0) {
     debug9(printf("Returning false\n"));
@@ -849,7 +911,8 @@ Altsplice_resolve_qstart (Univcoord_T *univdiagonal_H, int *splice_qpos_H, int *
 			  int *medial_nmismatches_H, int *distal_nmismatches_H,
 			  double *medial_prob_H, double *distal_prob_H,
 			  T this, int anchor_qpos_H, int querylengthL, int querylengthH,
-			  Univcoord_T genomicendL, Compress_T query_compress, bool plusp, int genestrand) {
+			  Univcoord_T genomicendL, Compress_T query_compress,
+			  bool plusp, int genestrand, bool sense_forward_p) {
 
   /* Candidates within max_insertlength are in startj..endj */
   int bestj = -1, startj, endj, j;
@@ -930,11 +993,12 @@ Altsplice_resolve_qstart (Univcoord_T *univdiagonal_H, int *splice_qpos_H, int *
     for (j = endj; j >= startj; j--) {
       assert(this->univdiagonals[j] < this->medial_univdiagonal);
       if ((this->splice_qpos - this->distal_trimpos[j]) - this->distal_nmismatches[j] == best_nmatches_continuous &&
-	  Splice_accept_p(this->medial_prob,this->distal_probs[j],
-			  /*splice_distance*/this->medial_univdiagonal - this->univdiagonals[j],
+	  Splice_accept_p(this->splice_qpos,querylengthH,this->medial_prob,this->distal_probs[j],
+			  /*univdiagonal_i*/this->univdiagonals[j],
+			  /*univdiagonal_j*/this->medial_univdiagonal,
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[j],this->distal_nmismatches[j],
-			  this->innerp,/*strictp*/true) == true) {
+			  plusp,sense_forward_p,this->innerp) == true) {
 	if (ncandidates++ == 0) {
 	  bestj = j;
 	}
@@ -948,11 +1012,12 @@ Altsplice_resolve_qstart (Univcoord_T *univdiagonal_H, int *splice_qpos_H, int *
     best_prob = GOOD_DISTAL_PROB;
     for (j = endj - 1; j >= 0; j--) {
       if ((this->splice_qpos - this->distal_trimpos[j]) - this->distal_nmismatches[j] == best_nmatches_intervening &&
-	  Splice_accept_p(this->medial_prob,this->distal_probs[j],
-			  /*splice_distance*/this->medial_univdiagonal - this->univdiagonals[j],
+	  Splice_accept_p(this->splice_qpos,querylengthH,this->medial_prob,this->distal_probs[j],
+			  /*univdiagonal_i*/this->univdiagonals[j],
+			  /*univdiagonal_j*/this->medial_univdiagonal,
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[j],this->distal_nmismatches[j],
-			  this->innerp,/*strictp*/true) == true &&
+			  plusp,sense_forward_p,this->innerp) == true &&
 	  (prob = this->distal_probs[j]) > best_prob) {
 	bestj = j;
 	best_prob = prob;
@@ -960,6 +1025,8 @@ Altsplice_resolve_qstart (Univcoord_T *univdiagonal_H, int *splice_qpos_H, int *
     }
   }
 	  
+  this->nmismatches_known_p = true;
+
   if (bestj < 0) {
     debug9(printf("Returning false\n"));
     return false;
@@ -1001,7 +1068,7 @@ Altsplice_resolve_both (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
 			T thisL, int anchor_qpos_L, T thisH, int anchor_qpos_H,
 			int querylengthL, int querylengthH,
 			Compress_T query_compress_L, Compress_T query_compress_H,
-			bool plusp, int genestrand) {
+			bool plusp, int genestrand, bool sense_forward_p) {
   int besti = -1, bestj = -1, besti_intervening = -1, bestj_intervening = -1, i, j;
   int ncandidates;
   int best_insertlength, insertlength;
@@ -1092,16 +1159,18 @@ Altsplice_resolve_both (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
 	    assert(thisH->univdiagonals[j] < thisH->medial_univdiagonal);
 	    if ((thisL->distal_trimpos[i] - thisL->splice_qpos) - thisL->distal_nmismatches[i] +
 		(thisH->splice_qpos - thisH->distal_trimpos[j]) - thisH->distal_nmismatches[j] == best_nmatches_continuous &&
-		Splice_accept_p(thisL->medial_prob,thisL->distal_probs[i],
-				/*splice_distance*/thisL->univdiagonals[i] - thisL->medial_univdiagonal,
+		Splice_accept_p(thisL->splice_qpos,querylengthL,thisL->medial_prob,thisL->distal_probs[i],
+				/*univdiagonal_i*/thisL->medial_univdiagonal,
+				/*univdiagonal_j*/thisL->univdiagonals[i],
 				thisL->medial_support,thisL->medial_nmismatches,
 				thisL->distal_support[i],thisL->distal_nmismatches[i],
-				thisL->innerp,/*strictp*/true) == true &&
-		Splice_accept_p(thisH->medial_prob,thisH->distal_probs[j],
-				/*splice_distance*/thisH->medial_univdiagonal - thisH->univdiagonals[j],
+				plusp,sense_forward_p,thisL->innerp) == true &&
+		Splice_accept_p(thisH->splice_qpos,querylengthH,thisH->medial_prob,thisH->distal_probs[j],
+				/*univdiagonal_i*/thisH->univdiagonals[j],
+				/*univdiagonal_j*/thisH->medial_univdiagonal,
 				thisH->medial_support,thisH->medial_nmismatches,
 				thisH->distal_support[j],thisH->distal_nmismatches[j],
-				thisH->innerp,/*strictp*/true) == true) {
+				plusp,sense_forward_p,thisH->innerp) == true) {
 	      if (ncandidates++ == 0 || insertlength < best_insertlength) {
 		besti = i;
 		bestj = j;
@@ -1129,6 +1198,9 @@ Altsplice_resolve_both (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
     besti = besti_intervening;
     bestj = bestj_intervening;
   }
+
+  thisL->nmismatches_known_p = true;
+  thisH->nmismatches_known_p = true;
 
   if (besti < 0) {
     debug9(printf("Returning false\n"));
@@ -1216,17 +1288,20 @@ Altsplice_select_qend (T this, int querylength, Compress_T query_compress, bool 
   
   debug8(printf("best_nmatches %d\n",best_nmatches));
 
+  this->nmismatches_known_p = true;
+
   ncandidates = 0;
   if (best_nmatches > 0) {
     /* Count good solutions */
     for (i = 0; i < this->nunivdiagonals; i++) {
       if ((this->distal_trimpos[i] - this->splice_qpos) - this->distal_nmismatches[i] == best_nmatches &&
 #if 0
-	  Splice_accept_p(this->medial_prob,this->distal_probs[i],
-			  /*splice_distance*/this->univdiagonals[i] - this->medial_univdiagonal,
+	  Splice_accept_p(this->splice_qpos,querylength,this->medial_prob,this->distal_probs[i],
+			  /*univdiagonal_i*/this->medial_univdiagonal,
+			  /*univdiagonal_j*/this->univdiagonals[i],
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[i],this->distal_nmismatches[i],
-			  this->innerp,/*strictp*/true) == true
+			  plusp_sense_forward_p,this->innerp) == true
 #else
 	  (prob = this->distal_probs[i]) >= GOOD_DISTAL_PROB
 #endif	  
@@ -1290,6 +1365,8 @@ Altsplice_select_qstart (T this, int querylength, Compress_T query_compress, boo
     }
   }
 
+  this->nmismatches_known_p = true;
+
   debug8(printf("best_nmatches %d\n",best_nmatches));
 
   ncandidates = 0;
@@ -1298,11 +1375,12 @@ Altsplice_select_qstart (T this, int querylength, Compress_T query_compress, boo
     for (j = 0; j < this->nunivdiagonals; j++) {
       if ((this->splice_qpos - this->distal_trimpos[j]) - this->distal_nmismatches[j] == best_nmatches &&
 #if 0
-	  Splice_accept_p(this->medial_prob,this->distal_probs[i],
-			  /*splice_distance*/this->medial_univdiagonal - this->univdiagonals[i],
+	  Splice_accept_p(this->splice_qpos,querylength,this->medial_prob,this->distal_probs[i],
+			  /*univdiagonal_i*/this->univdiagonals[i],
+			  /*univdiagonal_j*/this->medial_univdiagonal,
 			  this->medial_support,this->medial_nmismatches,
 			  this->distal_support[i],this->distal_nmismatches[i],
-			  this->innerp,/*strictp*/true) == true
+			  plusp,sense_forward_p,this->innerp) == true
 #else
 	  (prob = this->distal_probs[j]) >= GOOD_DISTAL_PROB
 #endif

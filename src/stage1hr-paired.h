@@ -1,4 +1,4 @@
-/* $Id: 318372917628cbe9a2673f83142dc565567f7cf6 $ */
+/* $Id: b84eac7ac6d6b2b5428096dd9d06f6f0dc701856 $ */
 #ifndef STAGE1HR_PAIRED_INCLUDED
 #define STAGE1HR_PAIRED_INCLUDED
 
@@ -29,12 +29,18 @@
 
 #include "pass.h"
 
+#define T Stage1_T
+
 extern Pathpair_T *
 Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq, Pairtype_T *final_pairtype,
 		    Path_T **patharray5, int *nhits5_primary, int *nhits5_altloc, int *first_absmq5, int *second_absmq5,
 		    Path_T **patharray3, int *nhits3_primary, int *nhits3_altloc, int *first_absmq3, int *second_absmq3,
-		    Shortread_T queryseq5, Shortread_T queryseq3, EF64_T repetitive_ef64,
+		    T this5, T this3, Shortread_T queryseq5, Shortread_T queryseq3, EF64_T repetitive_ef64,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels, Chrpos_T pairmax_linear,
+
+		    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int localdb_nmismatches_allowed,
 
 		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 		    Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
@@ -47,14 +53,18 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 extern void
 Stage1hr_paired_setup (Mode_T mode_in, int index1part_in, int index1interval_in, int index1part_tr_in,
 		       Transcriptome_T transcriptome_in, bool genome_align_p_in, bool transcriptome_align_p_in,
-		       Genomebits_T genomebits_in, Localdb_T localdb_in, EF64_T chromosome_ef64_in,
+		       Genomebits_T genomebits_in, EF64_T chromosome_ef64_in,
 		       double user_nmismatches_filter_float_in, double user_mincoverage_filter_float_in,
-		       int max_deletionlen, int max_insertlength, Chrpos_T shortsplicedist, bool splicingp_in,
+		       int max_deletionlen, int max_insertlength, Chrpos_T shortsplicedist_in, bool splicingp_in,
 		       int maxpaths_search_in, int maxpaths_report_in,
 		       bool *circularp_in, int pairmax_linear_in, int pairmax_circular_in);
 
 extern void
 Stage1hr_paired_pass2_setup (int max_insertlength, Chrpos_T shortsplicedist);
+
+extern void
+Stage1hr_paired_localdb_setup (Localdb_T localdb_in);
+
 
 #undef T
 #endif

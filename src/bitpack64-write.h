@@ -1,4 +1,3 @@
-/* $Id: bitpack64-write.h 221731 2020-02-13 19:47:16Z twu $ */
 #ifndef BITPACK64_WRITE_INCLUDED
 #define BITPACK64_WRITE_INCLUDED
 #include <stdio.h>

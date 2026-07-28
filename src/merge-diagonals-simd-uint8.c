@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: merge-diagonals-simd-uint8.c 226315 2023-02-28 18:22:20Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -152,7 +151,7 @@ make_diagonals_heap (Mergeinfo_uint8_T mergeinfo,
       debug(printf("Merging from %d to %d with %d total elements\n",i,j-1,total));
       totals[ncombined] = total;
       /* Need an extra value for Sedgesort_uint8 */
-      MALLOC_ALIGN(_combined[ncombined],(total+1)*sizeof(UINT8));
+      _combined[ncombined] = (UINT8 *) MALLOC_ALIGN((total+1)*sizeof(UINT8));
       out = _combined[ncombined];
       for (k = i; k < j; k++) {
 	n = streamsize_array[order[k]];
@@ -182,7 +181,7 @@ make_diagonals_heap (Mergeinfo_uint8_T mergeinfo,
     n = nelts[heapi] = streamsize_array[order[i]];
     
     /* Copy to make the merging process non-destructive */
-    MALLOC_ALIGN(_heap[heapi],n*sizeof(UINT8));
+    _heap[heapi] = (UINT8 *) MALLOC_ALIGN(n*sizeof(UINT8));
     out = _heap[heapi];
     CHECK_ALIGN(_heap[heapi]);
 
@@ -224,8 +223,8 @@ make_diagonals_heap (Mergeinfo_uint8_T mergeinfo,
 #endif
 
 
-/* For non-AVX2, non-AVX512 code, see merge-diagonals-heap.c */
-#if defined(HAVE_AVX512) || defined(HAVE_AVX2)
+/* For heap code, see merge-diagonals-heap-simd8.c */
+#ifdef USE_SIMD_MERGE
 /* Input: streams might be aligned or not.  Caller will have to free appropriately */
 /* Output: aligned */
 Univcoord_T *
@@ -251,25 +250,34 @@ Merge_diagonals_large (int *nelts1, unsigned char **stream_high_array, UINT4 **s
     return (Univcoord_T *) NULL;
 
   } else if (nstreams == 1) {
-    *nelts1 = streamsize_array[0];
-    stream_high = stream_high_array[0];
-    stream_low = stream_low_array[0];
-    diagterm = diagterm_array[0];
+    if ((*nelts1 = streamsize_array[0]) == 0) {
+      return (Univcoord_T *) NULL;
+      
+    } else {
+      stream_high = stream_high_array[0];
+      stream_low = stream_low_array[0];
+      diagterm = diagterm_array[0];
 
-    MALLOC_ALIGN(result,(*nelts1)*sizeof(UINT8)); /* Output must be aligned */
-    /* Combine stream_high and stream_low and add diagterm (Could use SIMD here) */
-    for (l = 0; l < *nelts1; l++) {
-      result[l] = GETPOS(stream_high[l],stream_low[l]) + diagterm;
+      result = (UINT8 *) MALLOC_ALIGN((*nelts1)*sizeof(UINT8)); /* Output must be aligned */
+      /* Combine stream_high and stream_low and add diagterm (Could use SIMD here) */
+      for (l = 0; l < *nelts1; l++) {
+	result[l] = GETPOS(stream_high[l],stream_low[l]) + diagterm;
+      }
+
+      return result;
     }
-
-    return result;
 
   } else {
     ncopied = make_diagonals_heap(mergeinfo,stream_high_array,stream_low_array,
 				  streamsize_array,diagterm_array,nstreams);
-    if (ncopied == 1) {
+    if (ncopied == 0) {
+      *nelts1 = 0;
+      return (Univcoord_T *) NULL;
+
+    } else if (ncopied == 1) {
       *nelts1 = mergeinfo->nelts[1];
       result = mergeinfo->heap[1];
+
     } else {
       heapsize = 2*ncopied - 1;	/* also index of last node */
 #ifdef HAVE_BUILTIN_CLZ
@@ -322,7 +330,6 @@ Merge_diagonals_large (int *nelts1, unsigned char **stream_high_array, UINT4 **s
 #endif
 
 
-#if defined(HAVE_AVX512) || defined(HAVE_AVX2)
 /* Fills mergeinfo->heap and mergeinfo->nelts */
 static int
 make_univdiagonals_heap (Mergeinfo_uint8_T mergeinfo, Univcoord_T **stream_array,
@@ -368,7 +375,7 @@ make_univdiagonals_heap (Mergeinfo_uint8_T mergeinfo, Univcoord_T **stream_array
       debug(printf("Merging from %d to %d with %d total elements\n",i,j-1,total));
       totals[ncombined] = total;
       /* Need an extra value for Sedgesort_uint8 */
-      MALLOC_ALIGN(_combined[ncombined],(total+1)*sizeof(Univcoord_T));
+      _combined[ncombined] = (Univcoord_T *) MALLOC_ALIGN((total+1)*sizeof(Univcoord_T));
       out = _combined[ncombined];
       for (k = i; k < j; k++) {
 	n = streamsize_array[order[k]];
@@ -392,7 +399,7 @@ make_univdiagonals_heap (Mergeinfo_uint8_T mergeinfo, Univcoord_T **stream_array
     n = nelts[heapi] = streamsize_array[order[i]];
     
     /* Copy to make the merging process non-destructive */
-    MALLOC_ALIGN(_heap[heapi],n*sizeof(Univcoord_T));
+    _heap[heapi] = (Univcoord_T *) MALLOC_ALIGN(n*sizeof(Univcoord_T));
     out = _heap[heapi];
     CHECK_ALIGN(_heap[heapi]);
     memcpy(_heap[heapi],stream_array[order[i]],n*sizeof(Univcoord_T));
@@ -426,12 +433,11 @@ make_univdiagonals_heap (Mergeinfo_uint8_T mergeinfo, Univcoord_T **stream_array
 
   return ncopied;
 }
-#endif
 
 
-/* non-SIMD version, see merge-diagonals-large.c */
+/* For heap version, see merge-diagonals-heap-uint8.c */
 
-#if defined(HAVE_AVX512) || defined(HAVE_AVX2)
+#ifdef USE_SIMD_MERGE
 /* Used for Kmer_anypair_univdiagonals */
 /* kmer-search.c calls Merge_diagonals_large with stream_high_list and
    stream_low_list.  localdb.c calls Merge_diagonals_uint4. */
@@ -454,26 +460,35 @@ Merge_diagonals_uint8 (int *nelts1, Univcoord_T **stream_array, int *streamsize_
     return (Univcoord_T *) NULL;
 
   } else if (nstreams == 1) {
-    *nelts1 = streamsize_array[0];
-    stream = stream_array[0];
+    if ((*nelts1 = streamsize_array[0]) == 0) {
+      return (Univcoord_T *) NULL;
 
-    MALLOC_ALIGN(_result,(*nelts1)*sizeof(Univcoord_T)); /* Output must be aligned */
-    memcpy(_result,stream,(*nelts1)*sizeof(Univcoord_T));
+    } else {
+      stream = stream_array[0];
+
+      _result = (Univcoord_T *) MALLOC_ALIGN((*nelts1)*sizeof(Univcoord_T)); /* Output must be aligned */
+      memcpy(_result,stream,(*nelts1)*sizeof(Univcoord_T));
 
 #ifdef DEBUG
-    printf("Merge_diagonals_uint8 returning result of length %d\n",*nelts1);
-    for (i = 0; i < *nelts1; i++) {
-      printf("%llu\n",_result[i]);
-    }
+      printf("Merge_diagonals_uint8 returning result of length %d\n",*nelts1);
+      for (i = 0; i < *nelts1; i++) {
+	printf("%llu\n",_result[i]);
+      }
 #endif
 
-    return _result;
+      return _result;
+    }
 
   } else {
     ncopied = make_univdiagonals_heap(mergeinfo,stream_array,streamsize_array,nstreams);
-    if (ncopied == 1) {
+    if (ncopied == 0) {
+      *nelts1 = 0;
+      return (Univcoord_T *) NULL;
+
+    } else if (ncopied == 1) {
       *nelts1 = mergeinfo->nelts[1];
       _result = mergeinfo->heap[1];
+
     } else {
       heapsize = 2*ncopied - 1;	/* also index of last node */
 #ifdef HAVE_BUILTIN_CLZ

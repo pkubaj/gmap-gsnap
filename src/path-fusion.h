@@ -1,4 +1,4 @@
-/* $Id: 03d43f6f3ee177e2fcd017be5201db4fef31cbb8 $ */
+/* $Id: a6fe395024af59a332f63d732509155add4924ae $ */
 #ifndef PATH_FUSION_INCLUDED
 #define PATH_FUSION_INCLUDED
 
@@ -77,6 +77,7 @@ extern T
 Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 			char *queryptr_main, bool main_plusp, int querylength,
 			Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
+			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			unsigned short *localdb_alloc, Stage1_T stage1,
 			Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
@@ -90,6 +91,7 @@ extern T
 Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 			  char *queryptr_main, bool main_plusp, int querylength,
 			  Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			  unsigned short *localdb_alloc, Stage1_T stage1,
 			  Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,

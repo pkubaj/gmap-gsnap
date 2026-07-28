@@ -1,4 +1,3 @@
-/* $Id: parserange.h 213112 2018-02-06 01:38:11Z twu $ */
 #ifndef PARSERANGE_INCLUDED
 #define PARSERANGE_INCLUDED
 

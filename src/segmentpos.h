@@ -1,4 +1,3 @@
-/* $Id: segmentpos.h 155282 2014-12-12 19:42:54Z twu $ */
 #ifndef SEGMENTPOS_INCLUDED
 #define SEGMENTPOS_INCLUDED
 #include <stdio.h>

@@ -1,4 +1,3 @@
-/* $Id: iit-read-univ.h 224642 2021-08-25 22:03:29Z twu $ */
 #ifndef IIT_READ_UNIV_INCLUDED
 #define IIT_READ_UNIV_INCLUDED
 

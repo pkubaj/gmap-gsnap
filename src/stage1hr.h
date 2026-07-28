@@ -1,4 +1,3 @@
-/* $Id: 4f1764b1015ba244fc077504e28da0157df02465 $ */
 #ifndef STAGE1HR_INCLUDED
 #define STAGE1HR_INCLUDED
 
@@ -24,6 +23,7 @@ typedef struct Stage1_T *Stage1_T;
 #include "transcriptome.h"
 #include "genomebits.h"
 
+#include "localdb-read.h"
 #include "mergeinfo.h"
 #include "splice.h"
 #include "indel.h"
@@ -48,6 +48,7 @@ typedef struct Stage1_T *Stage1_T;
 struct T {
   /* Results */
   bool first_read_p;
+  int querylength;
 
   /* Trdiagonals */
   Trnum_T *sense_trnums;	/* Could have duplicates */
@@ -211,39 +212,43 @@ struct T {
   int *tr_plus_diagterms;
   int *tr_minus_diagterms;
   
-  /* Memory allocated for mismatch_positions in Substring_new (Genome_mismatches_{left,right}),
-     and for Distant_rna_solve */
-  /* int *mismatch_positions_alloc; */
-  int *positions_alloc;
+  int *mismatch_positions_alloc; /* Non-pool, based on querylength */
+  int *positions_alloc;		 /* Non-pool, based on querylength */
 
   /* Memory allocated for indelinfo */
-  Indelinfo_T indelinfo;
+  Indelinfo_T indelinfo;	/* Non-pool, based on querylength */
 
   /* Memory allocated for spliceinfo in kmer-search.c and
      path-solve.c, used by Splice_resolve_sense and
      Splice_resolve_antisense */
-  Spliceinfo_T spliceinfo;
+  Spliceinfo_T spliceinfo;	/* Non-pool, based on querylength */
 
-  Mergeinfo_uint4_T mergeinfo_tr;
+  Mergeinfo_uint4_T mergeinfo_tr; /* Non-pool, based on querylength */
 #ifdef LARGE_GENOMES
-  Mergeinfo_uint8_T mergeinfo;
+  Mergeinfo_uint8_T mergeinfo;	/* Non-pool, based on querylength */
 #else
-  Mergeinfo_uint4_T mergeinfo;
+  Mergeinfo_uint4_T mergeinfo;	/* Non-pool, based on querylength */
 #endif
 
   /* Memory allocated for Segment_identify in segment-search.c, and
      Merge_diagonals in kmer-search.c (which needs four sets of
      arrays) */
 #ifdef LARGE_GENOMES
+  /* Non-pool, based on querylength */
   unsigned char **stream_high_alloc, **gplus_stream_high_array_5, **gminus_stream_high_array_5, **gplus_stream_high_array_3, **gminus_stream_high_array_3;
   UINT4 **stream_low_alloc, **gplus_stream_low_array_5, **gminus_stream_low_array_5, **gplus_stream_low_array_3, **gminus_stream_low_array_3;
 #endif
 
-  int streamspace_max_alloc;	/* Entries in streamspace_alloc */
-  Univcoord_T *streamspace_alloc;
+  /* int streamspace_max_alloc;	-- Entries in streamspace_alloc; now allocated by worker thread */
+  /* Univcoord_T *streamspace_alloc; -- Depends on max_localdb_regions; now allocated by worker thread */
+
+  int max_nstreams;		/* Length of streamptr_alloc */
+
+
+  /* Non-pool, based on querylength */
   Univcoord_T **streamptr_alloc, **gplus_stream_array_5, **gminus_stream_array_5, **gplus_stream_array_3, **gminus_stream_array_3;
   Trcoord_T **tplus_stream_array, **tminus_stream_array;
-  int *querypos_diagterm_alloc, *tplus_diagterm_array, *tminus_diagterm_array;
+  int *querypos_diagterm_alloc, *tplus_diagterm_array, *tminus_diagterm_array; /* Non-pool, based on querylength */
 
   int *streamsize_alloc, *tplus_streamsize_array, *tminus_streamsize_array;
 #if 0
@@ -296,10 +301,13 @@ Stage1_free (T *old, Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 	     Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool, Intlistpool_T intlistpool,
 	     Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Trpathpool_T trpathpool,
-	     Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool, bool free_paths_p);
+	     Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern T
-Stage1_new (char *queryuc_ptr, int querylength, bool first_read_p);
+Stage1_new (bool first_read_p);
+
+extern void
+Stage1_set_sequence (T this, Shortread_T queryseq, Localdb_T localdb);
 
 extern void
 Stage1_collect_unextended_paths (List_T *unextended_sense_paths_gplus,

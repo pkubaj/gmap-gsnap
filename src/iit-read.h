@@ -1,4 +1,3 @@
-/* $Id: iit-read.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef IIT_READ_INCLUDED
 #define IIT_READ_INCLUDED
 #ifdef HAVE_CONFIG_H

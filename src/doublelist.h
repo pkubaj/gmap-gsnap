@@ -1,4 +1,3 @@
-/* $Id: doublelist.h 224642 2021-08-25 22:03:29Z twu $ */
 #ifndef DOUBLELIST_INCLUDED
 #define DOUBLELIST_INCLUDED
 

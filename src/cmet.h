@@ -1,4 +1,3 @@
-/* $Id: cmet.h 222139 2020-03-13 00:15:01Z twu $ */
 #ifndef CMET_INCLUDED
 #define CMET_INCLUDED
 

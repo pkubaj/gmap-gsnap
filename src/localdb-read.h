@@ -31,8 +31,9 @@ extern int
 Localdb_get (bool *sortedp, bool *trimmedp,
 	     int *matchlength, int *nmismatches, Univdiag_T *univdiags_alloc,
 	     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-	     Stage1_T stage1, char *queryptr, int pos5, int pos3, int querylength,
-	     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+	     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     char *queryptr, int pos5, int pos3, int querylength,
+	     Univcoord_T anchor_univdiagonal, Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 	     Compress_T query_compress, bool plusp, int genestrand,
 	     Genomebits_T genomebits, int nmismatches_allowed,
 	     bool extend5p, bool trim5p, bool trim3p);
@@ -40,7 +41,8 @@ Localdb_get (bool *sortedp, bool *trimmedp,
 extern Univcoord_T
 Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 		     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		     Stage1_T stage1, char *queryptr, int querylength,
+		     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     char *queryptr, int querylength,
 		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		     Compress_T query_compress, bool plusp, int genestrand,
 		     Genomebits_T genomebits, int nmismatches_allowed);
@@ -48,7 +50,8 @@ Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 extern Univcoord_T
 Localdb_get_one_high (Univdiag_T *univdiags_alloc,
 		      T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		      Stage1_T stage1, char *queryptr, int querylength,
+		      Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      char *queryptr, int querylength,
 		      Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		      Compress_T query_compress, bool plusp, int genestrand,
 		      Genomebits_T genomebits, int nmismatches_allowed);

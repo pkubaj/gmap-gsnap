@@ -1359,6 +1359,27 @@ similar to that of alignment-free RNA-seq tools like Kallisto or
 Salmon, but also provides the genomic alignment needed for the
 analysis of splicing, mutations, and polymorphisms.
 
+To perform TGGA, you need to incorporate the transcriptome information
+into the genome.  The easiest way to do this is to have a GFF3 or GTF
+file that contains the transcript exon coordinates defined for the
+given genome.  Then you can do
+
+    gmap_build -d <genome> -c <transcriptome> -gff3=<gff3_file>, or
+    gmap_build -d <genome> -c <transcriptome> -gtf=<gtf_file>
+    
+where <genome> is the desired name of your genome index, and
+<transcriptome> is the desired name of your transcriptome index.
+(Note that the genome name and transcriptome name must be different.)
+The above commands assume that you have built the genome first using
+"gmap_build -d <genome>".  If you haven't built it yet, then you can
+build both the genome index and the transcriptome index with the above
+commands plus the genome FASTA file added as an argument (so
+gmap_build knows about the genome).
+
+
+
+
+
 To perform TGGA, in addition to the genome in FASTA format (suppose it
 is called genome.fasta), you will need either a set of transcripts in
 FASTA format (transcripts.fasta) or a set of transcript mappings to

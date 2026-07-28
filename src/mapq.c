@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: mapq.c 226345 2023-03-04 14:44:29Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

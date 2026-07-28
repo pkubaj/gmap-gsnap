@@ -1,4 +1,3 @@
-/* $Id: filesuffix.h 213998 2018-03-03 04:59:34Z twu $ */
 #ifndef FILESUFFIX_INCLUDED
 #define FILESUFFIX_INCLUDED
 

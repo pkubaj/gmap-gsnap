@@ -1,4 +1,3 @@
-/* $Id: mapq.h 226345 2023-03-04 14:44:29Z twu $ */
 #ifndef MAPQ_INCLUDED
 #define MAPQ_INCLUDED
 

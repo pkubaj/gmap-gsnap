@@ -47,35 +47,265 @@ if (!defined($cds_p)) {
 }
 
 
-undef $gene_line;
-@transcript_lines = ();
-while (defined($line = <>)) {
-    if ($line =~ /^\#/) {
-	# Skip
-    } elsif ($line !~ /\S/) {
-	# Skip blank line
-    } else {
-	$line =~ s/\r\n/\n/;
-	chop $line;
-	@fields = split /\t/,$line;
-
-	if ($fields[2] eq "gene") {
-	    if (defined($gene_line)) {
-		print_gene($gene_line,\@transcript_lines);
-	    }
-	    $gene_line = $line;
-	    @transcript_lines = ();
-	} else {
-	    push @transcript_lines,$line;
-	}
+$line = <>;
+while (defined($gene = read_gene())) {
+    if (gene_valid_p($gene->{type}) == 1) {
+	print_gene($gene);
     }
 }
 
-if (defined($gene_line)) {
-    print_gene($gene_line,\@transcript_lines);
+exit;
+
+
+sub print_gene {
+    my ($gene) = @_;
+
+    foreach my $transcript (@ {$gene->{transcripts}}) {
+	if (transcript_valid_p($transcript->{type}) == 0) {
+	    # Skip.  Undesirable transcript
+	} elsif ($#{$transcript->{exons}} < 0) {
+	    # Skip.  No exons or CDS
+	} else {
+	    print ">";
+	    my $transcript_id = $transcript->{id};
+	    $transcript_id =~ s/^rna-//;
+	    print $transcript_id . " ";
+	    print $transcript->{chr} . ":";
+	    if ($transcript->{dir} eq "+") {
+		print $transcript->{low} . "..";
+		print $transcript->{high} . "\n";
+	    } elsif ($transcript->{dir} eq "-") {
+		print $transcript->{high} . "..";
+		print $transcript->{low} . "\n";
+	    } else {
+		die "Unrecognized direction $transcript->{dir}";
+	    }
+	    
+	    my $gene_id = $gene->{id};
+	    $gene_id =~ s/^gene-//;
+	    print $gene_id . " ";
+	    print $gene->{name} . " ";
+	    print $gene->{description} . "\n";
+	    
+	    my $exon;
+	    if ($transcript->{dir} eq "+") {
+		foreach $exon (@ {$transcript->{exons}}) {
+		    print $exon->{low} . " ";
+		    print $exon->{high} . "\n";
+		}
+	    } elsif ($transcript->{dir} eq "-") {
+		foreach $exon (@ {$transcript->{exons}}) {
+		    print $exon->{high} . " ";
+		    print $exon->{low} . "\n";
+		}
+	    } else {
+		die "Unrecognized direction $transcript->{dir}";
+	    }
+	}
+    }
+
+    return;
 }
 
-exit;
+
+sub gene_valid_p {
+    my ($type) = @_;
+
+    if ($type eq "gene") {
+	return 1;
+    } else {
+	return 0;
+    }
+}
+
+
+sub gene_type {
+    my ($line) = @_;
+
+    if ($line =~ /^\S+\t\S+\tgene\t/) {
+	return "gene";
+    } elsif ($line =~ /^\S+\t\S+\tpseudogene\t/) {
+	return "pseudogene";
+    } else {
+	return;
+    }
+}
+
+
+sub read_gene {
+    my @transcripts = ();
+    my $type;
+
+    # print "Entering read_gene with $line";
+    while (defined($line) && !defined($type = gene_type($line))) {
+	$line = <>;
+    }
+
+    if (!defined($line)) {
+	# print "Exiting read_gene";
+	return;
+
+    } else {
+	# print "Gene: $line";
+
+	chop $line;
+	my @fields = split /\t/,$line;
+	my ($gene_id) = $fields[8] =~ /ID=([^;]+)/;
+	if (!defined($gene_id)) {
+	    die "Cannot find ID in $fields[8]";
+	}
+	my ($gene_name) = $fields[8] =~ /Name=([^;]+)/; # NCBI
+	if (!defined($gene_name)) {
+	    ($gene_name) = $fields[8] =~ /gene_name=([^;]+)/; # Gencode
+	}
+	if (!defined($gene_name)) {
+	    die "Cannot find Name or gene_namein $fields[8]";
+	}
+	my ($gene_description) = $fields[8] =~ /description=([^;]+)/; # NCBI
+	if (!defined($gene_description)) {
+	    $gene_description = "";
+	}
+
+	$line = <>;
+	while (defined(my $transcript = read_transcript($gene_id))) {
+	    push @transcripts,$transcript;
+	}
+
+	# print "Exiting read_gene with a gene";
+	return new Gene($type,$gene_id,$gene_name,$gene_description,\@transcripts);
+    }
+}
+
+
+sub transcript_valid_p {
+    my ($type) = @_;
+
+    if ($type eq "transcript") {
+	return 1;
+    } elsif ($type eq "primary_transcript") {
+	return 1;
+    } elsif ($type eq "mRNA") {
+	return 1;
+    } else {
+	return 0;
+    }
+}
+
+
+sub transcript_type {
+    my ($line) = @_;
+
+    if ($line =~ /^\S+\t\S+\ttranscript\t/) {
+	return "transcript";
+    } elsif ($line =~ /^\S+\t\S+\tprimary_transcript\t/) {
+	return "primary_transcript";
+    } elsif ($line =~ /^\S+\t\S+\tmRNA\t/) {
+	return "mRNA";
+    } elsif ($line =~ /^\S+\t\S+\tRNA\t/) {
+	return "tRNA";
+    } elsif ($line =~ /^\S+\t\S+\snoRNA\t/) {
+	return "snoRNA";
+    } else {
+	return;
+    }
+}
+
+
+
+sub read_transcript {
+    my ($gene_id) = @_;
+    my $gene_type;
+
+    # print "Entering read_transcript with $line";
+    while (defined($line) &&
+	   !defined($gene_type = gene_type($line)) &&
+	   !defined($transcript_type = transcript_type($line))) {
+	$line = <>;
+    }
+
+    if (!defined($line)) {
+	# print "Exiting read_transcript";
+	return;
+
+    } elsif (defined($gene_type)) {
+	# print "Exiting read_transcript with $line";
+	return;
+
+    } else {
+	# print "Transcript: $line";
+
+	chop $line;
+	my @fields = split /\t/,$line;
+	my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
+	if (!defined($parent_id)) {
+	    die "Cannot find Parent in $fields[8]";
+	} elsif ($parent_id ne $gene_id) {
+	    die "Transcript parent is not $gene_id in $line";
+	}
+
+	my ($transcript_id) = $fields[8] =~ /ID=([^;]+)/;
+	if (!defined($transcript_id)) {
+	    die "Cannot find ID in $fields[8]";
+	}
+	my $chr = $fields[0];
+	my $dir = $fields[6];
+	my $transcript_low = $fields[3];
+	my $transcript_high = $fields[4];
+
+	$line = <>;
+
+	my @exons = ();
+	if ($cds_p == 1) {
+	    # CDS only
+	    while (defined($line) &&
+		   !defined(gene_type($line)) &&
+		   !defined(transcript_type($line))) {
+		if ($line !~ /^\S+\t\S+\tCDS\t/) {
+		    # Skip.  Require only lines with "CDS"
+		} else {
+		    my @fields = split /\t/,$line;
+		    my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
+		    if (!defined($parent_id)) {
+			die "Cannot find Parent in $fields[8]";
+		    } elsif ($parent_id ne $transcript_id) {
+			# Skip: Could be exon for an miRNA
+		    } else {
+			my $exon_low = $fields[3];
+			my $exon_high = $fields[4];
+			push @exons,new Exon($exon_low,$exon_high);
+		    }
+		}
+		$line = <>;
+	    }
+
+	} else {
+	    # Exons (including UTR)
+	    while (defined($line) &&
+		   !defined(gene_type($line)) &&
+		   !defined(transcript_type($line))) {
+		if ($line !~ /^\S+\t\S+\texon\t/) {
+		    # Skip.  Use only lines with "exon"
+		} else {
+		    my @fields = split /\t/,$line;
+		    my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
+		    if (!defined($parent_id)) {
+			die "Cannot find Parent in $fields[8]";
+		    } elsif ($parent_id ne $transcript_id) {
+			# Skip: Could be exon for an miRNA
+		    } else {
+			my $exon_low = $fields[3];
+			my $exon_high = $fields[4];
+			push @exons,new Exon($exon_low,$exon_high);
+		    }
+		}
+		$line = <>;
+	    }
+	}
+
+	# print "Exiting read_transcript with $transcript\n";
+	return new Transcript($transcript_type,$transcript_id,$chr,$dir,$transcript_low,$transcript_high,\@exons);
+    }
+}
 
 
 sub gene_class {
@@ -216,91 +446,48 @@ sub has_tag_p {
 }
 
 
-sub print_gene {
-    my ($gene_line, $transcript_lines) = @_;
-    my $transcript_line;
-    my @exon_lines = ();
-    my $printp;
-
-    @fields = split /\t/,$gene_line;
-    ($gene_id) = $fields[8] =~ /gene_id=([^;]+)/;
-    ($gene_name) = $fields[8] =~ /gene_name=([^;]+)/;
-    ($gene_type) = $fields[8] =~ /gene_type=([^;]+)/;
-    $gene_class = gene_class($gene_type);
-
-    if ($gene_class eq "transcribed") {
-	# Always include transcribed
-	$printp = 1;
-
-    } elsif ($gene_class eq "immune") {
-	$printp = ($exclude_immune_p == 1) ? 0 : 1;
-
-    } elsif ($gene_class eq "lincrna") {
-	$printp = ($exclude_lincrna_p == 1) ? 0 : 1;
-
-    } elsif ($gene_class eq "other") {
-	# Non-transcribed
-	$printp = ($exclude_nontranscribed_p == 1) ? 0 : 1;
-
-    } else {
-	die "Unexpected gene_class $gene_class";
-    }
-
-    if ($printp == 0) {
-	print STDERR "Excluding gene $gene_name because of gene type $gene_type\n";
-    } else {
-	foreach my $line (@ {$transcript_lines}) {
-	    @fields = split /\t/,$line;
-
-	    if ($fields[2] eq "transcript") {
-		if (defined($transcript_line)) {
-		    print_transcript($gene_id,$gene_name,$transcript_line,\@exon_lines);
-		}
-		$transcript_line = $line;
-		@exon_lines = ();
-
-	    } elsif ($fields[2] eq "exon") {
-		push @exon_lines,$line;
-	    }
-
-	}
-
-	if (defined($transcript_line)) {
-	    print_transcript($gene_id,$gene_name,$transcript_line,\@exon_lines);
-	}
-    }
-
-    return;
-}
-
-
 sub print_transcript {
     my ($gene_id, $gene_name, $transcript_line, $exon_lines) = @_;
     my $printp;
 
     @fields = split /\t/,$transcript_line;
     ($transcript_name) = $fields[8] =~ /transcript_name=([^;]+)/;
-    ($transcript_type) = $fields[8] =~ /transcript_type=([^;]+)/;
-    $transcript_class = transcript_class($transcript_type);
-
-    if ($transcript_class eq "transcribed") {
-	# Always include transcribed
-	$printp = 1;
-
-    } elsif ($transcript_class eq "immune") {
-	$printp = ($exclude_immune_p == 1) ? 0 : 1;
-
-    } elsif ($transcript_class eq "lincrna") {
-	$printp = ($exclude_lincrna_p == 1) ? 0 : 1;
-
-    } elsif ($transcript_class eq "other") {
-	# Non-transcribed
-	$printp = ($exclude_nontranscribed_p == 1) ? 0 : 1;
-
-    } else {
-	die "Unexpected transcript_class $transcript_class";
+    if (!defined($transcript_name)) {
+	($transcript_name) = $fields[8] =~ /ID=([^;]+)/;
     }
+
+    # transcript_id seems not to be unique
+#    if (!defined($transcript_name)) {
+#	($transcript_name) = $fields[8] =~ /transcript_id=([^;]+)/;
+#    }
+
+    if (!defined($transcript_name)) {
+	die "Cannot find either transcript_name or ID in $transcript_line\n";
+    }
+
+#    ($transcript_type) = $fields[8] =~ /transcript_type=([^;]+)/;
+#    $transcript_class = transcript_class($transcript_type);
+
+#    if ($transcript_class eq "transcribed") {
+#	# Always include transcribed
+#	$printp = 1;
+#
+#    } elsif ($transcript_class eq "immune") {
+#	$printp = ($exclude_immune_p == 1) ? 0 : 1;
+#
+#    } elsif ($transcript_class eq "lincrna") {
+#	$printp = ($exclude_lincrna_p == 1) ? 0 : 1;
+#
+#    } elsif ($transcript_class eq "other") {
+#	# Non-transcribed
+#	$printp = ($exclude_nontranscribed_p == 1) ? 0 : 1;
+#
+#    } else {
+#	die "Unexpected transcript_class $transcript_class";
+#    }
     
+    $printp = 1;
+
     if ($printp == 0) {
 	print STDERR "Excluding transcript $transcript_name because of transcript type $transcript_type\n";
     } else {
@@ -430,6 +617,33 @@ sub print_coords {
     return;
 }
 
+# In NCBI, children of parent gene-* can be:
+
+#      39 antisense_RNA
+#      44 C_gene_segment
+#      61 D_gene_segment
+#       6 enhancer
+#    9614 exon
+#     128 J_gene_segment
+#   32844 lnc_RNA
+#  144481 mRNA
+#      54 ncRNA
+#    2139 primary_transcript
+#       1 RNase_MRP_RNA
+#       2 RNase_P_RNA
+#      80 rRNA
+#       4 scRNA
+#    1300 snoRNA
+#     172 snRNA
+#       1 telomerase_RNA
+#   14974 transcript
+#     691 tRNA
+#       4 vault_RNA
+#     664 V_gene_segment
+#       4 Y_RNA
+
+
+
 # gene_type in gencode can be:
 
 #     100 3prime_overlapping_ncrna
@@ -503,4 +717,52 @@ sub print_coords {
 #      99 TR_V_pseudogene
 #    1430 unitary_pseudogene
 #   11202 unprocessed_pseudogene
+
+
+BEGIN {
+    package Gene;
+
+    sub new {
+	my $class = shift;
+	my $self = {
+	    type => shift,
+	    id => shift,
+	    name => shift,
+	    description => shift,
+	    transcripts => shift,
+	};
+	bless $self, $class;
+	return $self;
+    }
+
+    package Transcript;
+
+    sub new {
+	my $class = shift;
+	my $self = {
+	    type => shift,
+	    id => shift,
+	    chr => shift,
+	    dir => shift,
+	    low => shift,
+	    high => shift,
+	    exons => shift,
+	};
+	bless $self, $class;
+	return $self;
+    }
+
+    package Exon;
+
+    sub new {
+	my $class = shift;
+	my $self = {
+	    low => shift,
+	    high => shift,
+	};
+	bless $self, $class;
+	return $self;
+    }
+}
+
 

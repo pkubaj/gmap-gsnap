@@ -1,4 +1,3 @@
-/* $Id: sequence.h 224677 2021-10-25 15:01:14Z twu $ */
 #ifndef SEQUENCE_INCLUDED
 #define SEQUENCE_INCLUDED
 #ifdef HAVE_CONFIG_H

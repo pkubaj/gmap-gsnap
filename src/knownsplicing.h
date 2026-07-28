@@ -1,4 +1,4 @@
-/* $Id: 026a6ef901b13a8a772c6eab2571a253052b8284 $ */
+/* $Id: a7bae684e735a2adca0f7bceb421dbba8111fb59 $ */
 #ifndef KNOWNSPLICING_INCLUDED
 #define KNOWNSPLICING_INCLUDED
 
@@ -17,6 +17,23 @@
 
 #define T Knownsplicing_T
 typedef struct T *T;
+struct T {
+  EF64_T donor_ef;
+  Univcoord_T *donor_endpoints;
+  int donor_nintervals;
+
+  EF64_T acceptor_ef;
+  Univcoord_T *acceptor_endpoints;
+  int acceptor_nintervals;
+
+  EF64_T antidonor_ef;
+  Univcoord_T *antidonor_endpoints;
+  int antidonor_nintervals;
+
+  EF64_T antiacceptor_ef;
+  Univcoord_T *antiacceptor_endpoints;
+  int antiacceptor_nintervals;
+};
 
 extern void
 Knownsplicing_free (T *old);
@@ -28,7 +45,7 @@ Knownsplicing_new (Univcoordlist_T donor_startpoints, Univcoordlist_T donor_part
 		   Univcoordlist_T antiacceptor_startpoints, Univcoordlist_T antiacceptor_partners,
 		   Univcoordtableuint_T donor_table, Univcoordtableuint_T acceptor_table, 
 		   Univcoordtableuint_T antidonor_table, Univcoordtableuint_T antiacceptor_table, 
-		   Univcoord_T genomelength, FILE *dump_splices_fp, Univ_IIT_T chromosome_iit,
+		   Univcoord_T genomelength, Univ_IIT_T chromosome_iit,
 		   EF64_T chromosome_ef64, bool intron_level_p);
 
 extern T
@@ -49,6 +66,12 @@ Knownsplicing_antidonors (uint64_t *low_rank, uint64_t *high_rank, T this,
 extern Univcoord_T *
 Knownsplicing_antiacceptors (uint64_t *low_rank, uint64_t *high_rank, T this,
 			     Univcoord_T univdiagonal, int querylength, int pos5, int pos3);
+
+extern bool
+Knownsplicing_intron_p (T this, Univcoord_T donor_position, Univcoord_T acceptor_position);
+
+extern bool
+Knownsplicing_antiintron_p (T this, Univcoord_T acceptor_position, Univcoord_T donor_position);
 
 extern T
 Knownsplicing_from_splicing_iit (IIT_T splicing_iit, int *splicing_divint_crosstable,

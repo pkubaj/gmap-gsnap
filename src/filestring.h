@@ -1,4 +1,3 @@
-/* $Id: filestring.h 224951 2022-10-08 20:03:19Z twu $ */
 #ifndef FILESTRING_INCLUDED
 #define FILESTRING_INCLUDED
 

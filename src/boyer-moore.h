@@ -1,4 +1,3 @@
-/* $Id: boyer-moore.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef BOYER_MOORE_INCLUDED
 #define BOYER_MOORE_INCLUDED
 

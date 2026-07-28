@@ -1,4 +1,3 @@
-/* $Id: splicetrie.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef SPLICETRIE_INCLUDED
 #define SPLICETRIE_INCLUDED
 

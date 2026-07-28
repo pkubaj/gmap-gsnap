@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: aa2c4d583b43a268ee47177930790cefdb61ba6d $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -241,7 +240,7 @@ Merge_uint8 (UINT8 *__restrict__ dest, UINT8 *__restrict__ A,
   } else if (dest) {
     C0 = C = dest;
   } else {
-    MALLOC_ALIGN(C,nC * sizeof(UINT8));
+    C = (UINT8 *) MALLOC_ALIGN(nC * sizeof(UINT8));
     C0 = C;
   }
 
@@ -424,6 +423,19 @@ Merge_uint8 (UINT8 *__restrict__ dest, UINT8 *__restrict__ A,
       *C++ = *B++;
     }
   }
+
+#if 0
+  /* Serial, branchless, but not sure if it is faster */
+  while (A < Aend && B < Bend) {
+    /* if (*A < *B), then (*A - *B) >> 63 is 1, and mask is 0x0000000000000000 */
+    /* if (*B < *A), then (*A - *B) >> 63 is 0, and mask is 0xFFFFFFFFFFFFFFFF */
+    flag = (*A - *B) >> 63;
+    mask = flag - 1U;
+    *C++ = ((*A) & ~mask) | ((*B) & mask);
+    A += flag;
+    B += (1 - flag);
+  }
+#endif
 
   /* Final elements to add from A or B.  Note that A == Aend or B == Bend or both  */
   memcpy(C,A,(Aend - A) * sizeof(UINT8));

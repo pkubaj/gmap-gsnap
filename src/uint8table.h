@@ -1,4 +1,4 @@
-/* $Id: uint8table.h 223349 2020-10-28 02:49:25Z twu $ */
+/* $Id: 25e227e9ba2898bd92d885a13a0c94c2b8743989 $ */
 #ifndef UINT8TABLE_INCLUDED
 #define UINT8TABLE_INCLUDED
 #ifdef HAVE_CONFIG_H

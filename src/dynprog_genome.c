@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: dynprog_genome.c 225439 2022-12-08 17:36:36Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

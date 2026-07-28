@@ -1,5 +1,4 @@
 #! @PERL@
-# $Id: gmap_build.pl.in 226315 2023-02-28 18:22:20Z twu $
 
 use warnings;	
 
@@ -23,12 +22,14 @@ GetOptions(
 
     'B=s' => \$bindir,		# binary directory
 
-    'D|dir=s' => \$user_gmapdb, # destination directory
+    'D|genomedir=s' => \$user_genomedb, # destination directory for genome
     'd|genomedb=s' => \$genomename,		  # genome name
+    'C|transcriptomedir=s' => \$user_transcriptomedb, # destination directory for transcriptome
     'c|transcriptomedb=s' => \$transcriptomename, # transcriptome name
     'T|transcripts=s' => \$transcript_fasta, # transcript FASTA file
     'gff3=s' => \$transcript_gff3,  # transcript GFF3 file
     'gtf=s' => \$transcript_gtf,  # transcript GTF file
+    'cds' => \$cds_p,  # build cds from GFF3 file
 
     't|nthreads=s' => \$nthreads,   # number of threads for GMAP alignment
     'G|genes=s' => \$transcript_genes, # transcript GENES file
@@ -36,12 +37,15 @@ GetOptions(
     'n|names=s' => \$contig_name_file,   # substitute contig names
     'L|limit-to-names' => \$limit_to_names_p, # limit to names in -n file
 
-    'M|mdfile=s' => \$mdfile,	# NCBI MD file
-    'C|contigs-are-mapped' => \$contigs_mapped_p, # Each contig contains a chromosome tag in the FASTA header
+    # 'M|mdfile=s' => \$mdfile,	# NCBI MD file
+    # 'C|contigs-are-mapped' => \$contigs_mapped_p, # Each contig contains a chromosome tag in the FASTA header
 
     'local=s' => \$build_localdb_p, # Whether to build localdb
-    'k|kmer=s' => \$kmersize, # k-mer size for genomic index (allowed: 16 or less)
+    'k|gen-kmer=s' => \$gen_kmersize, # k-mer size for genome index (allowed: 16 or less)
+    'K|tr-kmer=s' => \$tr_kmersize, # k-mer size for transcriptome index (allowed: 16 or less)
     'q=s' => \$sampling,	   # sampling interval for genome (default: 3)
+    'j|gen-minimizer=s' => \$gen_mmersize, # length of genome minimizer (default: 0)
+    'J|tr-minimizer=s' => \$tr_mmersize, # length of transcriptome minimizer (default: 0)
 
     's|sort=s' => \$sorting,	# Sorting
     'g|gunzip' => \$gunzipp,	# gunzip files
@@ -58,16 +62,17 @@ GetOptions(
     );
 
 
-if (!defined($kmersize)) {
-    print STDERR "-k flag not specified, so building main hash table with default 15-mers\n";
-    $kmersize = 15;
+if (!defined($gen_kmersize)) {
+    print STDERR "-k flag not specified, so building genome hash table with default 15-mers\n";
+    $gen_kmersize = 15;
 }
 
-if (!defined($build_localdb_p)) {
-    print STDERR "--local flag not specified, so building localdb by default\n";
-    $build_localdb_p = 1;
+if (!defined($tr_kmersize)) {
+    if (defined($transcriptomename)) {
+	print STDERR "-K flag not specified, so building transcriptome hash table with default 15-mers\n";
+    }
+    $tr_kmersize = 15;
 }
-
 
 if (!defined($genomename)) {
     print_usage();
@@ -87,19 +92,31 @@ if (!defined($genomename)) {
     print STDERR "Please do not use a full path for the --genomedb flag.\n";
     print STDERR "This was allowed in previous versions of gmap_build, but\n";
     print STDERR "this is confusing with transcriptome-guided alignment\n";
-    print STDERR "You should specify --dir and --genomedb separately as\n";
-    print STDERR "  --dir $destdir\n";
+    print STDERR "You should specify --genomedir and --genomedb separately as\n";
+    print STDERR "  --genomedir $destdir\n";
     print STDERR "  --genomedb $genomename\n";
     die;
 }
 
 
-if (defined($user_gmapdb)) {
-    print STDERR "Writing files under $user_gmapdb\n";
-    $gmapdb = $user_gmapdb;
+if (defined($user_genomedb)) {
+    print STDERR "Writing genome files under $user_genomedb\n";
+    $genomedb = $user_genomedb;
 } else {
-    $gmapdb = "@GMAPDB@";
-    print STDERR "Destination directory not defined with -D flag, so writing files under $gmapdb\n";
+    $genomedb = "@GMAPDB@";
+    print STDERR "Destination directory for genome not defined with -D flag, so writing files under $genomedb\n";
+}
+
+if (!defined($transcriptomename)) {
+    # Skip
+} elsif (defined($user_transcriptomedb)) {
+    print STDERR "Writing transcriptome files under $user_transcriptomedb\n";
+    $transcriptomedb = $user_transcriptomedb;
+} elsif (defined($transcriptomedir)) {
+    $transcriptomedb = $transcriptomedir;
+} else {
+    $transcriptomedb = "$genomedb";
+    print STDERR "Destination directory for transcriptome not defined with -C flag, so writing files under $transcriptomedb\n";
 }
 
 if (defined($contig_name_file)) {
@@ -108,7 +125,7 @@ if (defined($contig_name_file)) {
 	$contig_hash_file = $contig_name_file;
     } else {
 	# Need to look at the first line
-	$FP = new IO::File("$contig_name_file") or die;
+	$FP = new IO::File("$contig_name_file") or die "No contig name file $contig_name_file";
 	if (defined($line = <$FP>)) {
 	    chop $line;
 	    if ($line =~ /(\S+)\s+(\S+)/) {
@@ -185,11 +202,11 @@ if (!defined($build_sarray_p)) {
     die "Argument to --sarray needs to be 0 or 1";
 }
 
-if (defined($contigs_mapped_p)) {
-    $contigs_mapped_flag = "-C";
-} else {
-    $contigs_mapped_flag = "";
-}
+# if (defined($contigs_mapped_p)) {
+#     $contigs_mapped_flag = "-C";
+# } else {
+#     $contigs_mapped_flag = "";
+# }
 
 
 if (!defined($nthreads)) {
@@ -198,15 +215,15 @@ if (!defined($nthreads)) {
 
 if ($#ARGV < 0) {
     # No genome fasta provided, so check if it exists
-    if (-d "$gmapdb/$genomename") {
+    if (-d "$genomedb/$genomename") {
 	$genome_exists_p = 1;
     } else {
-	die "Genome FASTA files were not given, but no directory $gmapdb/$genomename was found";
+	die "Genome FASTA files were not given, but no directory $genomedb/$genomename was found";
     }
 } else {
     # Genome fasta provided so assume that we need to build or re-build the genome
-    if (-d "$gmapdb/$genomename") {
-	print STDERR "Warning: Genome FASTA files were given, so we are over-writing the index files at $gmapdb/$genomename\n";
+    if (-d "$genomedb/$genomename") {
+	print STDERR "Warning: Genome FASTA files were given, so we are over-writing the index files at $genomedb/$genomename\n";
     }
     $genome_exists_p = 0;
 }    
@@ -218,8 +235,11 @@ if (defined($transcript_fasta) || defined($transcript_genes) || defined($transcr
 }
 
 
-# Call to create genome.transcripts directory
-$dbdir = create_db($gmapdb,$genomename,$transcriptomename);
+$genomedir = create_genomedb($genomedb,$genomename);
+if (defined($transcriptomename)) {
+    # Call to create transcriptome.genomes directory
+    $transcriptomedir = create_transcriptomedb($transcriptomedb,$transcriptomename);
+}
 
 
 
@@ -229,9 +249,9 @@ check_compiler_assumptions();
 
 if (!defined($transcriptomename) || $genome_exists_p == 0) {
     # 1
-    $genomecompfile = "$dbdir/$genomename.genomecomp";
-    my $coordsfile = "$gmapdb/$genomename.coords";
-    my $fasta_sources = "$gmapdb/$genomename.sources";
+    $genomecompfile = "$genomedir/$genomename.genomecomp";
+    my $coordsfile = "$genomedb/$genomename.coords";
+    my $fasta_sources = "$genomedb/$genomename.sources";
 
     $FP = new IO::File(">$fasta_sources") or die "Could not create $fasta_sources";
     foreach $fasta (@ARGV) {
@@ -241,9 +261,9 @@ if (!defined($transcriptomename) || $genome_exists_p == 0) {
 
 
     # 2
-    create_genome_version($dbdir,$genomename);
+    create_genome_version($genomedir,$genomename);
 
-    create_coords($mdfile,$fastq_flag,$fasta_pipe,$gunzip_flag,$circular_flag,$altscaffold_flag,$contigs_mapped_flag,
+    create_coords($fastq_flag,$fasta_pipe,$gunzip_flag,$circular_flag,$altscaffold_flag,
 		  $contig_hash_file,$contig_order_file,$bindir,$coordsfile,$fasta_sources);
     if (!(-s "$coordsfile")) {
 	die "ERROR: $coordsfile not found";
@@ -253,16 +273,20 @@ if (!defined($transcriptomename) || $genome_exists_p == 0) {
     }
 
     make_contig($nmessages_flag,$chr_order_flag,
-		$bindir,$dbdir,$genomename,$gmap_process_pipe);
+		$bindir,$genomedir,$genomename,$gmap_process_pipe);
 
-    compress_genome($nmessages_flag,$bindir,$dbdir,$genomename,$gmap_process_pipe);
+    compress_genome($nmessages_flag,$bindir,$genomedir,$genomename,$gmap_process_pipe);
 
-    unshuffle_genome($bindir,$dbdir,$genomename,$genomecompfile);
+    unshuffle_genome($bindir,$genomedir,$genomename,$genomecompfile);
 
 
     # 3
-    # Note that for gmapindex, we use -D $dbdir and not -D $gmapdb
-    $index_cmd = "\"$bindir/gmapindex\" -k $kmersize -q $sampling $nmessages_flag -D \"$dbdir\" -d $genomename";
+    # Note that for gmapindex, we use -D $genomedir and not -D $genomedb
+    $index_cmd = "\"$bindir/gmapindex\" -k $gen_kmersize -q $sampling";
+    if (defined($gen_mmersize)) {
+	$index_cmd .= " -j $gen_mmersize";
+    }
+    $index_cmd .= " $nmessages_flag -D \"$genomedir\" -d $genomename";
 
     # large_genome_p means positions exceed 2^32 bp, so create positionsh file (determined by gmapindex)
     # huge_offsets_p means index offsets exceed 2^32 bp, so create pages file (determined here)
@@ -271,23 +295,34 @@ if (!defined($transcriptomename) || $genome_exists_p == 0) {
 	$index_cmd .= " -H";
     }
 
+    if ($large_genome_p == 1) {
+	# Skip making a regiondb
+	print STDERR "Not building localdb for large genomes\n";
+	$localp = 0;
+    } elsif (!defined($build_localdb_p)) {
+	print STDERR "--local flag not specified, so building localdb by default\n";
+	$localp = 1;
+    } elsif ($build_localdb_p eq "0") {
+	$localp = 0;
+    } elsif ($build_localdb_p eq "1") {
+	$localp = 1;
+    } else {
+	die "Argument to --local needs to be 0 or 1";
+    }
+
     create_index_offsets($index_cmd,$genomecompfile);
     create_index_positions($index_cmd,$genomecompfile);
 
 
     if ($sarrayp == 1) {
-	make_suffix_array($bindir,$dbdir,$genomename);
+	make_suffix_array($bindir,$genomedir,$genomename);
     }
 
     # 4
-    # Note that for gmapindex, we use -D $dbdir and not -D $gmapdb
-    if ($build_localdb_p == 0) {
-	# Skip making a regiondb
-    } elsif ($large_genome_p == 1) {
-	# Skip making a regiondb
-    } else {
+    # Note that for gmapindex, we use -D $genomedir and not -D $genomedb
+    if ($localp == 1) {
 	# Previously provided "-j $localsize" to gmapindex
-	$index_cmd = "\"$bindir/gmapindex\" $nmessages_flag -D \"$dbdir\" -d $genomename";
+	$index_cmd = "\"$bindir/gmapindex\" $nmessages_flag -D \"$genomedir\" -d $genomename";
 	create_regiondb($index_cmd,$genomecompfile);
     }
 
@@ -298,14 +333,21 @@ if (!defined($transcriptomename) || $genome_exists_p == 0) {
 
 if (defined($transcriptomename)) {
     if (defined($transcript_gff3)) {
-	create_transcriptome_from_gff3($gmapdb,$genomename,$transcriptomename,$transcript_gff3,$kmersize);
+	create_transcriptome_from_gff3($genomedb,$genomename,
+				       $transcriptomedb,$transcriptomename,$transcript_gff3,
+				       $gen_kmersize,$gen_mmersize,$tr_kmersize,$tr_mmersize);
     } elsif (defined($transcript_gtf)) {
-	create_transcriptome_from_gtf($gmapdb,$genomename,$transcriptomename,$transcript_gtf,$kmersize);
+	create_transcriptome_from_gtf($genomedb,$genomename,
+				      $transcriptomedb,$transcriptomename,$transcript_gtf,
+				      $gen_kmersize,$gen_mmersize,$tr_kmersize,$tr_mmersize);
     } elsif (defined($transcript_genes)) {
-	create_transcriptome_from_genes($gmapdb,$genomename,$transcriptomename,$transcript_genes,$kmersize);
+	create_transcriptome_from_genes($genomedb,$genomename,
+					$transcriptomedb,$transcriptomename,$transcript_genes,
+					$tr_kmersize,$tr_mmersize);
     } elsif (defined($transcript_fasta)) {
-	create_transcriptome_from_fasta($gmapdb,$genomename,$transcriptomename,$transcript_fasta,
-					$kmersize,$nthreads);
+	create_transcriptome_from_fasta($genomedb,$genomename,
+					$transcriptomedb,$transcriptomename,$transcript_fasta,
+					$tr_kmersize,$tr_mmersize,$nthreads);
     } else {
 	print_usage();
 	die "If you specify --transcriptomedb, you must specify either a transcript FASTA file with --transcripts or a genes file with --genes.  You can generate a genes file using gff3_genes or GMAP.";
@@ -326,27 +368,38 @@ sub check_compiler_assumptions {
 }
 
 
-sub create_db {
-    my ($gmapdb, $genomename, $transcriptomename) = @_;
+sub create_genomedb {
+    my ($genomedb, $genomename) = @_;
 
-    print STDERR "Creating files in directory $gmapdb/$genomename\n";
-    system("mkdir -p \"$gmapdb\"");
-    system("mkdir -p \"$gmapdb/$genomename\"");
-    system("mkdir -p \"$gmapdb/$genomename/$genomename.maps\"");
-    system("chmod 755 \"$gmapdb/$genomename/$genomename.maps\"");
-    if (defined($transcriptomename)) {
-	system("mkdir -p \"$gmapdb/$genomename/$genomename.transcripts\"");
-	system("chmod 755 \"$gmapdb/$genomename/$genomename.transcripts\"");
-    }
+    print STDERR "Creating files in directory $genomedb/$genomename\n";
+    system("mkdir -p \"$genomedb\"");
+    system("mkdir -p \"$genomedb/$genomename\"");
+    system("mkdir -p \"$genomedb/$genomename/$genomename.maps\"");
+    system("chmod 755 \"$genomedb/$genomename/$genomename.maps\"");
 
-    return "$gmapdb/$genomename";
+    return "$genomedb/$genomename"; # genomedir
+}
+
+
+sub create_transcriptomedb {
+    my ($transcriptomedb, $transcriptomename) = @_;
+
+    # Changed with version 2024-08
+    # print STDERR "Creating files in directory $gmapdb/$genomename\n";
+    # system("mkdir -p \"$gmapdb/$genomename/$genomename.transcripts\"");
+    # system("chmod 755 \"$gmapdb/$genomename/$genomename.transcripts\"");
+
+    system("mkdir -p \"$transcriptomedb/$transcriptomename/$transcriptomename.genomes\"");
+    system("chmod 755 \"$transcriptomedb/$transcriptomename/$transcriptomename.genomes\"");
+
+    return "$transcriptomedb/$transcriptomename"; # transcriptomedir
 }
 
 
 sub create_genome_version {
-    my ($dbdir, $genomename) = @_;
+    my ($genomedir, $genomename) = @_;
 
-    open GENOMEVERSIONFILE, ">$dbdir/$genomename.version" or die $!;
+    open GENOMEVERSIONFILE, ">$genomedir/$genomename.version" or die $!;
     print GENOMEVERSIONFILE "$genomename\n";
     print GENOMEVERSIONFILE "$package_version\n";
 
@@ -356,29 +409,30 @@ sub create_genome_version {
 }
 
 sub create_coords {
-    my ($mdfile, $fastq_flag, $fasta_pipe, $gunzip_flag, $circular_flag, $altscaffold_flag, $contigs_mapped_flag,
+    my ($fastq_flag, $fasta_pipe, $gunzip_flag, $circular_flag, $altscaffold_flag,
 	$contig_hash_file, $contig_order_file, $bindir, $coordsfile, $fasta_sources) = @_;
     my ($cmd, $rc);
 
-    if (defined($mdfile)) {
+#    if (defined($mdfile)) {
 	# MD file cannot specify that a chromosome is circular or altscaffold
-	$cmd = "\"$bindir/md_coords\" -o \"$coordsfile\" $mdfile";
+	# $cmd = "\"$bindir/md_coords\" -o \"$coordsfile\" $mdfile";
+#    }
+
+    if (defined($fasta_pipe)) {
+	$cmd = "$fasta_pipe | \"$bindir/fa_coords\" $revcomp_flag $fastq_flag $circular_flag $altscaffold_flag $limit_to_names_flag -o \"$coordsfile\"";
     } else {
-	if (defined($fasta_pipe)) {
-	    $cmd = "$fasta_pipe | \"$bindir/fa_coords\" $revcomp_flag $fastq_flag $circular_flag $altscaffold_flag $contigs_mapped_flag $limit_to_names_flag -o \"$coordsfile\"";
-	} else {
-	    $cmd = "\"$bindir/fa_coords\" $gunzip_flag $revcomp_flag $fastq_flag $circular_flag $altscaffold_flag $contigs_mapped_flag $limit_to_names_flag -o \"$coordsfile\"";
-	}
-	if (defined($contig_hash_file)) {
-	    $cmd .= " -n $contig_hash_file";
-	}
-	if (defined($contig_order_file)) {
-	    $cmd .= " -N $contig_order_file";
-	}
-	if (!defined($fasta_pipe)) {
-	    $cmd .= " -f \"$fasta_sources\"";
-	}
+	$cmd = "\"$bindir/fa_coords\" $gunzip_flag $revcomp_flag $fastq_flag $circular_flag $altscaffold_flag $limit_to_names_flag -o \"$coordsfile\"";
     }
+    if (defined($contig_hash_file)) {
+	$cmd .= " -n $contig_hash_file";
+    }
+    if (defined($contig_order_file)) {
+	$cmd .= " -N $contig_order_file";
+    }
+    if (!defined($fasta_pipe)) {
+	$cmd .= " -f \"$fasta_sources\"";
+    }
+
     run_now($cmd);
     sleep($sleeptime);
     return;
@@ -405,29 +459,29 @@ sub make_gmap_process_pipe {
 
 sub make_contig {
     my ($nmessages_flag, $chr_order_flag,
-	$bindir, $dbdir, $genomename, $gmap_process_pipe) = @_;
+	$bindir, $genomedir, $genomename, $gmap_process_pipe) = @_;
     my ($cmd, $rc);
 
-    # Note that for gmapindex, we use -D $dbdir and not -D $gmapdb
-    $cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$dbdir\" -A $chr_order_flag";
+    # Note that for gmapindex, we use -D $genomedir and not -D $genomedb
+    $cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$genomedir\" -A $chr_order_flag";
     run_now($cmd);
     sleep($sleeptime);
     return;
 }
 
 sub compress_genome {
-    my ($nmessages_flag, $bindir, $dbdir, $genomename, $gmap_process_pipe) = @_;
+    my ($nmessages_flag, $bindir, $genomedir, $genomename, $gmap_process_pipe) = @_;
     my ($cmd, $rc);
 
     # Build forward direction (.genomecomp)
-    # Note that for gmapindex, we use -D $dbdir and not -D $gmapdb
-    $cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$dbdir\" -G";
+    # Note that for gmapindex, we use -D $genomedir and not -D $genomdb
+    $cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$genomedir\" -G";
     run_now($cmd);
     sleep($sleeptime);
 
     if ($sarrayp == 1) {
 	# Build reverse complement (.genomecomp.rev)
-	$cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$dbdir\" -G -r";
+	$cmd = "$gmap_process_pipe | \"$bindir/gmapindex\" $nmessages_flag -d $genomename -D \"$genomedir\" -G -r";
 	run_now($cmd);
 	sleep($sleeptime);
     }
@@ -436,16 +490,16 @@ sub compress_genome {
 }
 
 sub unshuffle_genome {
-    my ($bindir, $dbdir, $genomename, $genomecompfile) = @_;
+    my ($bindir, $genomedir, $genomename, $genomecompfile) = @_;
     my ($cmd, $rc);
 
-    $cmd = "cat \"$genomecompfile\" | \"$bindir/gmapindex\" -d $genomename -D \"$dbdir\" -U";
+    $cmd = "cat \"$genomecompfile\" | \"$bindir/gmapindex\" -d $genomename -D \"$genomedir\" -U";
     run_now($cmd);
     sleep($sleeptime);
 
     if ($sarrayp == 1) {
 	# Build reverse complement
-	$cmd = "cat \"$genomecompfile.rev\" | \"$bindir/gmapindex\" -d $genomename -D \"$dbdir\" -U -r";
+	$cmd = "cat \"$genomecompfile.rev\" | \"$bindir/gmapindex\" -d $genomename -D \"$genomedir\" -U -r";
 	run_now($cmd);
 	sleep($sleeptime);
     }
@@ -513,11 +567,11 @@ sub create_regiondb {
 
 
 sub make_suffix_array {
-    my ($bindir, $dbdir, $genomename) = @_;
+    my ($bindir, $genomedir, $genomename) = @_;
     my ($cmd, $rc);
 
     # Suffix array: forward
-    $cmd = "\"$bindir/gmapindex\" -D \"$dbdir\" -d $genomename -S";
+    $cmd = "\"$bindir/gmapindex\" -D \"$genomedir\" -d $genomename -S";
     print STDERR "Running $cmd\n";
     if (($rc = system($cmd)) != 0) {
 	die "$cmd failed with return code $rc";
@@ -525,7 +579,7 @@ sub make_suffix_array {
     sleep($sleeptime);
 
     # LCP and child arrays
-    $cmd = "\"$bindir/gmapindex\" -D \"$dbdir\" -d $genomename -L";
+    $cmd = "\"$bindir/gmapindex\" -D \"$genomedir\" -d $genomename -L";
     print STDERR "Running $cmd\n";
     if (($rc = system($cmd)) != 0) {
 	die "$cmd failed with return code $rc";
@@ -533,7 +587,7 @@ sub make_suffix_array {
     sleep($sleeptime);
 
     # Compressed suffix array
-    # $cmd = "\"$bindir/gmapindex\" -d $genomename -F \"$dbdir\" -D \"$dbdir\" -C";
+    # $cmd = "\"$bindir/gmapindex\" -d $genomename -F \"$genomedir\" -D \"$genomedir\" -C";
     # print STDERR "Running $cmd\n";
     # if (($rc = system($cmd)) != 0) {
     # die "$cmd failed with return code $rc";
@@ -545,17 +599,21 @@ sub make_suffix_array {
 
 
 sub create_transcriptome_from_fasta {
-    my ($gmapdb, $genomename, $transcriptomename, $transcript_fasta,
-	$kmersize, $nthreads) = @_;
+    my ($genomedb, $genomename, $transcriptomedb, $transcriptomename, $transcript_fasta,
+	$tr_kmersize, $tr_mmersize, $nthreads) = @_;
     
     # Build transcriptome and place at same directory as genome
     # Note: this is a recursive call to create a "genome" for the transcriptome
     # Can use -q 1 with transcripts because they are small
-    $cmd = "\"$bindir/gmap_build\" -D \"$gmapdb\" -d $transcriptomename -k $kmersize -q 1 \"$transcript_fasta\"";
+    $cmd = "\"$bindir/gmap_build\" -D \"$transcriptomedb\" -d $transcriptomename -k $tr_kmersize -q 1";
+    if (defined($tr_mmersize)) {
+	$cmd .= " -j $tr_mmersize";
+    }
+    $cmd .= " \"$transcript_fasta\"";
     run_now($cmd);
 
     # Align transcripts to the genome
-    $cmd = "\"$bindir/gmap\" -D \"$gmapdb\" -d $genomename -t $nthreads -n 1 --format=map_exons \"$transcript_fasta\" > \"$transcript_fasta.gmap\"";
+    $cmd = "\"$bindir/gmap\" -D \"$genomedb\" -d $genomename -t $nthreads -n 1 --format=map_exons \"$transcript_fasta\" > \"$transcript_fasta.gmap\"";
     run_now($cmd);
 
     # Create IIT file for the gene alignments
@@ -569,7 +627,7 @@ sub create_transcriptome_from_fasta {
     run_now($cmd);
     
     # Add special files.  Place these in a directory for the genome.
-    $cmd = "\"$bindir/trindex\" -D \"$gmapdb\" -d $genomename -c $transcriptomename \"$transcript_fasta.genes.iit\"";
+    $cmd = "\"$bindir/trindex\" -D \"$genomedb\" -d $genomename -C \"$transcriptomedb\" -c $transcriptomename \"$transcript_fasta.genes.iit\"";
     run_now($cmd);
 
     system("rm -f \"$transcript_fasta.genes.iit\"");
@@ -580,18 +638,24 @@ sub create_transcriptome_from_fasta {
 
 
 sub create_transcriptome_from_genes {
-    my ($gmapdb, $genomename, $transcriptomename, $transcript_genes, $kmersize) = @_;
+    my ($genomedb, $genomename, $transcriptomedb, $transcriptomename, $transcript_genes,
+	$tr_kmersize, $tr_mmersize) = @_;
     my ($transcript_fasta);
     
     # Convert gene structures to a FASTA file
     $transcript_fasta = "$transcript_genes.fasta";
-    $cmd = "\"$bindir/get-genome\" -D \"$gmapdb\" -d $genomename --genes \"$transcript_genes\" > \"$transcript_fasta\"";
+    $cmd = "\"$bindir/get-genome\" -D \"$genomedb\" -d $genomename --genes \"$transcript_genes\" > \"$transcript_fasta\"";
     run_now($cmd);
 
     # Build transcriptome and place at same directory as genome
     # Note: this is a recursive call to create a "genome" for the transcriptome
     # Can use -q 1 with transcripts because they are small
-    $cmd = "\"$bindir/gmap_build\" -D \"$gmapdb\" -d $transcriptomename -k $kmersize -q 1 \"$transcript_fasta\"";
+    $cmd = "\"$bindir/gmap_build\" -D \"$transcriptomedb\" -d $transcriptomename -k $tr_kmersize -q 1";
+    if (defined($tr_mmersize)) {
+	$cmd .= " -j $tr_mmersize";
+    }
+    $cmd .= " \"$transcript_fasta\"";
+
     run_now($cmd);
 
     # No need to align transcripts to the genome if we have a genes file
@@ -607,7 +671,7 @@ sub create_transcriptome_from_genes {
     run_now($cmd);
     
     # Add special files.  Place these in a directory for the genome.
-    $cmd = "\"$bindir/trindex\" -D \"$gmapdb\" -d $genomename -c $transcriptomename \"$transcript_fasta.genes.iit\"";
+    $cmd = "\"$bindir/trindex\" -D \"$genomedb\" -d $genomename -C \"$transcriptomedb\" -c $transcriptomename \"$transcript_fasta.genes.iit\"";
     run_now($cmd);
 
     system("rm -f \"$transcript_fasta.genes.iit\"");
@@ -619,15 +683,36 @@ sub create_transcriptome_from_genes {
 
 
 sub create_transcriptome_from_gff3 {
-    my ($gmapdb, $genomename, $transcriptomename, $transcript_gff3, $kmersize) = @_;
+    my ($genomedb, $genomename, $transcriptomedb, $transcriptomename, $transcript_gff3,
+	$gen_kmersize, $gen_mmersize, $tr_kmersize, $tr_mmersize) = @_;
     
     # Convert gff3 to a genes file
     my $transcript_map = "$transcriptomename.map";
-    $cmd = "\"$bindir/gff3_genes\" --exclude-PAR \"$transcript_gff3\" > \"$transcript_map\"";
+    $cmd = "\"$bindir/gff3_genes\" --exclude-PAR";
+    if (defined($cds_p)) {
+	$cmd .= " -C";
+    }
+    $cmd .= " \"$transcript_gff3\" > \"$transcript_map\"";
     run_now($cmd);
 
     # Build transcriptome and place at same directory as genome.  Note: this is a recursive call
-    $cmd = "\"$bindir/gmap_build\" -D \"$gmapdb\" -d $genomename -c $transcriptomename -G \"$transcript_map\"";
+    $cmd = "\"$bindir/gmap_build\" -D \"$genomedb\" -d $genomename -C \"$transcriptomedb\" -c $transcriptomename";
+    if (defined($gen_kmersize)) {
+	$cmd .= " -k $gen_kmersize";
+    }
+    if (defined($sampling)) {
+	$cmd .= " -q $sampling";
+    }
+    if (defined($gen_mmersize)) {
+	$cmd .= " -j $gen_mmersize";
+    }
+    if (defined($tr_kmersize)) {
+	$cmd .= " -K $tr_kmersize";
+    }
+    if (defined($tr_mmersize)) {
+	$cmd .= " -J $tr_mmersize";
+    }
+    $cmd .= " -G \"$transcript_map\"";
     run_now($cmd);
 
     return;
@@ -635,7 +720,8 @@ sub create_transcriptome_from_gff3 {
 
 
 sub create_transcriptome_from_gtf {
-    my ($gmapdb, $genomename, $transcriptomename, $transcript_gtf, $kmersize) = @_;
+    my ($genomedb, $genomename, $transcriptomedb, $transcriptomename, $transcript_gtf,
+	$gen_kmersize, $gen_mmersize, $tr_kmersize, $tr_mmersize) = @_;
     
     # Convert gtf to a genes file
     my $transcript_map = "$transcriptomename.map";
@@ -643,7 +729,23 @@ sub create_transcriptome_from_gtf {
     run_now($cmd);
 
     # Build transcriptome and place at same directory as genome.  Note: this is a recursive call
-    $cmd = "\"$bindir/gmap_build\" -D \"$gmapdb\" -d $genomename -c $transcriptomename -G \"$transcript_map\"";
+    $cmd = "\"$bindir/gmap_build\" -D \"$genomedb\" -d $genomename -C \"$transcriptomedb\" -c $transcriptomename";
+    if (defined($gen_kmersize)) {
+	$cmd .= " -k $gen_kmersize";
+    }
+    if (defined($sampling)) {
+	$cmd .= " -q $sampling";
+    }
+    if (defined($gen_mmersize)) {
+	$cmd .= " -j $gen_mmersize";
+    }
+    if (defined($tr_kmersize)) {
+	$cmd .= " -K $tr_kmersize";
+    }
+    if (defined($tr_mmersize)) {
+	$cmd .= " -J $tr_mmersize";
+    }
+    $cmd .= " -G \"$transcript_map\"";
     run_now($cmd);
 
     return;
@@ -679,7 +781,7 @@ no need to specify the genome_fasta_files.  This way you can add
 transcriptome information to an existing genome database.
 
 Options:
-    -D, --dir=STRING          Destination directory for installation (defaults to gmapdb
+    -D, --genomedir=STRING    Destination directory for installation (defaults to gmapdb
                                 directory specified at configure time)
     -d, --genomedb=STRING     Genome name (required)
 
@@ -721,8 +823,9 @@ Options:
                               renames chromosomes, or lists the same names in both columns for
                               the desired chromosomes.
 
-    -k, --kmer=INT            k-mer value for genomic index (allowed: 15 or less, default is 15)
+    -k, --gen-kmer=INT        k-mer value for genome index (allowed: 15 or less, default is 15)
     -q INT                    sampling interval for genomoe (allowed: 1-3, default 3)
+    -j, --gen-minimizer=INT   Minimizer length for genome index (default is not to use minimizers)
 
     -s, --sort=STRING         Sort chromosomes using given method:
                                 none - use chromosomes as found in FASTA file(s) (default)
@@ -753,17 +856,13 @@ Options:
 
     --sarray=INT              Whether to build suffix array: 0=no (default), 1=yes
 
-Options for older genome formats:
-    -M, --mdflag=STRING       Use MD file from NCBI for mapping contigs to
-                                chromosomal coordinates
-
-    -C, --contigs-are-mapped  Find a chromosomal region in each FASTA header line.
-                                Useful for contigs that have been mapped
-                                to chromosomal coordinates.  Ignored if the --mdflag is provided.
-
-
 Options for transcriptome-guided alignment:
+    -C, --transcriptomedir=STRING   Destination directory for installation (defaults to gmapdb
+                                      directory specified at configure time)
     -c, --transcriptomedb=STRING    Transcriptome name, plus one of these four flags:
+
+    -K, --tr-kmer=INT         k-mer value for transcriptome index (allowed: 15 or less, default is 15)
+    -J, --tr-minimizer=INT    Mminimizer length for transcriptome index (default is not to use minimizers)
 
     --gtf=FILE                GTF file containing transcripts
     --gff3=FILE               GFF3 file containing transcripts

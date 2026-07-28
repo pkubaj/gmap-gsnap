@@ -1,4 +1,3 @@
-/* $Id: merge-uint8.h 225220 2022-11-01 22:46:01Z twu $ */
 #ifndef MERGE_UINT8_INCLUDED
 #define MERGE_UINT8_INCLUDED
 #ifdef HAVE_CONFIG_H

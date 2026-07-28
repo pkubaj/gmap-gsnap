@@ -1,4 +1,3 @@
-/* $Id: stopwatch.h 40271 2011-05-28 02:29:18Z twu $ */
 #ifndef STOPWATCH_INCLUDED
 #define STOPWATCH_INCLUDED
 

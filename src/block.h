@@ -1,4 +1,3 @@
-/* $Id: block.h 218152 2019-01-17 05:37:56Z twu $ */
 #ifndef BLOCK_INCLUDED
 #define BLOCK_INCLUDED
 

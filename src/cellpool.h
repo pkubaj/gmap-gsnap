@@ -1,4 +1,3 @@
-/* $Id: cellpool.h 210504 2017-10-12 18:33:46Z twu $ */
 #ifndef CELLPOOL_INCLUDED
 #define CELLPOOL_INCLUDED
 

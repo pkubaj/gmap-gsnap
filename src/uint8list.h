@@ -1,4 +1,3 @@
-/* $Id: da11ab4cf1a3244a954840e5088c43b670484ac2 $ */
 #ifndef UINT8LIST_INCLUDED
 #define UINT8LIST_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -23,6 +22,7 @@ struct T {
 extern T Uint8list_push (T list, UINT8 x);
 extern T Uint8list_pop (T list, UINT8 *x);
 extern UINT8 Uint8list_head (T list);
+extern UINT8 Uint8list_second_value (T list);
 extern T Uint8list_next (T list);
 extern void Uint8list_free (T *list);
 extern T Uint8list_reverse (T list);
@@ -56,6 +56,11 @@ Uint8list_pop (T list, UINT8 *x) {
 static inline UINT8
 Uint8list_head (T list) {
   return list->first;
+}
+
+static inline UINT8
+Uint8list_second_value (T list) {
+  return list->rest->first;
 }
 
 static inline T
@@ -127,6 +132,8 @@ extern T
 Uint8list_append (T list, T tail);
 extern UINT8 
 Uint8list_last_value (T this);
+extern T
+Uint8list_last_elt (T this);
 extern UINT8 
 Uint8list_index (T this, int index);
 extern bool

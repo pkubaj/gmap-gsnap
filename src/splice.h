@@ -1,4 +1,4 @@
-/* $Id: d8e438349de0c6411ddcabb2f947f5665bb84672 $ */
+/* $Id: e7b440f9b937f73f5d6b5e1db1a3c38d30ddd816 $ */
 #ifndef SPLICE_INCLUDED
 #define SPLICE_INCLUDED
 
@@ -15,6 +15,7 @@ typedef struct Spliceinfo_T *Spliceinfo_T;
 #include "indel.h"
 #include "stage1hr.h"
 #include "localdb-read.h"
+#include "support.h"
 
 
 #define KNOWN_SITE 0
@@ -66,7 +67,7 @@ struct T {
 extern void
 Splice_setup (Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in,
 	      int max_insertionlen_in, int max_deletionlen_in,
-	      bool novelsplicingp_in);
+	      bool novelsplicingp_in, bool splice_evalp_in);
 
 extern void
 Spliceinfo_free (T *old);
@@ -75,9 +76,11 @@ extern T
 Spliceinfo_new (int querylength);
 
 extern bool
-Splice_accept_p (double splice_prob_1, double splice_prob_2, Chrpos_T splice_distance,
+Splice_accept_p (int splice_qpos, int querylength,
+		 double splice_prob_1, double splice_prob_2,
+		 Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
 		 int supporti, int nmismatchesi, int supportj, int nmismatchesj,
-		 bool innerp, bool strictp);
+		 bool plusp, bool sense_forward_p, bool innerp);
 
 extern int
 Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trimpos3,
@@ -103,6 +106,47 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 		Intlistpool_T intlistpool,
 		bool sense_forward_p, int genestrand, bool trim5p, bool trim3p, bool innerp,
 		bool allow_indels_p);
+
+extern int
+Splice_resolve_qstart (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
+		       Intlist_T *endpoints, List_T *junctions,
+
+		       Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
+		       Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		       bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
+
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+
+		       Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		       Localdb_T localdb, int localdb_nmismatches_allowed,
+
+		       int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
+		       Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+		       Univcoordlistpool_T univcoordlistpool, Intlistpool_T intlistpool,
+		       Listpool_T listpool, Pathpool_T pathpool,
+
+		       int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
+		       bool allow_indels_p, bool find_middle_p);
+
+extern int
+Splice_resolve_qend (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
+		     Intlist_T *endpoints, List_T *junctions,
+
+		     Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
+		     Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		     bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
+		     
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     Localdb_T localdb, int localdb_nmismatches_allowed,
+
+		     int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
+		     Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+		     Univcoordlistpool_T univcoordlistpool, Intlistpool_T intlistpool,
+		     Listpool_T listpool, Pathpool_T pathpool,
+
+		     int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
+		     bool allow_indels_p, bool find_middle_p);
 
 extern int
 Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, int *supportj,

@@ -1,4 +1,4 @@
-/* $Id: 3136f868f96702ccf9ac09a95cabe75230eb5d57 $ */
+/* $Id: ae61fd53884f684712b842bef819e2f5e0c8d9ee $ */
 #ifndef TR_EXTENSION_SEARCH_INCLUDED
 #define TR_EXTENSION_SEARCH_INCLUDED
 
@@ -71,7 +71,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 		     Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool,
 		     Hitlistpool_T hitlistpool,
 
-		     int nmismatches_allowed, int genestrand, Method_T method);
+		     int read_nmismatches_allowed, int genestrand, Method_T method);
 
 #undef T
 #endif

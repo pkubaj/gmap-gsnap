@@ -1,4 +1,4 @@
-/* $Id: c7ef43f3b7c2431bf22df66e57b009641660ed05 $ */
+/* $Id: 9d5ecdafc1cddcecd9c93e2b1ad5b2cae219f6cf $ */
 #ifndef STAGE1HR_SINGLE_INCLUDED
 #define STAGE1HR_SINGLE_INCLUDED
 
@@ -50,7 +50,7 @@ single_read_next_method_tr (int *found_score, int sufficient_score, Method_T las
 			    int *mismatch_positions_alloc,
 			    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-			    int nmismatches_allowed,
+			    int read_nmismatches_allowed,
 			 
 			    Trdiagpool_T trdiagpool,
 			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -76,8 +76,13 @@ single_read_unsolved_tr_paths (int *found_score,
 
 extern Path_T *
 Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq,
+		    T this, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		    Shortread_T queryseq, EF64_T repetitive_ef64,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels, Localdb_T localdb,
+
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		    unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
 		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 		    Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,

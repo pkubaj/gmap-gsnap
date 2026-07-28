@@ -1,4 +1,3 @@
-/* $Id: request.h 224936 2022-10-08 19:06:28Z twu $ */
 #ifndef REQUEST_INCLUDED
 #define REQUEST_INCLUDED
 

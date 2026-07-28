@@ -1,4 +1,3 @@
-/* $Id: bitpack64-incr.h 212659 2018-01-20 00:58:14Z twu $ */
 #ifndef BITPACK64_INCR_INCLUDED
 #define BITPACK64_INCR_INCLUDED
 #include "types.h"

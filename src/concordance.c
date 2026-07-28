@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: 4bd99054d3295ac2a5d388d66e1c7b6bf57fafa9 $";
+static char rcsid[] = "$Id: c37eafa0346bc18248e54bf94ed75998a4e4d992 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -109,6 +109,10 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 		  int nmismatches_filter_5, int nmismatches_filter_3,
 		  int mincoverage_filter_5, int mincoverage_filter_3,
 
+		  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 		  Listpool_T listpool,  Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		  Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir) {
@@ -159,6 +163,11 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 			 concordant_trpaths5,/*first_read_p*/true,
 			 queryseq5,querylength5,stage1_5,knownsplicing,
 			 query5_compress_fwd,query5_compress_rev,
+
+			 streamspace_max_alloc,streamspace_alloc,
+			 novel_univdiags_alloc,novel_diagonals_alloc,
+			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			 vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
 
@@ -169,6 +178,11 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 			 concordant_trpaths3,/*first_read_p*/false,
 			 queryseq3,querylength3,stage1_3,knownsplicing,
 			 query3_compress_fwd,query3_compress_rev,
+
+			 streamspace_max_alloc,streamspace_alloc,
+			 novel_univdiags_alloc,novel_diagonals_alloc,
+			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			 vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
   } else {
@@ -179,6 +193,11 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 			     concordant_trpaths5,/*first_read_p*/true,
 			     queryseq5,querylength5,stage1_5,knownsplicing,
 			     query5_compress_fwd,query5_compress_rev,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			     vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
 
@@ -189,6 +208,11 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 			     concordant_trpaths3,/*first_read_p*/false,
 			     queryseq3,querylength3,stage1_3,knownsplicing,
 			     query3_compress_fwd,query3_compress_rev,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			     vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
   }
@@ -380,6 +404,10 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 		int nmismatches_filter_5, int nmismatches_filter_3,
 		int mincoverage_filter_5, int mincoverage_filter_3,
 
+		int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 		Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir) {
@@ -449,6 +477,11 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 				 
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
+
+				 streamspace_max_alloc,streamspace_alloc,
+				 novel_univdiags_alloc,novel_diagonals_alloc,
+				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 				 vectorpool,hitlistpool,sensedir);
 
@@ -467,6 +500,11 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
+
+				 streamspace_max_alloc,streamspace_alloc,
+				 novel_univdiags_alloc,novel_diagonals_alloc,
+				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 				 vectorpool,hitlistpool,sensedir);
 
@@ -485,6 +523,11 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
+
+				 streamspace_max_alloc,streamspace_alloc,
+				 novel_univdiags_alloc,novel_diagonals_alloc,
+				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 				 vectorpool,hitlistpool,sensedir);
 

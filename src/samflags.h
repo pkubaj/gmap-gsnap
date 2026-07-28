@@ -1,4 +1,3 @@
-/* $Id: samflags.h 223971 2021-03-17 23:27:04Z twu $ */
 #ifndef SAMFLAGS_INCLUDED
 #define SAMFLAGS_INCLUDED
 

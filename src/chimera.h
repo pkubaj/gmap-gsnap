@@ -1,4 +1,3 @@
-/* $Id: chimera.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef CHIMERA_INCLUDED
 #define CHIMERA_INCLUDED
 

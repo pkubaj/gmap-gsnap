@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: ec00340e2f3920197cd373776d67116fbeaad32b $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -1053,8 +1052,13 @@ collect_univdiags (List_T *gplus_univdiags, List_T *gminus_univdiags, Stage1_T s
 
   /* Consolidate duplicates, using code taken from extension-search.c */
   /* Needed to avoid multiple fusion paths, which would yield no results */
-  univdiag_array = (Univdiag_T *) List_to_array_n(&ndiags,univdiags);
-  qsort(univdiag_array,ndiags,sizeof(Univdiag_T),Univdiag_diagonal_cmp);
+  /* univdiag_array = (Univdiag_T *) List_to_array_n(&ndiags,univdiags); */
+
+  ndiags = List_length(univdiags);
+  univdiag_array = Univdiag_new_array(ndiags);
+  Univdiag_transfer_list_to_array(univdiag_array,univdiags);
+
+  qsort(univdiag_array[0],ndiags,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_fwd_cmp);
   Univdiagpool_free_list(&univdiags,univdiagpool
 			 univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
 
@@ -1089,7 +1093,7 @@ collect_univdiags (List_T *gplus_univdiags, List_T *gminus_univdiags, Stage1_T s
 
     i = j;
   }
-  FREE(univdiag_array);
+  Univdiag_free_array(&univdiag_array);
 
 
   /* minus */
@@ -1113,8 +1117,13 @@ collect_univdiags (List_T *gplus_univdiags, List_T *gminus_univdiags, Stage1_T s
 
   /* Consolidate duplicates, using code taken from extension-search.c */
   /* Needed to avoid multiple fusion paths, which would yield no results */
-  univdiag_array = (Univdiag_T *) List_to_array_n(&ndiags,univdiags);
-  qsort(univdiag_array,ndiags,sizeof(Univdiag_T),Univdiag_diagonal_cmp);
+  /* univdiag_array = (Univdiag_T *) List_to_array_n(&ndiags,univdiags); */
+
+  ndiags = List_length(univdiags);
+  univdiag_array = Univdiag_new_array(ndiags);
+  Univdiag_transfer_list_to_array(univdiag_array,univdiags);
+
+  qsort(univdiag_array[0],ndiags,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_fwd_cmp);
   Univdiagpool_free_list(&univdiags,univdiagpool
 			 univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
 
@@ -1149,7 +1158,7 @@ collect_univdiags (List_T *gplus_univdiags, List_T *gminus_univdiags, Stage1_T s
 
     i = j;
   }
-  FREE(univdiag_array);
+  Univdiag_free_array(&univdiag_array);
 
   return;
 }
@@ -2902,6 +2911,7 @@ T
 Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 			char *queryptr_main, bool main_plusp, int querylength,
 			Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
+			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			unsigned short *localdb_alloc, Stage1_T stage1,
 			Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
@@ -2985,7 +2995,8 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 	Spliceends_qend_resolve(&ndiagonals,&local_nmismatches,pos5,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress_main,queryptr_main,main_plusp,genestrand,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
 				nmismatches_allowed);
     }
 
@@ -3032,7 +3043,8 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 	Spliceends_qstart_resolve(&ndiagonals,&local_nmismatches,pos3,querylength,
 				  low_univdiagonal,high_univdiagonal,
 				  query_compress_main,queryptr_main,main_plusp,genestrand,
-				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				  stage1,streamspace_max_alloc,streamspace_alloc,
 				  nmismatches_allowed);
     }
   }
@@ -3144,6 +3156,7 @@ T
 Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 			  char *queryptr_main, bool main_plusp, int querylength,
 			  Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			  unsigned short *localdb_alloc, Stage1_T stage1,
 			  Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
@@ -3222,7 +3235,8 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 	Spliceends_qstart_resolve(&ndiagonals,&local_nmismatches,pos3,querylength,
 				  low_univdiagonal,high_univdiagonal,
 				  query_compress_main,queryptr_main,main_plusp,genestrand,
-				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				  stage1,streamspace_max_alloc,streamspace_alloc,
 				  nmismatches_allowed);
     }
 
@@ -3270,7 +3284,8 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 	Spliceends_qend_resolve(&ndiagonals,&local_nmismatches,pos5,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress_main,queryptr_main,main_plusp,genestrand,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
 				nmismatches_allowed);
     }
   }

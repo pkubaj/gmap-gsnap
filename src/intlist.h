@@ -1,4 +1,3 @@
-/* $Id: 77a743d44092adb142542aabc043352a42492c1a $ */
 #ifndef INTLIST_INCLUDED
 #define INTLIST_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -182,10 +181,14 @@ extern T
 Intlist_copy (T list);
 extern T 
 Intlist_append (T list, T tail);
+extern T
+Intlist_last_elt (T this);
 extern int 
 Intlist_last_value (T this);
 extern void
 Intlist_last_value_set (T this, int x);
+extern T
+Intlist_penultimate_elt (T this);
 extern int
 Intlist_penultimate_value (T this);
 extern int 

@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 6f5fe675402d07bced4e52181df60ac4ba436472 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -49,6 +48,13 @@ static Transcriptome_T transcriptome;
 
 #define INNER_NEEDED 15
 
+
+/* Pathpair_preeval_and_uniq */
+#ifdef DEBUG7
+#define debug7(x) x
+#else
+#define debug7(x)
+#endif
 
 /* Pathpair_eval_and_sort */
 #ifdef DEBUG8
@@ -484,6 +490,377 @@ Pathpair_global_cmp (const void *x, const void *y) {
 }
 
 
+#if 0
+/* Accumulates pathpairs into the given list called pathpairs */
+List_T
+Pathpair_preeval_and_uniq (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
+			   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			   Hitlistpool_T hitlistpool) {
+  int best_nmatches, nmatches;
+
+  int i, j, k, l, ll;
+  Pathpair_T pathpair;
+
+  bool *duplicatep;
+
+  int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
+
+  
+#ifdef DEBUG7
+  printf("Entered Pathpair_preeval_and_uniq with %d pathpairs\n",npaths);
+  for (int pathi = 0; pathi < npaths; pathi++) {
+    printf("Pathpair (sense %d and %d): %p and %p\n",
+	   pathpairarray[pathi]->pathL->sensedir,pathpairarray[pathi]->pathH->sensedir,
+	   pathpairarray[pathi]->pathL,pathpairarray[pathi]->pathH);
+  }
+  printf("\n");
+#endif
+
+  /* 0.  Sort by structure to remove duplicates */
+  if (npaths == 0) {
+    return pathpairs;
+
+  } else {
+    duplicatep = (bool *) CALLOC(npaths,sizeof(bool));
+    qsort(pathpairarray,npaths,sizeof(Pathpair_T),Pathpair_interval_cmp);
+
+    k = 0;
+    i = 0;
+    while (i < npaths) {
+      j = i + 1;
+      while (j < npaths && Pathpair_overlap_p(pathpairarray[j],pathpairarray[i]) == true) {
+	j++;
+      }
+      
+      if (j - i == 1) {
+	pathpairarray[k++] = pathpairarray[i];
+
+      } else {
+	debug7(printf("Found an overlapping group of %d => eliminating duplicates\n",j - i));
+	for (l = i; l < j; l++) {
+	  if (duplicatep[l] == true) {
+	    /* Already found to be a duplicate */
+	  } else {
+	    for (ll = l + 1; ll < j; ll++) {
+	      /* Need to keep sensedirs separate so we can extend them separately */
+	      if (Pathpair_structure_cmp(&(pathpairarray[l]),&(pathpairarray[ll])) == 0) {
+		debug7(printf("Path %d is a duplicate of %d\n",ll,l));
+		duplicatep[ll] = true;
+	      }
+	    }
+	  }
+	}
+
+	for (l = i; l < j; l++) {
+	  pathpair = pathpairarray[l];
+	  if (duplicatep[l] == false) {
+	    pathpairarray[k++] = pathpair;
+	  } else {
+	    Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
+      }
+      
+      i = j;
+    }
+
+    FREE(duplicatep);
+    npaths = k;
+  }
+
+  debug7(printf("(1) After removing duplicates (except for sensedir), have %d paths\n",npaths));
+
+
+  /* Find best chopped solution globally (among given sensedirs) */
+  /* This code is designed to help speed up the algorithm, but it might be too greedy */
+  if (npaths == 1) {
+    pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpairarray[0]
+			     hitlistpool_trace(__FILE__,__LINE__));
+    return pathpairs;
+
+  } else {
+    /* Find chopped regions */
+    chop_qstart_L = Intlist_head(pathpairarray[0]->pathL->endpoints);
+    chop_qend_L = Intlist_last_value(pathpairarray[0]->pathL->endpoints);
+    chop_qstart_H = Intlist_head(pathpairarray[0]->pathH->endpoints);
+    chop_qend_H = Intlist_last_value(pathpairarray[0]->pathH->endpoints);
+
+    for (i = 1; i < npaths; i++) {
+      if ((qstart = Intlist_head(pathpairarray[i]->pathL->endpoints)) > chop_qstart_L) {
+	chop_qstart_L = qstart;
+      }
+      if ((qend = Intlist_last_value(pathpairarray[i]->pathL->endpoints)) < chop_qend_L) {
+	chop_qend_L = qend;
+      }
+      if ((qstart = Intlist_head(pathpairarray[i]->pathH->endpoints)) > chop_qstart_H) {
+	chop_qstart_H = qstart;
+      }
+      if ((qend = Intlist_last_value(pathpairarray[i]->pathH->endpoints)) < chop_qend_H) {
+	chop_qend_H = qend;
+      }
+    }
+
+    best_nmatches = 0;
+    for (i = 0; i < npaths; i++) {
+      /* Set chopped regions and evaluate for nmatches */
+      pathpair = pathpairarray[i];
+      pathpair->pathL->chop_qstart = chop_qstart_L;
+      pathpair->pathL->chop_qend = chop_qend_L;
+      pathpair->pathH->chop_qstart = chop_qstart_H;
+      pathpair->pathH->chop_qend = chop_qend_H;
+
+      if ((nmatches = Path_eval_nmatches_chopped(pathpair->pathL) + 
+	   Path_eval_nmatches_chopped(pathpair->pathH)) > best_nmatches) {
+	best_nmatches = nmatches;
+      }
+    }
+
+    debug7(printf("best_nmatches is %d\n",best_nmatches));
+
+    if (best_nmatches == 0) {
+      /* Unable to find global best solutions */
+      for (i = 0; i < npaths; i++) {
+	pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpairarray[i]
+				 hitlistpool_trace(__FILE__,__LINE__));
+      }
+
+    } else {
+      for (i = 0; i < npaths; i++) {
+	/* Set chopped regions and evaluate for nmatches */
+	pathpair = pathpairarray[i];
+	if (Path_eval_nmatches_chopped(pathpair->pathL) + 
+	    Path_eval_nmatches_chopped(pathpair->pathH) == best_nmatches) {
+	  debug7(printf("Keeping by nmatches ")); debug7(Pathpair_print(pathpair));
+	  pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpair
+				   hitlistpool_trace(__FILE__,__LINE__));
+	} else {
+	  debug7(printf("Eliminating by nmatches ")); debug7(Pathpair_print(pathpair));
+	  Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			listpool,pathpool,transcriptpool,hitlistpool);
+	}
+      }
+    }
+  }
+
+  return pathpairs;
+}
+#endif
+
+
+
+/* Accumulates pathpairs into the given list called pathpairs */
+List_T
+Pathpair_uniq (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
+	       Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+	       Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+	       Hitlistpool_T hitlistpool) {
+  int best_nmatches, nmatches;
+
+  int i, j, k, l, ll;
+  Pathpair_T pathpair;
+
+  bool *duplicatep;
+
+  int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
+
+  
+#ifdef DEBUG7
+  printf("Entered Pathpair_preeval_and_uniq with %d pathpairs\n",npaths);
+  for (int pathi = 0; pathi < npaths; pathi++) {
+    printf("Pathpair (sense %d and %d): %p and %p\n",
+	   pathpairarray[pathi]->pathL->sensedir,pathpairarray[pathi]->pathH->sensedir,
+	   pathpairarray[pathi]->pathL,pathpairarray[pathi]->pathH);
+    Pathpair_print(pathpairarray[pathi]);
+  }
+  printf("\n");
+#endif
+
+  /* 0.  Sort by structure to remove duplicates */
+  if (npaths == 0) {
+    return pathpairs;
+
+  } else {
+    duplicatep = (bool *) CALLOC(npaths,sizeof(bool));
+    qsort(pathpairarray,npaths,sizeof(Pathpair_T),Pathpair_interval_cmp);
+
+    k = 0;
+    i = 0;
+    while (i < npaths) {
+      j = i + 1;
+      while (j < npaths && Pathpair_overlap_p(pathpairarray[j],pathpairarray[i]) == true) {
+	j++;
+      }
+      
+      if (j - i == 1) {
+	pathpairarray[k++] = pathpairarray[i];
+
+      } else {
+	debug7(printf("Found an overlapping group of %d => eliminating duplicates\n",j - i));
+	for (l = i; l < j; l++) {
+	  if (duplicatep[l] == true) {
+	    /* Already found to be a duplicate */
+	  } else {
+	    for (ll = l + 1; ll < j; ll++) {
+	      /* Need to keep sensedirs separate so we can extend them separately */
+	      if (Pathpair_structure_cmp(&(pathpairarray[l]),&(pathpairarray[ll])) == 0) {
+		debug7(printf("Path %d is a duplicate of %d\n",ll,l));
+		duplicatep[ll] = true;
+	      }
+	    }
+	  }
+	}
+
+	for (l = i; l < j; l++) {
+	  pathpair = pathpairarray[l];
+	  if (duplicatep[l] == false) {
+	    pathpairarray[k++] = pathpair;
+	  } else {
+	    Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
+      }
+      
+      i = j;
+    }
+
+    FREE(duplicatep);
+    npaths = k;
+  }
+
+  debug7(printf("(1) After removing duplicates (except for sensedir), have %d paths\n",npaths));
+
+
+  for (i = 0; i < npaths; i++) {
+    /* Set chopped regions and evaluate for nmatches */
+    pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpairarray[i]
+			     hitlistpool_trace(__FILE__,__LINE__));
+  }
+
+  return pathpairs;
+}
+
+
+
+
+/* Taken from step 4 in Pathpair_eval_and_sort, which finds the best
+   sensedir for paths in each local region */
+
+#if 0
+/* Can be led astray by end splice probs */
+List_T
+Pathpair_pick_dir (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
+		   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		   Hitlistpool_T hitlistpool) {
+
+  Pathpair_T pathpair;
+  int i, j, k, l;
+  double best_avg_junction_sense_prob, best_avg_junction_antisense_prob,
+    best_end_sense_prob, best_end_antisense_prob, prob;
+
+
+  /* 4.  Find best sensedir for paths in each local region */
+  /* Do not reward unnecessary splices, so do not eliminate alignments with splice prob of 0.0 */
+  if (npaths > 1) {
+    qsort(pathpairarray,npaths,sizeof(Pathpair_T),Pathpair_interval_cmp);
+
+    k = 0;
+    i = 0;
+    while (i < npaths) {
+      j = i + 1;
+      while (j < npaths && Pathpair_overlap_p(pathpairarray[j],pathpairarray[i]) == true) {
+	j++;
+      }
+	
+      debug8(printf("Found an overlapping group of %d => choosing sense vs antisense\n",j - i));
+      best_avg_junction_sense_prob = best_avg_junction_antisense_prob = 0.0;
+      best_end_sense_prob = best_end_antisense_prob = 0.0;
+      for (l = i; l < j; l++) {
+	pathpair = pathpairarray[l];
+	if (Pathpair_sensedir(pathpair) == SENSE_FORWARD) {
+	  if ((prob = Pathpair_avg_junction_splice_prob(pathpair)) > best_avg_junction_sense_prob) {
+	    best_avg_junction_sense_prob = prob;
+	  }
+	  if ((prob = Pathpair_end_splice_prob(pathpair)) > best_end_sense_prob) {
+	    best_end_sense_prob = prob;
+	  }
+	} else {
+	  if ((prob = Pathpair_avg_junction_splice_prob(pathpair)) > best_avg_junction_antisense_prob) {
+	    best_avg_junction_antisense_prob = prob;
+	  }
+	  if ((prob = Pathpair_end_splice_prob(pathpair)) > best_end_antisense_prob) {
+	    best_end_antisense_prob = prob;
+	  }
+	}
+      }
+	
+      debug8(printf("best avg junction sense prob %f, best avg junction antisense prob %f\n",
+		    best_avg_junction_sense_prob,best_avg_junction_antisense_prob));
+      debug8(printf("best end sense prob %f, best end antisense prob %f\n",
+		    best_end_sense_prob,best_end_antisense_prob));
+      if (best_avg_junction_sense_prob > best_avg_junction_antisense_prob ||
+	  (best_avg_junction_sense_prob == best_avg_junction_antisense_prob && best_end_sense_prob > best_end_antisense_prob)) {
+	/* Keep only sense */
+	for (l = i; l < j; l++) {
+	  pathpair = pathpairarray[l];
+	  if (Pathpair_total_splice_prob(pathpair) == 0.0) {
+	    debug8(printf("(4 sensedir) Keeping null ")); debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+	  } else if (Pathpair_sensedir(pathpair) == SENSE_FORWARD) {
+	    debug8(printf("(4 sensedir) Keeping sense ")); debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+	  } else {
+	    debug8(printf("(4 sensedir) Eliminating antisense ")); debug8(Pathpair_print(pathpair));
+	    Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
+
+      } else if (best_avg_junction_antisense_prob > best_avg_junction_sense_prob ||
+		 (best_avg_junction_antisense_prob == best_avg_junction_sense_prob && best_end_antisense_prob > best_end_sense_prob)) {
+	/* Keep only antisense */
+	for (l = i; l < j; l++) {
+	  pathpair = pathpairarray[l];
+	  if (Pathpair_total_splice_prob(pathpair) == 0.0) {
+	    debug8(printf("(4 sensedir) Keeping null ")); debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+	  } else if (Pathpair_sensedir(pathpair) == SENSE_ANTI) {
+	    debug8(printf("(4 sensedir) Keeping antisense ")); debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+	  } else {
+	    debug8(printf("(4 sensedir) Eliminating sense ")); debug8(Pathpair_print(pathpair));
+	    Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
+
+      } else {
+	/* Keep both */
+	for (l = i; l < j; l++) {
+	  pathpair = pathpairarray[l];
+	  pathpairarray[k++] = pathpair;
+	}
+      }
+	
+      i = j;
+    }
+    npaths = k;
+  }
+
+  for (i = 0; i < npaths; i++) {
+    pathpair = pathpairarray[i];
+    pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpair
+			     hitlistpool_trace(__FILE__,__LINE__));
+  }
+
+  return pathpairs;
+}
+#endif
+
+
 /* filtering is creating an issue between pathpairs != NULL, stopping
    path creation, and then an empty pathpairarray */
 
@@ -496,12 +873,14 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			Shortread_T queryseq5, Shortread_T queryseq3,
 			char *queryuc_ptr_5, char *queryrc5, char *queryuc_ptr_3, char *queryrc3, 
 			char *quality_string_5, char *quality_string_3,
-			int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
-			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			unsigned short *localdb_alloc, Knownsplicing_T knownsplicing,
-			Knownindels_T knownindels,
 
-			int nmismatches_allowed_5, int nmismatches_allowed_3,
+			int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
+			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
+			Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+
 			int nmismatches_filter_5, int nmismatches_filter_3,
 			int mincoverage_filter_5, int mincoverage_filter_3,
 			int querylength5, int querylength3,
@@ -530,6 +909,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
     best_end_sense_prob, best_end_antisense_prob, prob;
   /* int best_querystart5, best_queryend5, best_querystart3, best_queryend3, querystart, queryend; */
   int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
+  int ignore_found_score;
 
   
 #ifdef DEBUG8
@@ -548,7 +928,6 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
     *first_absmq = 0;
     *second_absmq = 0;
     return (Pathpair_T *) NULL;
-
   }
 
   /* Have already called Path_extend */
@@ -610,21 +989,41 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 
 
   /* 1.  Unalias circular alignments and trim chrbounds */
+  k = 0;
   for (i = 0; i < npaths; i++) {
     pathpair = pathpairarray[i];
     path5 = pathpair->path5;
     path3 = pathpair->path3;
     if (circularp[pathpair->pathL->chrnum] == true) {
-      Path_trim_circular_unalias_pair(pathpair->pathL,pathpair->pathH);
+      Path_trim_circular_unalias_pair(pathpair->path5,pathpair->path3,
+				      query5_compress_fwd,query5_compress_rev,
+				      query3_compress_fwd,query3_compress_rev);
     }
-    Path_trim_chrbounds(path5,query5_compress_fwd,query5_compress_rev,
-			intlistpool,univcoordlistpool,listpool,pathpool,
-			transcriptpool);
-    Path_trim_chrbounds(path3,query3_compress_fwd,query3_compress_rev,
-			intlistpool,univcoordlistpool,listpool,pathpool,
-			transcriptpool);
+    /* true means that endpoints were acceptable */
+    if (Path_trim_chrbounds(&ignore_found_score,path5,query5_compress_fwd,query5_compress_rev,
+			    intlistpool,univcoordlistpool,listpool,pathpool,
+			    transcriptpool) == true &&
+	Path_trim_chrbounds(&ignore_found_score,path3,query3_compress_fwd,query3_compress_rev,
+			    intlistpool,univcoordlistpool,listpool,pathpool,
+			    transcriptpool) == true) {
+      pathpairarray[k++] = pathpair;
+    } else {
+      debug8(printf("Eliminating due to chrbounds: ")); debug8(Pathpair_print(pathpair));
+      Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		    listpool,pathpool,transcriptpool,hitlistpool);
+    }
   }
   
+  npaths = k;
+  debug8(printf("(1) After trimming chrbounds, have %d paths\n",npaths));
+  if (npaths == 0) {
+    FREE_OUT(pathpairarray);
+    *npaths_primary = *npaths_altloc = 0;
+    *first_absmq = 0;
+    *second_absmq = 0;
+    return (Pathpair_T *) NULL;
+  }
+
 
   /* 2.  Trim and resolve inner splices */
   /* Previously sorted, but not necessary to group the pathpairs, and we sort at step 4 anyway */
@@ -699,9 +1098,11 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			   query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
 			   /*queryseqL*/queryseq5,/*queryseqH*/queryseq3,queryuc_ptr_5,queryuc_ptr_3,
 			   /*querylengthL*/querylength5,/*querylengthH*/querylength3,
+			   streamspace_max_alloc,streamspace_alloc,
 			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			   localdb_nmismatches_allowed,
+			   
 			   stage1_5,stage1_3,knownsplicing,
-			   nmismatches_allowed_5,nmismatches_allowed_3,
 			   intlistpool,univcoordlistpool,listpool,pathpool,
 			   transcriptpool,univdiagpool,vectorpool);
 	  debug8(printf("Done with Pathpair_resolve\n"));
@@ -766,9 +1167,11 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			   query5_compress_rev,query5_compress_fwd,query5_compress_rev,
 			   /*queryseqL*/queryseq3,/*queryseqH*/queryseq5,queryrc3,queryrc5,
 			   /*querylengthL*/querylength3,/*querylengthH*/querylength5,
+			   streamspace_max_alloc,streamspace_alloc,
 			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			   localdb_nmismatches_allowed,
+
 			   stage1_3,stage1_5,knownsplicing,
-			   nmismatches_allowed_3,nmismatches_allowed_5,
 			   intlistpool,univcoordlistpool,listpool,pathpool,
 			   transcriptpool,univdiagpool,vectorpool);
 	  debug8(printf("Done with Pathpair_resolve\n"));
@@ -909,7 +1312,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 
 							     query5_compress_fwd,query5_compress_rev,
 							     queryseq5,querylength5,knownsplicing,
-							     pathpair->path5->genestrand,nmismatches_allowed_5,
+							     pathpair->path5->genestrand,/*nmismatches_allowed:not used*/-1,
 							     intlistpool,uintlistpool,univcoordlistpool,
 							     listpool,univdiagpool,pathpool,vectorpool,
 							     transcriptpool,hitlistpool);
@@ -925,7 +1328,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 
 							   query3_compress_fwd,query3_compress_rev,
 							   queryseq3,querylength3,knownsplicing,
-							   pathpair->path3->genestrand,nmismatches_allowed_3,
+							   pathpair->path3->genestrand,/*nmismatches_allowed:not used*/-1,
 							   intlistpool,uintlistpool,univcoordlistpool,
 							   listpool,univdiagpool,pathpool,vectorpool,
 							   transcriptpool,hitlistpool);
@@ -1001,7 +1404,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 
 							      query3_compress_fwd,query3_compress_rev,
 							      queryseq3,querylength3,knownsplicing,
-							      pathpair->path3->genestrand,nmismatches_allowed_3,
+							      pathpair->path3->genestrand,/*nmismatches_allowed:not used*/-1,
 							      intlistpool,uintlistpool,univcoordlistpool,
 							      listpool,univdiagpool,pathpool,vectorpool,
 							      transcriptpool,hitlistpool);
@@ -1017,7 +1420,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 
 							    query5_compress_fwd,query5_compress_rev,
 							    queryseq5,querylength5,knownsplicing,
-							    pathpair->path5->genestrand,nmismatches_allowed_5,
+							    pathpair->path5->genestrand,/*nmismatches_allowed:not used*/-1,
 							    intlistpool,uintlistpool,univcoordlistpool,
 							    listpool,univdiagpool,pathpool,vectorpool,
 							    transcriptpool,hitlistpool);

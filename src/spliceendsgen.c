@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: bea49fbc815e48ff1480c6829c57dfed0058019e $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -35,7 +34,7 @@ struct T {
 
 T
 Spliceendsgen_new () {
-  T new = (T) MALLOC_KEEP(sizeof(*new));
+  T new = (T) MALLOC(sizeof(*new));
 
   new->nallocated = 0;
   new->ncheckedout = 0;
@@ -69,7 +68,7 @@ Spliceendsgen_free_memory (T this) {
     debug0(printf("Spliceendsgen_free_memory: freeing spliceends %p (ID %d)\n",item,item->id));
     Spliceends_free(&item);
   }
-  List_free_keep(&this->pool);
+  List_free(&this->pool);
 
   return;
 }
@@ -77,7 +76,7 @@ Spliceendsgen_free_memory (T this) {
 
 void
 Spliceendsgen_free (T *old) {
-  FREE_KEEP(*old);
+  FREE(*old);
   return;
 }
 
@@ -96,7 +95,7 @@ Spliceendsgen_checkout (T this, int querylength, Vectorpool_T vectorpool) {
   if (this->ncheckedout == this->nallocated) {
     new = Spliceends_new(/*id*/this->nallocated++,querylength,vectorpool); /* Already in checkedout state */
     debug0(printf("creating %p (ID %d)\n",new,new->id));
-    this->pool = List_push_keep(this->pool,(void *) new);
+    this->pool = List_push(this->pool,(void *) new);
     this->ncheckedout++;
     return new;
 

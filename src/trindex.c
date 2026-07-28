@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 61fe98feabdece46f142f4996992017da56f8e6c $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -59,26 +58,38 @@ static char rcsid[] = "$Id: 61fe98feabdece46f142f4996992017da56f8e6c $";
 
 /* Creates the following files:
 
-   Note: <genomesubdir> is <gmapdb>/<genomename>
-   and <transcriptomesubdir> is <gmapdb>/<transcriptomename>
-   <info_root> is <genomesubdir>/<genomename.transcripts>/<transcriptomename>
+   Note: <genomesubdir> is <genomedb>/<genomename>
+   and <transcriptomesubdir> is <transcriptomedb>/<transcriptomename>
+
+   Before 2024-08, <info_root> was <genomesubdir>/<genomename.transcripts>/<transcriptomename>
+   After 2024-08, <info_root> is <transcriptomesubdir>/<transcriptomename.genomes>/<genomename>
 
    The following file (known as alignment_iit, genes_iit, or transcript_map_iit) is in genome order:
-   <gmapdb>/<genomename>/<genomename>.transcripts/<transcriptomename>.genes.iit
+
+   Before 2024-08, <info_root>/<transcriptomename>.genes.iit
+   After 2024-08, <info_root>/<genomename>.genes.iit
    (Transcripts are genomic order, with genomic coordinates.  Needed
    by GSNAP for remapping, and by gcount programs for the gene symbol)
 
    The following are in transcriptome order:
-   <gmapdb>/<genomename>/<genomename>.transcripts/<transcriptomename>.exoninfo
-   <gmapdb>/<genomename>/<genomename>.transcripts/<transcriptomename>.chrnums
-   <gmapdb>/<genomename>/<genomename>.transcripts/<transcriptomename>.offsets64meta
-   <gmapdb>/<genomename>/<genomename>.transcripts/<transcriptomename>.offsets64strm
+   Before 2024-08,
+     <info_root>/<transcriptomename>.exoninfo
+     <info_root>/<transcriptomename>.chrnums
+     <info_root>/<transcriptomename>.offsets64meta
+     <info_root>/<transcriptomename>.offsets64strm
+
+   After 2024-08,
+     <info_root>/<genomename>.exoninfo
+     <info_root>/<genomename>.chrnums
+     <info_root>/<genomename>.offsets64meta
+     <info_root>/<genomename>.offsets64strm
 */
 
 static struct option long_options[] = {
   /* Input options */
-  {"dir", required_argument, 0, 'D'}, /* user_gmapdb */
+  {"genomedir", required_argument, 0, 'D'}, /* user_genomedb */
   {"genomedb", required_argument, 0, 'd'}, /* genome_dbroot */
+  {"transcriptomedir", required_argument, 0, 'C'}, /* user_transcriptomedb */
   {"transcriptomedb", required_argument, 0, 'c'}, /* transcriptome_dbroot */
 
   /* Help options */
@@ -89,11 +100,12 @@ static struct option long_options[] = {
 
 static void print_program_usage ();
 
-static char *user_gmapdb = NULL;
+static char *user_genomedb = NULL;
 static char *genome_dbroot = NULL;
 static char *genome_fileroot = NULL;
 static char *genomesubdir = NULL;
 
+static char *user_transcriptomedb = NULL;
 static char *transcriptome_dbroot = NULL;
 static char *transcriptome_fileroot = NULL;
 static char *transcriptomesubdir = NULL;
@@ -121,7 +133,7 @@ check_data (IIT_T transcript_map_iit, Transcriptome_T transcriptome) {
 #endif
 
   for (map_index = 1; map_index <= IIT_total_nintervals(transcript_map_iit); map_index++) {
-    if ((trnum = Transcriptome_trnum(&nexons,&exonbounds,&exonstarts,transcriptome,map_index)) >= 1) {
+    if ((trnum = Transcriptome_trnum(&nexons,&exonbounds,&exonstarts,transcriptome,map_index)) != 0) {
       Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
       debug(printf("%d: %s\n",map_index,IIT_label(transcript_map_iit,index,&alloc_label_p)));
 
@@ -172,7 +184,7 @@ main (int argc, char *argv[]) {
   const char *long_name;
 
 
-  while ((opt = getopt_long(argc,argv,"D:d:c:",
+  while ((opt = getopt_long(argc,argv,"D:d:C:c:",
 			    long_options, &long_option_index)) != -1) {
     switch (opt) {
     case 0:
@@ -189,8 +201,9 @@ main (int argc, char *argv[]) {
       }
       break;
 
-    case 'D': user_gmapdb = optarg; break;
+    case 'D': user_genomedb = optarg; break;
     case 'd': genome_dbroot = optarg; break;
+    case 'C': user_transcriptomedb = optarg; break;
     case 'c': transcriptome_dbroot = optarg; break;
 
     case '?': fprintf(stderr,"For usage, run 'trindex --help'\n"); exit(9);
@@ -201,11 +214,15 @@ main (int argc, char *argv[]) {
   argv += optind;
 
   
+  if (user_transcriptomedb == NULL) {
+    user_transcriptomedb = user_genomedb;
+  }
+
   if (genome_dbroot == NULL) {
     fprintf(stderr,"Need to specify the genome used for alignment with the -d flag\n");
     exit(9);
   } else {
-    genomesubdir = Datadir_find_genomesubdir(&genome_fileroot,&dbversion,user_gmapdb,
+    genomesubdir = Datadir_find_genomesubdir(&genome_fileroot,&dbversion,user_genomedb,
 					     genome_dbroot);
     FREE(dbversion);
   }
@@ -214,15 +231,24 @@ main (int argc, char *argv[]) {
     fprintf(stderr,"Need to specify the transcriptome index name with the -c flag\n");
     exit(9);
   } else {
-    transcriptomesubdir = Datadir_find_genomesubdir(&transcriptome_fileroot,&dbversion,user_gmapdb,
+    transcriptomesubdir = Datadir_find_genomesubdir(&transcriptome_fileroot,&dbversion,user_transcriptomedb,
 						    transcriptome_dbroot);
     FREE(dbversion);
   }
 
+#if 0
+  /* Before 2024-08 */
   info_root = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
 			      strlen(genome_fileroot)+strlen(".transcripts/")+strlen(transcriptome_fileroot)+1,
 			      sizeof(char));
   sprintf(info_root,"%s/%s.transcripts/%s",genomesubdir,genome_fileroot,transcriptome_fileroot);
+#else
+  /* After 2024-08 */
+  info_root = (char *) CALLOC(strlen(transcriptomesubdir)+strlen("/")+
+			      strlen(transcriptome_fileroot)+strlen(".genomes/")+strlen(genome_fileroot)+1,
+			      sizeof(char));
+  sprintf(info_root,"%s/%s.genomes/%s",transcriptomesubdir,transcriptome_fileroot,genome_fileroot);
+#endif
 
   if (argc <= 0) {
     fprintf(stderr,"Need to specify an alignment IIT file\n");
@@ -288,7 +314,7 @@ main (int argc, char *argv[]) {
   nalignments = IIT_total_nintervals(alignment_iit);
   transcriptomedb_index = (int *) MALLOC((nalignments+1)*sizeof(int));
   for (alignment_index = 0; alignment_index <= nalignments; alignment_index++) {
-    transcriptomedb_index[alignment_index] = -1;
+    transcriptomedb_index[alignment_index] = 0; /* Was -1 when Trnum_T was an int, rather than an unsigned int */
   }
 
   divints = MALLOC(ntranscripts*sizeof(int));
@@ -374,10 +400,17 @@ main (int argc, char *argv[]) {
 
   FREE(offsets);
 
+#if 0
+  /* Before 2024-08 */
   fprintf(stderr,"Wrote transcriptome files to %s/%s.transcripts/%s.*\n",
 	  genomesubdir,genome_fileroot,transcriptome_fileroot);
+#else
+  /* After 2024-08 */
+  fprintf(stderr,"Wrote transcriptome files to %s/%s.genomes/%s.*\n",
+	  transcriptomesubdir,transcriptome_fileroot,genome_fileroot);
+#endif
 
-  transcriptome = Transcriptome_new(genomesubdir,genome_fileroot,transcriptome_fileroot,
+  transcriptome = Transcriptome_new(genomesubdir,genome_fileroot,transcriptomesubdir,transcriptome_fileroot,
 				    /*sharedp*/false);
   check_data(alignment_iit,transcriptome);
   Transcriptome_free(&transcriptome);
@@ -394,7 +427,7 @@ main (int argc, char *argv[]) {
 static void
 print_program_usage () {
   fprintf(stdout,"\
-Usage: trindex [OPTIONS...] -D <gmapdb> -d <genome> -c <transcriptome> <alignment IIT file>\n\
+Usage: trindex [OPTIONS...] -D <genomedb> -d <genome> -C <transcriptomedb> -c <transcriptome> <alignment IIT file>\n\
 \n\
 Utility file used by gmap_build for linking transcriptome alignments to a genome\n\
 \n\

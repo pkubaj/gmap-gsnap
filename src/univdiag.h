@@ -1,4 +1,3 @@
-/* $Id: 7030c43e8dc573690abf254a78887552fb9c35d7 $ */
 #ifndef UNIVDIAG_INCLUDED
 #define UNIVDIAG_INCLUDED
 
@@ -18,9 +17,18 @@ Univdiag_new (int qstart, int qend, Univcoord_T univdiagonal);
 #endif
 
 extern void
-Univdiag_transfer (T new, T old);
+Univdiag_free_array (Univdiag_T **array);
 extern T *
 Univdiag_new_array (int n);
+extern void
+Univdiag_free_array_keep (Univdiag_T **array);
+extern T *
+Univdiag_new_array_keep (int n);
+
+extern void
+Univdiag_transfer (T new, T old);
+extern void
+Univdiag_transfer_list_to_array (T *array, List_T p);
 extern void
 Univdiag_reverse_inplace (T *array, int starti, int endi);
 
@@ -39,10 +47,11 @@ extern int
 Univdiag_ascending_cmp (const void *a, const void *b);
 extern int
 Univdiag_descending_cmp (const void *a, const void *b);
+
 extern int
-Univdiag_diagonal_cmp (const void *a, const void *b);
+Univdiag_struct_diagonal_fwd_cmp (const void *a, const void *b);
 extern int
-Univdiag_diagonal_rev_cmp (const void *a, const void *b);
+Univdiag_struct_diagonal_rev_cmp (const void *a, const void *b);
 
 extern int
 Univdiag_struct_cmp (const void *a, const void *b);

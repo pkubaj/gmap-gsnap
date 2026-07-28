@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 4b34d835dc3acea9db9c97c1ed5d31b4c0d9b7ff $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -15,7 +14,7 @@ static char rcsid[] = "$Id: 4b34d835dc3acea9db9c97c1ed5d31b4c0d9b7ff $";
 #endif
 
 #define UNUSED(x) (void)(x)
-
+#define DEBUG_FILE stderr
 
 /* Prints out memory usage at each alloc/free */
 /* #define DEBUG_STACK 1 */
@@ -79,7 +78,11 @@ static pthread_key_t key_memusage_std_sizelist;
 static pthread_key_t key_memusage_std_stack_max;
 static pthread_key_t key_memusage_std_heap;
 static pthread_key_t key_memusage_std_heap_max;
+
 static pthread_key_t key_memusage_keep; /* Keep pool: Memory that is kept by a thread between queries  */
+static pthread_key_t key_memusage_aligned; /* std pool but aligned */
+static pthread_key_t key_memusage_keep_aligned; /* std pool but aligned */
+
 static pthread_key_t key_threadname;
 #else
 static char *threadname = "program";
@@ -88,7 +91,11 @@ static struct sizelist *memusage_std_sizelist = NULL;
 static long int memusage_std_stack_max = 0;
 static long int memusage_std_heap = 0;
 static long int memusage_std_heap_max = 0;
+
 static long int memusage_keep = 0;
+static long int memusage_aligned = 0;
+static long int memusage_keep_aligned = 0;
+
 #endif
 
 static long int memusage_in = 0; /* Input pool: Memory from inbuffer to threads */
@@ -102,7 +109,11 @@ Mem_usage_init () {
   pthread_key_create(&key_memusage_std_stack_max,NULL);
   pthread_key_create(&key_memusage_std_heap,NULL);
   pthread_key_create(&key_memusage_std_heap_max,NULL);
+
   pthread_key_create(&key_memusage_keep,NULL);
+  pthread_key_create(&key_memusage_aligned,NULL);
+  pthread_key_create(&key_memusage_keep_aligned,NULL);
+
   pthread_key_create(&key_threadname,NULL);
 
   pthread_setspecific(key_memusage_std_stack,(void *) 0);
@@ -115,11 +126,16 @@ Mem_usage_init () {
   memusage_std_stack_max = 0;
   memusage_std_heap = 0;
   memusage_std_heap_max = 0;
+
   memusage_keep = 0;
+  memusage_aligned = 0;
+  memusage_keep_aligned = 0;
+
 #endif
 
   memusage_in = 0;
   memusage_out = 0;
+
   return;
 }
 
@@ -270,7 +286,7 @@ Mem_usage_std_stack_subtract (const char *file, int line) {
 
 
 void
-Mem_usage_std_heap_add (long int x) {
+Mem_usage_std_heap_add (long int x, const char *file, int line) {
 #if defined(HAVE_PTHREAD)
   long int memusage_std_heap;
 
@@ -283,13 +299,57 @@ Mem_usage_std_heap_add (long int x) {
   memusage_std_heap += x;
   debug_heap(printf("%ld %s: ",memusage_std_heap,threadname));
   pthread_setspecific(key_memusage_std_heap,(void *) memusage_std_heap);
-  debug_heap(printf("Reset memusage_std_heap to %ld\n",memusage_std_heap));
+  debug_heap(printf("Reset memusage_std_heap to %ld at %s:%d\n",memusage_std_heap,file,line));
 #else
   memusage_std_heap += x;
   debug_heap(printf("%ld: ",memusage_std_heap));
-  debug_heap(printf("Reset memusage_std_heap to %ld\n",memusage_std_heap));
+  debug_heap(printf("Reset memusage_std_heap to %ld at %s:%d\n",memusage_std_heap,file,line));
 #endif
 }
+
+
+void
+Mem_usage_std_heap_subtract (const char *file, int line) {
+  long int x;
+  struct sizelist *head;
+
+#if defined(HAVE_PTHREAD)
+  long int memusage_std_heap;
+  struct sizelist *memusage_std_sizelist;
+
+#ifdef DEBUG_HEAP
+  char *threadname;
+  threadname = (char *) pthread_getspecific(key_threadname);
+#endif
+
+  memusage_std_sizelist = (struct sizelist *) pthread_getspecific(key_memusage_std_sizelist);
+  x = memusage_std_sizelist->size;
+  head = memusage_std_sizelist->rest;
+  free(memusage_std_sizelist);
+  pthread_setspecific(key_memusage_std_sizelist,(void *) head);
+  
+  memusage_std_heap = (long int) pthread_getspecific(key_memusage_std_heap);
+  memusage_std_heap -= x;
+  debug_heap(printf("%ld %s: ",memusage_std_heap,threadname));
+  pthread_setspecific(key_memusage_std_heap,(void *) memusage_std_heap);
+
+  debug_heap(printf("Reset memusage_std_heap to %ld at %s:%d\n",memusage_std_heap,file,line));
+
+#else
+  x = memusage_std_sizelist->size;
+  head = memusage_std_sizelist->rest;
+  free(memusage_std_sizelist);
+  memusage_std_sizelist = head;
+
+  memusage_std_heap -= x;
+  debug_heap(printf("%ld: ",memusage_std_heap));
+
+  debug_heap(printf("Reset memusage_std_heap to %ld at %s:%d\n",memusage_std_heap,file,line));
+#endif
+
+  return;
+}
+
 
 long int
 Mem_usage_report_std_stack () {
@@ -315,6 +375,24 @@ Mem_usage_report_keep () {
   return (long int) pthread_getspecific(key_memusage_keep);
 #else
   return memusage_keep;
+#endif
+}
+
+long int
+Mem_usage_report_aligned () {
+#if defined(HAVE_PTHREAD)
+  return (long int) pthread_getspecific(key_memusage_aligned);
+#else
+  return memusage_aligned;
+#endif
+}
+
+long int
+Mem_usage_report_keep_aligned () {
+#if defined(HAVE_PTHREAD)
+  return (long int) pthread_getspecific(key_memusage_keep_aligned);
+#else
+  return memusage_keep_aligned;
 #endif
 }
 
@@ -389,7 +467,7 @@ Mem_alloc (size_t nbytes, const char *file, int line) {
 
 #if defined(HAVE_PTHREAD)
   pthread_mutex_lock(&memusage_mutex);
-  long int memusage_std_heap, memusage_std_heap_max;
+  long int memusage_std_heap, memusage_aligned, memusage_std_heap_max;
   char *threadname;
 #endif
 #endif
@@ -405,14 +483,15 @@ Mem_alloc (size_t nbytes, const char *file, int line) {
   pthread_setspecific(key_memusage_std_heap,(void *) memusage_std_heap);
 
   memusage_std_heap_max = (long int) pthread_getspecific(key_memusage_std_heap_max);
-  if (memusage_std_heap > memusage_std_heap_max) {
+  memusage_aligned = (long int) pthread_getspecific(key_memusage_aligned);
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
     /* printf("Heap max is now %llu\n",memusage_std_heap); */
-    pthread_setspecific(key_memusage_std_heap_max,(void *) memusage_std_heap);
+    pthread_setspecific(key_memusage_std_heap_max,(void *) (memusage_std_heap + memusage_aligned));
   }
 #else
   memusage_std_heap += nbytes;
-  if (memusage_std_heap > memusage_std_heap_max) {
-    memusage_std_heap_max = memusage_std_heap;
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
+    memusage_std_heap_max = memusage_std_heap + memusage_aligned;
   }
 #endif
 
@@ -425,10 +504,10 @@ Mem_alloc (size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld %s: Allocating %p to %p -- Malloc of %zu bytes in standard pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s: Allocating %p to %p -- Malloc of %zu bytes in standard pool requested from %s:%d\n",
 		    memusage_std_heap,threadname,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Malloc of %zu bytes in standard pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in standard pool requested from %s:%d\n",
 		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #endif
 
@@ -462,6 +541,101 @@ Mem_alloc (size_t nbytes, const char *file, int line) {
   return ptr;
 }
 
+
+void *
+Mem_alloc_aligned (size_t nbytes, const char *file, int line) {
+  void *ptr;
+#ifdef MEMUSAGE
+  static struct descriptor *bp;
+  unsigned h;
+
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_lock(&memusage_mutex);
+  long int memusage_std_heap, memusage_aligned, memusage_std_heap_max;
+  char *threadname;
+#endif
+#endif
+
+  assert(nbytes > 0);
+
+#ifdef HAVE_ARM
+  posix_memalign((void **) &(ptr),16,nbytes);
+#elif defined(HAVE_AVX512)
+  ptr = _mm_malloc(nbytes,64);
+#elif defined(HAVE_AVX2)
+  ptr = _mm_malloc(nbytes,32);
+#elif defined(HAVE_SSE4_1)
+  ptr = _mm_malloc(nbytes,16);
+#else
+  ptr = malloc(nbytes);
+#endif
+
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  threadname = (char *) pthread_getspecific(key_threadname);
+  memusage_aligned = (long int) pthread_getspecific(key_memusage_aligned);
+  memusage_aligned += nbytes;
+  pthread_setspecific(key_memusage_aligned,(void *) memusage_aligned);
+
+  memusage_std_heap_max = (long int) pthread_getspecific(key_memusage_std_heap_max);
+  memusage_std_heap = (long int) pthread_getspecific(key_memusage_std_heap);
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
+    /* printf("Heap max is now %llu\n",memusage_std_heap); */
+    pthread_setspecific(key_memusage_std_heap_max,(void *) (memusage_std_heap + memusage_aligned));
+  }
+#else
+  memusage_aligned += nbytes;
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
+    memusage_std_heap_max = memusage_std_heap + memusae_aligned;
+  }
+#endif
+
+  h = hash(ptr,htab);
+  bp = malloc(sizeof(*bp));
+  bp->link = htab[h];
+  bp->ptr = ptr;
+  bp->size = nbytes;
+  htab[h] = bp;
+#endif
+
+#ifdef MEMUSAGE
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s: Allocating %p to %p -- Malloc of %zu bytes in aligned pool requested from %s:%d\n",
+		    memusage_aligned,threadname,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
+#else
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in aligned pool requested from %s:%d\n",
+		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
+#endif
+
+#ifdef TRAP
+  if (ptr == trap_location) {
+    printf("Trap: Alloc of location %p by %s:%d\n",ptr,file,line);
+  }
+  if (startp > 0 && *trap_location != trap_contents) {
+      printf("Value changed at location %p.  Old value was %p.  New value is %p.  Observed during malloc at %s:%d\n",
+	     trap_location,trap_contents,*trap_location,file,line);
+      fflush(stdout);
+      trap_contents = * (void **) trap_location;
+  }
+#endif
+
+  if (ptr == NULL) {
+    fprintf(stderr,"Failed attempt to alloc %zu bytes\n",nbytes);
+    if (file == NULL) {
+      RAISE(Mem_Failed);
+    } else {
+      Except_raise(&Mem_Failed, file, line);
+    }
+  }
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_unlock(&memusage_mutex);
+#endif
+#endif
+
+  return ptr;
+}
 
 
 void *
@@ -499,10 +673,10 @@ Mem_alloc_keep (size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld %s-keep: Allocating %p to %p -- Malloc of %zu bytes in keep pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s-keep: Allocating %p to %p -- Malloc of %zu bytes in keep pool requested from %s:%d\n",
 		    memusage_keep,threadname,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Malloc of %zu bytes in keep pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in keep pool requested from %s:%d\n",
 		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #endif
 
@@ -537,6 +711,92 @@ Mem_alloc_keep (size_t nbytes, const char *file, int line) {
   return ptr;
 }
 
+
+void *
+Mem_alloc_keep_aligned (size_t nbytes, const char *file, int line) {
+  void *ptr;
+#ifdef MEMUSAGE
+  static struct descriptor *bp;
+  unsigned h;
+
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_lock(&memusage_mutex);
+  long int memusage_keep_aligned;
+  char *threadname;
+#endif
+#endif
+
+  assert(nbytes > 0);
+
+#ifdef HAVE_ARM
+  posix_memalign((void **) &(ptr),16,nbytes);
+#elif defined(HAVE_AVX512)
+  ptr = _mm_malloc(nbytes,64);
+#elif defined(HAVE_AVX2)
+  ptr = _mm_malloc(nbytes,32);
+#elif defined(HAVE_SSE4_1)
+  ptr = _mm_malloc(nbytes,16);
+#else
+  ptr = malloc(nbytes);
+#endif
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  threadname = (char *) pthread_getspecific(key_threadname);
+  memusage_keep_aligned = (long int) pthread_getspecific(key_memusage_keep_aligned);
+  memusage_keep_aligned += nbytes;
+  pthread_setspecific(key_memusage_keep_aligned,(void *) memusage_keep_aligned);
+#else
+  memusage_keep_aligned += nbytes;
+#endif
+  h = hash(ptr,htab);
+  bp = malloc(sizeof(*bp));
+  bp->link = htab[h];
+  bp->ptr = ptr;
+  bp->size = nbytes;
+  htab[h] = bp;
+#endif
+
+#ifdef MEMUSAGE
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s-keep_aligned: Allocating %p to %p -- Malloc of %zu bytes in keep_aligned pool requested from %s:%d\n",
+		    memusage_keep_aligned,threadname,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
+#else
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in keep_aligned pool requested from %s:%d\n",
+		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
+#endif
+
+
+#ifdef TRAP
+  if (ptr == trap_location) {
+    printf("Trap: Alloc of location %p by %s:%d\n",ptr,file,line);
+  }
+  if (startp > 0 && *trap_location != trap_contents) {
+      printf("Value changed at location %p.  Old value was %p.  New value is %p.  Observed during malloc at %s:%d\n",
+	     trap_location,trap_contents,*trap_location,file,line);
+      fflush(stdout);
+      trap_contents = * (void **) trap_location;
+  }
+#endif
+
+  if (ptr == NULL) {
+    fprintf(stderr,"Failed attempt to alloc %zu bytes\n",nbytes);
+    if (file == NULL) {
+      RAISE(Mem_Failed);
+    } else {
+      Except_raise(&Mem_Failed, file, line);
+    }
+  }
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_unlock(&memusage_mutex);
+#endif
+#endif
+
+  return ptr;
+}
+
+
 void *
 Mem_alloc_in (size_t nbytes, const char *file, int line) {
   void *ptr;
@@ -563,10 +823,10 @@ Mem_alloc_in (size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld IN: Allocating %p to %p -- Malloc of %zu bytes in input pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld IN: Allocating %p to %p -- Malloc of %zu bytes in input pool requested from %s:%d\n",
 		    memusage_in,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Malloc of %zu bytes in input pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in input pool requested from %s:%d\n",
 		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #endif
 
@@ -627,10 +887,10 @@ Mem_alloc_out (size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld OUT: Allocating %p to %p -- Malloc of %zu bytes in output pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld OUT: Allocating %p to %p -- Malloc of %zu bytes in output pool requested from %s:%d\n",
 		    memusage_out,ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Malloc of %zu bytes in output pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Malloc of %zu bytes in output pool requested from %s:%d\n",
 		    ptr,(char *) ptr + nbytes-1,nbytes,file,line));
 #endif
 
@@ -684,7 +944,7 @@ Mem_calloc (size_t count, size_t nbytes, const char *file, int line) {
 
 #if defined(HAVE_PTHREAD)
   pthread_mutex_lock(&memusage_mutex);
-  long int memusage_std_heap, memusage_std_heap_max;
+  long int memusage_std_heap, memusage_aligned, memusage_std_heap_max;
   char *threadname;
 #endif
 #endif
@@ -722,13 +982,14 @@ Mem_calloc (size_t count, size_t nbytes, const char *file, int line) {
   pthread_setspecific(key_memusage_std_heap,(void *) memusage_std_heap);
 
   memusage_std_heap_max = (long int) pthread_getspecific(key_memusage_std_heap_max);
-  if (memusage_std_heap > memusage_std_heap_max) {
-    pthread_setspecific(key_memusage_std_heap_max,(void *) memusage_std_heap);
+  memusage_aligned = (long int) pthread_getspecific(key_memusage_aligned);
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
+    pthread_setspecific(key_memusage_std_heap_max,(void *) (memusage_std_heap + memusage_aligned));
   }
 #else
   memusage_std_heap += count*nbytes;
-  if (memusage_std_heap > memusage_std_heap_max) {
-    memusage_std_heap_max = memusage_std_heap;
+  if (memusage_std_heap + memusage_aligned > memusage_std_heap_max) {
+    memusage_std_heap_max = memusage_std_heap + memusage_aligned;
   }
 #endif
   h = hash(ptr,htab);
@@ -740,10 +1001,10 @@ Mem_calloc (size_t count, size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld %s: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in standard pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in standard pool requested from %s:%d\n",
 		    memusage_std_heap,threadname,ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in standard pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in standard pool requested from %s:%d\n",
 		    ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #endif
 
@@ -823,10 +1084,10 @@ Mem_calloc_keep (size_t count, size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld %s-keep: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in keep pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld %s-keep: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in keep pool requested from %s:%d\n",
 		    memusage_keep,threadname,ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in keep pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in keep pool requested from %s:%d\n",
 		    ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #endif
 
@@ -897,10 +1158,10 @@ Mem_calloc_in (size_t count, size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld IN: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in input pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld IN: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in input pool requested from %s:%d\n",
 		    memusage_in,ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in input pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in input pool requested from %s:%d\n",
 		    ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #endif
 
@@ -970,10 +1231,10 @@ Mem_calloc_out (size_t count, size_t nbytes, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-  debug_heap(printf("%ld OUT: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in output pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"%ld OUT: Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in output pool requested from %s:%d\n",
 		    memusage_out,ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #else
-  debug_heap(printf("Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in output pool requested from %s:%d\n",
+  debug_heap(fprintf(DEBUG_FILE,"Allocating %p to %p -- Calloc of %zu x %zu = %zu bytes in output pool requested from %s:%d\n",
 		    ptr,(char *) ptr + count*nbytes-1,count,nbytes,count*nbytes,file,line));
 #endif
 
@@ -1089,12 +1350,92 @@ Mem_free (void *ptr, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-    debug_heap(printf("%ld %s: Freeing %p in standard pool at %s:%d (%ld bytes)\n",
+    debug_heap(fprintf(DEBUG_FILE,"%ld %s: Freeing %p in standard pool at %s:%d (%ld bytes)\n",
 		      memusage_std_heap,threadname,ptr,file,line,nbytes));
 #else
-    debug_heap(printf("Freeing %p in standard pool at %s:%d\n",ptr,file,line));
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in standard pool at %s:%d\n",ptr,file,line));
 #endif
     free(ptr);
+  }
+
+#ifdef TRAP
+  if (startp > 0 && *trap_location != trap_contents) {
+      printf("Value changed at location %p.  Old value was %p.  New value is %p.  Observed during free at %s:%d\n",
+	     trap_location,trap_contents,*trap_location,file,line);
+      fflush(stdout);
+      trap_contents = * (void **) trap_location;
+  }
+#endif
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_unlock(&memusage_mutex);
+#endif
+#endif
+
+  return;
+}
+
+
+void 
+Mem_free_aligned (void *ptr, const char *file, int line) {
+#if !defined(MEMUSAGE) && !defined(TRAP)
+  UNUSED(file); UNUSED(line);
+#endif
+
+#ifdef MEMUSAGE
+  struct descriptor *bp;
+  size_t nbytes;
+
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_lock(&memusage_mutex);
+  long int memusage_aligned;
+  char *threadname;
+#endif
+#endif
+
+#ifdef TRAP
+  if (ptr == trap_location) {
+    printf("Trap: Location %p freed at %s:%d\n",ptr,file,line);
+  }
+#endif
+
+  if (ptr) {
+#ifdef MEMUSAGE
+    if ((bp = find(ptr)) == NULL) {
+      Except_raise(&Mem_Failed, file, line);
+    } else {
+      nbytes = bp->size;
+#if defined(HAVE_PTHREAD)
+      threadname = (char *) pthread_getspecific(key_threadname);
+      memusage_aligned = (long int) pthread_getspecific(key_memusage_aligned);
+      memusage_aligned -= nbytes;
+      pthread_setspecific(key_memusage_aligned,(void *) memusage_aligned);
+#else
+      memusage_aligned -= nbytes;
+#endif
+      free(bp);
+    }
+#endif
+
+#ifdef MEMUSAGE
+    debug_heap(fprintf(DEBUG_FILE,"%ld %s: Freeing %p in aligned pool at %s:%d (%ld bytes), aligned\n",
+		      memusage_aligned,threadname,ptr,file,line,nbytes));
+#else
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in aligned pool at %s:%d, aligned\n",ptr,file,line));
+#endif
+
+#ifdef HAVE_ARM
+    free(ptr);
+#elif defined(HAVE_AVX512)
+    _mm_free(ptr);
+#elif defined(HAVE_AVX2)
+    _mm_free(ptr);
+#elif defined(HAVE_SSE_4_1)
+    _mm_free(ptr);
+#else  
+    free(ptr);
+#endif
   }
 
 #ifdef TRAP
@@ -1158,12 +1499,93 @@ Mem_free_keep (void *ptr, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-    debug_heap(printf("%ld %s-keep: Freeing %p in keep pool at %s:%d (%ld bytes)\n",
+    debug_heap(fprintf(DEBUG_FILE,"%ld %s-keep: Freeing %p in keep pool at %s:%d (%ld bytes)\n",
 		      memusage_keep,threadname,ptr,file,line,nbytes));
 #else
-    debug_heap(printf("Freeing %p in keep pool at %s:%d\n",ptr,file,line));
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in keep pool at %s:%d\n",ptr,file,line));
 #endif
     free(ptr);
+  }
+
+#ifdef TRAP
+  if (startp > 0 && *trap_location != trap_contents) {
+      printf("Value changed at location %p.  Old value was %p.  New value is %p.  Observed during free at %s:%d\n",
+	     trap_location,trap_contents,*trap_location,file,line);
+      fflush(stdout);
+      trap_contents = * (void **) trap_location;
+  }
+#endif
+
+#ifdef MEMUSAGE
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_unlock(&memusage_mutex);
+#endif
+#endif
+
+
+  return;
+}
+
+
+void 
+Mem_free_keep_aligned (void *ptr, const char *file, int line) {
+#if !defined(MEMUSAGE) && !defined(TRAP)
+  UNUSED(file); UNUSED(line);
+#endif
+
+#ifdef MEMUSAGE
+  struct descriptor *bp;
+  size_t nbytes;
+
+#if defined(HAVE_PTHREAD)
+  pthread_mutex_lock(&memusage_mutex);
+  long int memusage_keep_aligned;
+  char *threadname;
+#endif
+#endif
+
+#ifdef TRAP
+  if (ptr == trap_location) {
+    printf("Trap: Location %p freed at %s:%d\n",ptr,file,line);
+  }
+#endif
+
+  if (ptr) {
+#ifdef MEMUSAGE
+    if ((bp = find(ptr)) == NULL) {
+      Except_raise(&Mem_Failed, file, line);
+    } else {
+      nbytes = bp->size;
+#if defined(HAVE_PTHREAD)
+      threadname = (char *) pthread_getspecific(key_threadname);
+      memusage_keep_aligned = (long int) pthread_getspecific(key_memusage_keep_aligned);
+      memusage_keep_aligned -= nbytes;
+      pthread_setspecific(key_memusage_keep_aligned,(void *) memusage_keep_aligned);
+#else
+      memusage_keep_aligned -= nbytes;
+#endif
+      free(bp);
+    }
+#endif
+
+#ifdef MEMUSAGE
+    debug_heap(fprintf(DEBUG_FILE,"%ld %s-keep_aligned: Freeing %p in keep_aligned pool at %s:%d (%ld bytes), aligned\n",
+		      memusage_keep_aligned,threadname,ptr,file,line,nbytes));
+#else
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in keep_aligned pool at %s:%d, aligned\n",ptr,file,line));
+#endif
+
+#ifdef HAVE_ARM
+    free(ptr);
+#elif defined(HAVE_AVX512)
+    _mm_free(ptr);
+#elif defined(HAVE_AVX2)
+    _mm_free(ptr);
+#elif defined(HAVE_SSE_4_1)
+    _mm_free(ptr);
+#else  
+    free(ptr);
+#endif
   }
 
 #ifdef TRAP
@@ -1218,10 +1640,10 @@ Mem_free_in (void *ptr, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-    debug_heap(printf("%ld IN: Freeing %p in input pool at %s:%d (%ld bytes)\n",
+    debug_heap(fprintf(DEBUG_FILE,"%ld IN: Freeing %p in input pool at %s:%d (%ld bytes)\n",
 		      memusage_in,ptr,file,line,nbytes));
 #else
-    debug_heap(printf("Freeing %p in input pool at %s:%d\n",ptr,file,line));
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in input pool at %s:%d\n",ptr,file,line));
 #endif
     free(ptr);
   }
@@ -1277,10 +1699,10 @@ Mem_free_out (void *ptr, const char *file, int line) {
 #endif
 
 #ifdef MEMUSAGE
-    debug_heap(printf("%ld OUT: Freeing %p in output pool at %s:%d (%ld bytes)\n",
+    debug_heap(fprintf(DEBUG_FILE,"%ld OUT: Freeing %p in output pool at %s:%d (%ld bytes)\n",
 		      memusage_out,ptr,file,line,nbytes));
 #else
-    debug_heap(printf("Freeing %p in output pool at %s:%d\n",ptr,file,line));
+    debug_heap(fprintf(DEBUG_FILE,"Freeing %p in output pool at %s:%d\n",ptr,file,line));
 #endif
     free(ptr);
   }

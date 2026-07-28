@@ -1,4 +1,4 @@
-/* $Id$ */
+/* $Id: efe7cdf9017f201d5245e48e316ffe7de429d249 $ */
 #ifndef GENOMEBITS_TRIM_INCLUDED
 #define GENOMEBITS_TRIM_INCLUDED
 

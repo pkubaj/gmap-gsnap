@@ -1,4 +1,3 @@
-/* $Id: cpuid.h 226315 2023-02-28 18:22:20Z twu $ */
 #ifndef CPUID_INCLUDED
 #define CPUID_INCLUDED
 #include "bool.h"

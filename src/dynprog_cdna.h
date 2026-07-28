@@ -1,4 +1,3 @@
-/* $Id: dynprog_cdna.h 223511 2020-11-14 15:50:08Z twu $ */
 #ifndef DYNPROG_CDNA_INCLUDED
 #define DYNPROG_CDNA_INCLUDED
 

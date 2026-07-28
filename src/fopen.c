@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: fopen.c 223349 2020-10-28 02:49:25Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"		/* For USE_FOPEN_BINARY, USE_FOPEN_TEXT */
 #endif

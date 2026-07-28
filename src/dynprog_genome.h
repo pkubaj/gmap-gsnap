@@ -1,4 +1,3 @@
-/* $Id: dynprog_genome.h 224700 2021-11-08 16:46:32Z twu $ */
 #ifndef DYNPROG_GENOME_INCLUDED
 #define DYNPROG_GENOME_INCLUDED
 

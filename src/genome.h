@@ -1,4 +1,3 @@
-/* $Id: genome.h 225310 2022-11-09 17:01:06Z twu $ */
 #ifndef GENOME_INCLUDED
 #define GENOME_INCLUDED
 

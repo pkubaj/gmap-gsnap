@@ -1,4 +1,3 @@
-/* $Id: merge-uint4.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef MERGE_UINT4_INCLUDED
 #define MERGE_UINT4_INCLUDED
 #ifdef HAVE_CONFIG_H

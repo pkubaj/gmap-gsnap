@@ -1,4 +1,4 @@
-/* $Id: 641d647fd86ccf3e6203db4297c1173ad48ce499 $ */
+/* $Id: cf2289f50ac16cc01c3309b6b84f4b65b5f0f640 $ */
 #ifndef PATH_INCLUDED
 #define PATH_INCLUDED
 
@@ -154,6 +154,12 @@ Path_end_splice_prob (T this);
 
 extern int
 Path_effective_sensedir (T this);
+
+extern int
+Path_qstart (T this);
+
+extern int
+Path_qend (T this);
 
 extern int
 Path_coverage (T this);
@@ -407,6 +413,8 @@ Path_expect_rev (T this) {
 
 extern T
 Path_reverse (T this, bool expect_fwd_p);
+extern T
+Path_reverse_nocheck (T this);
 extern bool
 Path_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions);
 
@@ -505,6 +513,9 @@ Path_new_for_qend_extension (Univcoord_T univdiagonal, int qstart, int qend, int
 			     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 			     Pathpool_T pathpool);
+
+extern bool
+Path_segments_good_p (T this);
 
 extern void
 Path_check_valid (T this);

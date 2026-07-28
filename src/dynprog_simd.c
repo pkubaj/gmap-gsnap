@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: dynprog_simd.c 226315 2023-02-28 18:22:20Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

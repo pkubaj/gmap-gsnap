@@ -1,4 +1,3 @@
-/* $Id: intron.h 204388 2017-03-18 00:03:34Z twu $ */
 #ifndef INTRON_INCLUDED
 #define INTRON_INCLUDED
 

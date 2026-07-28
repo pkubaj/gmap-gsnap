@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 0ae908ca721dd949c5575c9ab40188474ec9ddad $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -156,7 +155,7 @@ make_diagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
       assert(ncombined <= mergeinfo->max_nstreams);
       totals[ncombined] = total;
       /* Need an extra value for Sedgesort_uint4 */
-      MALLOC_ALIGN(_combined[ncombined],(total+1)*sizeof(UINT4));
+      _combined[ncombined] = (UINT4 *) MALLOC_ALIGN((total+1)*sizeof(UINT4));
       out = _combined[ncombined];
       debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
 			 out,out,__FILE__,__LINE__));
@@ -192,7 +191,7 @@ make_diagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
 
     } else {
       /* Copy to make the merging process non-destructive */
-      MALLOC_ALIGN(_heap[heapi],n*sizeof(UINT4));
+      _heap[heapi] = (UINT4 *) MALLOC_ALIGN(n*sizeof(UINT4));
       out = _heap[heapi];
       debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
 			 out,out,__FILE__,__LINE__));
@@ -238,6 +237,7 @@ make_diagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
 }
 
 
+#ifdef USE_SIMD_MERGE
 /* Input: streams might be aligned or not.  Caller will have to free appropriately */
 /* Output: aligned */
 UINT4 *
@@ -260,34 +260,43 @@ Merge_diagonals (int *nelts1, UINT4 **stream_array, int *streamsize_array,
     return (UINT4 *) NULL;
 
   } else if (nstreams == 1) {
-    *nelts1 = streamsize_array[0];
-    stream = stream_array[0];
-    diagterm = diagterm_array[0];
+    if ((*nelts1 = streamsize_array[0]) == 0) {
+      return (UINT4 *) NULL;
 
-    MALLOC_ALIGN(_result,(*nelts1)*sizeof(UINT4)); /* Output must be aligned */
-    debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
-		       _result,_result,__FILE__,__LINE__));
-    memcpy(_result,stream,(*nelts1)*sizeof(UINT4));
+    } else {
+      stream = stream_array[0];
+      diagterm = diagterm_array[0];
+
+      _result = (UINT4 *) MALLOC_ALIGN((*nelts1)*sizeof(UINT4)); /* Output must be aligned */
+      debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
+			 _result,_result,__FILE__,__LINE__));
+      memcpy(_result,stream,(*nelts1)*sizeof(UINT4));
 
     /* Add diagterm (Could use SIMD here) */
-    for (l = 0; l < *nelts1; l++) {
-      _result[l] += diagterm;
-    }
+      for (l = 0; l < *nelts1; l++) {
+	_result[l] += diagterm;
+      }
 
 #ifdef DEBUG
-    printf("Merge_diagonals returning result of length %d\n",*nelts1);
-    for (i = 0; i < *nelts1; i++) {
-      printf("%u\n",_result[i]);
-    }
+      printf("Merge_diagonals returning result of length %d\n",*nelts1);
+      for (i = 0; i < *nelts1; i++) {
+	printf("%u\n",_result[i]);
+      }
 #endif
 
-    return _result;
+      return _result;
+    }
 
   } else {
     ncopied = make_diagonals_heap(mergeinfo,stream_array,streamsize_array,diagterm_array,nstreams);
-    if (ncopied == 1) {
+    if (ncopied == 0) {
+      *nelts1 = 0;
+      return (UINT4 *) NULL;
+
+    } else if (ncopied == 1) {
       *nelts1 = mergeinfo->nelts[1];
       _result = mergeinfo->heap[1];
+
     } else {
       heapsize = 2*ncopied - 1;	/* also index of last node */
 #ifdef HAVE_BUILTIN_CLZ
@@ -336,6 +345,7 @@ Merge_diagonals (int *nelts1, UINT4 **stream_array, int *streamsize_array,
     return _result;
   }
 }
+#endif
 
 
 /* Fills mergeinfo->heap and mergeinfo->nelts */
@@ -372,7 +382,7 @@ make_univdiagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
       assert(ncombined <= mergeinfo->max_nstreams);
       totals[ncombined] = total;
       /* Need an extra value for Sedgesort_uint4 */
-      MALLOC_ALIGN(_combined[ncombined],(total+1)*sizeof(UINT4));
+      _combined[ncombined] = (UINT4 *) MALLOC_ALIGN((total+1)*sizeof(UINT4));
       out = _combined[ncombined];
       debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
 			 out,out,__FILE__,__LINE__));
@@ -406,8 +416,8 @@ make_univdiagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
       check_ascending(stream_array[order[i]],n);
 #endif
     
-    /* Copy to make the merging process non-destructive */
-      MALLOC_ALIGN(_heap[heapi],n*sizeof(UINT4));
+      /* Copy to make the merging process non-destructive */
+      _heap[heapi] = (UINT4 *) MALLOC_ALIGN(n*sizeof(UINT4));
       out = _heap[heapi];
       debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
 			 out,out,__FILE__,__LINE__));
@@ -446,6 +456,7 @@ make_univdiagonals_heap (Mergeinfo_uint4_T mergeinfo, UINT4 **stream_array,
 }
 
 
+#ifdef USE_SIMD_MERGE
 /* Used for Kmer_anypair_univdiagonals and localdb */
 /* Input: elements of stream_array do not have to be aligned */
 /* Output: aligned */
@@ -476,7 +487,7 @@ Merge_diagonals_uint4 (int *nelts1, UINT4 **stream_array, int *streamsize_array,
       check_ascending(stream,*nelts1);
 #endif
 
-      MALLOC_ALIGN(_result,(*nelts1)*sizeof(UINT4)); /* Output must be aligned */
+      _result = (UINT4 *) MALLOC_ALIGN((*nelts1)*sizeof(UINT4)); /* Output must be aligned */
       debug_align(printf("Allocating %p to %p -- Malloc of 1 bytes requested from %s:%d\n",
 			 _result,_result,__FILE__,__LINE__));
       memcpy(_result,stream,(*nelts1)*sizeof(UINT4));
@@ -485,9 +496,14 @@ Merge_diagonals_uint4 (int *nelts1, UINT4 **stream_array, int *streamsize_array,
 
   } else {
     ncopied = make_univdiagonals_heap(mergeinfo,stream_array,streamsize_array,nstreams);
-    if (ncopied == 1) {
+    if (ncopied == 0) {
+      *nelts1 = 0;
+      return (UINT4 *) NULL;
+      
+    } else if (ncopied == 1) {
       *nelts1 = mergeinfo->nelts[1];
       _result = mergeinfo->heap[1];
+
     } else {
       heapsize = 2*ncopied - 1;	/* also index of last node */
 #ifdef HAVE_BUILTIN_CLZ
@@ -537,5 +553,6 @@ Merge_diagonals_uint4 (int *nelts1, UINT4 **stream_array, int *streamsize_array,
 
   return _result;
 }
+#endif
 
 

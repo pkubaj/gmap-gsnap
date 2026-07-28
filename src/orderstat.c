@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: orderstat.c 225423 2022-12-06 23:47:29Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

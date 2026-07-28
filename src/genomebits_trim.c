@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: 1545391b10f7ccf8277b8be1de7a1a6a8c73227a $";
+static char rcsid[] = "$Id: 98f237f3ec23f7d73036cd3c52ecad334f9f7f8f $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -557,10 +557,10 @@ Genomebits_trim_qstart (int *nmismatches_to_trimpos,
       diff_32 = clear_highbit_32(diff_32,relpos);
     }
 
-    if (*nmismatches_to_trimpos == nmismatches - 1) {
-      /* If last mismatch compensated for previous, then take the last
-	 segment, regardless of whether it compensates for the last
-	 mismatch */
+    if (pos3 - pos5 > nmismatches && *nmismatches_to_trimpos == nmismatches - 1) {
+      /* If there was a match, and last mismatch compensated for
+	 previous, then take the last segment, regardless of whether
+	 it compensates for the last mismatch */
       debug1(printf("Last mismatch compensates because %d nmismatches == total %d - 1\n",
 		  *nmismatches_to_trimpos,nmismatches));
       trimpos = pos5 - 1;
@@ -622,10 +622,10 @@ Genomebits_trim_qstart (int *nmismatches_to_trimpos,
       diff_64 = clear_highbit_64(diff_64,relpos);
     }
 
-    if (*nmismatches_to_trimpos == nmismatches - 1) {
-      /* If last mismatch compensated for previous, then take the last
-	 segment, regardless of whether it compensates for the last
-	 mismatch */
+    if (pos3 - pos5 > nmismatches && *nmismatches_to_trimpos == nmismatches - 1) {
+      /* If there was a match, and last mismatch compensated for
+	 previous, then take the last segment, regardless of whether
+	 it compensates for the last mismatch */
       debug1(printf("Last mismatch compensates because %d nmismatches == total %d - 1\n",
 		  *nmismatches_to_trimpos,nmismatches));
       trimpos = pos5 - 1;

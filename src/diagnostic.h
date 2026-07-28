@@ -1,4 +1,3 @@
-/* $Id: diagnostic.h 40271 2011-05-28 02:29:18Z twu $ */
 #ifndef DIAGNOSTIC_INCLUDED
 #define DIAGNOSTIC_INCLUDED
 

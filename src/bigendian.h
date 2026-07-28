@@ -1,4 +1,3 @@
-/* $Id: bigendian.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef BIGENDIAN_INCLUDED
 #define BIGENDIAN_INCLUDED
 #ifdef HAVE_CONFIG_H

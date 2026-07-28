@@ -1,4 +1,3 @@
-/* $Id: diagpool.h 166641 2015-05-29 21:13:04Z twu $ */
 #ifndef DIAGPOOL_INCLUDED
 #define DIAGPOOL_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: bitpack64-read.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef BITPACK64_READ_INCLUDED
 #define BITPACK64_READ_INCLUDED
 #ifdef HAVE_CONFIG_H

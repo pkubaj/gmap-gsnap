@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 926375ea129d344dae3a8d2d30a61f8a1e5fa451 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -290,7 +289,7 @@ Merge_uint4 (unsigned int *__restrict__ dest, unsigned int *__restrict__ A,
   } else if (dest) {
     C0 = C = dest;
   } else {
-    MALLOC_ALIGN(C,nC * sizeof(unsigned int));
+    C = (unsigned int *) MALLOC_ALIGN(nC * sizeof(unsigned int));
     C0 = C;
   }
 
@@ -549,6 +548,19 @@ Merge_uint4 (unsigned int *__restrict__ dest, unsigned int *__restrict__ A,
       *C++ = *B++;
     }
   }
+
+#if 0
+  /* Serial, branchless, but not sure if it is faster */
+  while (A < Aend && B < Bend) {
+    /* if (*A < *B), then (*A - *B) >> 31 is 1, and mask is 0x00000000 */
+    /* if (*B < *A), then (*A - *B) >> 31 is 0, and mask is 0xFFFFFFFF */
+    flag = (*A - *B) >> 31;
+    mask = flag - 1U;
+    *C++ = ((*A) & ~mask) | ((*B) & mask);
+    A += flag;
+    B += (1 - flag);
+  }
+#endif
 
   memcpy(C,A,(Aend - A) * sizeof(unsigned int));
   memcpy(C,B,(Bend - B) * sizeof(unsigned int));

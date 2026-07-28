@@ -1,4 +1,3 @@
-/* $Id: compress-write.h 225249 2022-11-06 05:11:32Z twu $ */
 #ifndef COMPRESS_WRITE_INCLUDED
 #define COMPRESS_WRITE_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: ea71b583aed747332a7b1789b7b9d90830d183c9 $ */
 #ifndef UINTLIST_INCLUDED
 #define UINTLIST_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -24,6 +23,7 @@ struct T {
 extern T Uintlist_push (T list, unsigned int x);
 extern T Uintlist_pop (T list, unsigned int *x);
 extern unsigned int Uintlist_head (T list);
+extern unsigned int Uintlist_second_value (T list);
 extern T Uintlist_next (T list);
 extern void Uintlist_free (T *list);
 extern T Uintlist_reverse (T list);
@@ -59,6 +59,11 @@ Uintlist_pop (T list, unsigned int *x) {
 static inline unsigned int
 Uintlist_head (T list) {
   return list->first;
+}
+
+static inline unsigned int
+Uintlist_second_value (T list) {
+  return list->rest->first;
 }
 
 /* extern inline T Uintlist_next (T list); */
@@ -141,7 +146,7 @@ Uintlist_append (T list, T tail);
 extern unsigned int 
 Uintlist_last_value (T this);
 extern T
-Uintlist_last_item (T this);
+Uintlist_last_elt (T this);
 extern unsigned int 
 Uintlist_index (T this, int index);
 extern bool

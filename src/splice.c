@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 9268550f910eb547a1353b882fc31aaec541d748 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -83,13 +82,6 @@ static char rcsid[] = "$Id: 9268550f910eb547a1353b882fc31aaec541d748 $";
 #define debug2a(x)
 #endif
 
-/* sufficient_support_p */
-#ifdef DEBUG3
-#define debug3(x) x
-#else
-#define debug3(x)
-#endif
-
 /* known splicing */
 #ifdef DEBUG4S
 #define debug4s(x) x
@@ -97,11 +89,22 @@ static char rcsid[] = "$Id: 9268550f910eb547a1353b882fc31aaec541d748 $";
 #define debug4s(x)
 #endif
 
+/* Splice_accept_p */
+#ifdef DEBUG9
+#define debug9(x) x
+#else
+#define debug9(x)
+#endif
+
+
 
 #define MAX_INSERTIONLEN 3
 #define MAX_DELETIONLEN 6
 
 static bool novelsplicingp;
+static bool splice_evalp;
+
+static Support_T support_tables = NULL;
 
 static Genomebits_T genomebits;
 static Genomebits_T genomebits_alt;
@@ -132,13 +135,23 @@ make_complement_inplace (char *sequence, unsigned int length) {
 void
 Splice_setup (Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in,
 	      int max_insertionlen_in, int max_deletionlen_in,
-	      bool novelsplicingp_in) {
+	      bool novelsplicingp_in, bool splice_evalp_in) {
 
   genomebits = genomebits_in;
   genomebits_alt = genomebits_alt_in;
   /* max_insertionlen = max_insertionlen_in; */
   /* max_deletionlen = max_deletionlen_in; */
   novelsplicingp = novelsplicingp_in;
+  splice_evalp = splice_evalp_in;
+
+  return;
+}
+
+
+void
+Splice_pass2_setup (Support_T support_tables_in) {
+
+  support_tables = support_tables_in;
 
   return;
 }
@@ -253,88 +266,115 @@ sufficient_support_p (int adj_support, double splice_prob) {
 /* Can have lower splice prob on one side when the distances are small */
 /* Note: supporti and supportj may not correspond to splice_prob_1 and splice_prob_2 */
 bool
-Splice_accept_p (double splice_prob_1, double splice_prob_2, Chrpos_T splice_distance,
+Splice_accept_p (int splice_qpos, int querylength,
+		 double splice_prob_i, double splice_prob_j,
+		 Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
 		 int supporti, int nmismatchesi, int supportj, int nmismatchesj,
-		 bool innerp, bool strictp) {
+		 bool plusp, bool sense_forward_p, bool innerp) {
 
-  debug1(printf("Checking for sufficient splice probs %f and %f, based on splice distance %u and support %d and %d, innerp %d, strictp %d\n",
-		splice_prob_1,splice_prob_2,splice_distance,supporti,supportj,innerp,strictp));
+  Univcoord_T splice_position_i, splice_position_j;
+  Chrpos_T splice_distance;
+  bool acceptp;
 
-  if (splice_prob_1 > 1.0 && splice_prob_2 > 1.0) {
-    /* Known intron */
-    debug1(printf("Known intron => accept\n"));
+  splice_distance = univdiagonal_j - univdiagonal_i;
+  debug9(printf("Checking for sufficient splice probs %f and %f, based on splice distance %u and support %d and %d, innerp %d\n",
+		splice_prob_i,splice_prob_j,splice_distance,supporti,supportj,innerp));
+
+  if (support_tables != NULL) {
+
+    /* Use best support from the entire dataset, rather than from this read, and rely upon that */
+    splice_position_i = univdiagonal_i - (Univcoord_T) querylength + (Univcoord_T) splice_qpos;
+    splice_position_j = univdiagonal_j - (Univcoord_T) querylength + (Univcoord_T) splice_qpos;
+
+    debug9(printf(" => Support_presentp returning %d\n",
+		  Support_presentp(support_tables,splice_position_i,splice_position_j,
+				   plusp,sense_forward_p)));
+    return Support_presentp(support_tables,splice_position_i,splice_position_j,
+			    plusp,sense_forward_p);
+
+  } else if (splice_evalp == false) {
     return true;
 
-  } else if (splice_prob_1 < 0.5 && splice_prob_2 < 0.5) {
-    debug1(printf("Bad intron => reject\n"));
+  } else if (splice_prob_i > 1.0 && splice_prob_j > 1.0) {
+    /* Known intron (Note that we are allowing all of them in Trpath_convert procedures.) */
+    debug9(printf("Known intron => accept\n"));
+    return true;
+
+  } else if (splice_prob_i < 0.5 && splice_prob_j < 0.5) {
+    debug9(printf("Bad intron => reject\n"));
     return false;
 
 #if 0
   } else if (strictp == false && (supporti + supportj) < 4*(nmismatchesi + nmismatchesj)) {
-    debug1(printf("Total nmismatches poor\n"));
+    debug9(printf("Total nmismatches poor\n"));
     return false;
     
   } else if (strictp == true && (supporti < 4*nmismatchesi || supportj < 4*nmismatchesj)) {
-    debug1(printf("Individual nmismatches poor\n"));
+    debug9(printf("Individual nmismatches poor\n"));
     return false;
 #endif
 
+  } else if (splice_prob_i < 0.2 || splice_prob_j < 0.2) {
+    /* One splice site is very poor */
+    debug9(printf("Splice with one very poor probability => reject\n"));
+    return false;
+
   } else if (supporti < 4*nmismatchesi || supportj < 4*nmismatchesj) {
-    debug1(printf("Individual nmismatches poor\n"));
+    debug9(printf("Individual nmismatches poor\n"));
     return false;
 
   } else if (/*innerp == false &&*/splice_distance >= HUGE_SPLICE) {
     /* Special requirements for large splices, inner or outer */
-    if (splice_prob_1 >= 0.8 && splice_prob_2 >= 0.8 &&
+    if (splice_prob_i >= 0.8 && splice_prob_j >= 0.8 &&
 	supporti >= 20 && supportj >= 20) {
       /* Sufficient probabilities and support for a huge splice */
-      debug1(printf("Probabilities and support are sufficient for a huge splice => accept\n"));
+      debug9(printf("Probabilities and support are sufficient for a huge splice => accept\n"));
       return true;
     } else {
-      debug1(printf("Probabilities and support are insufficient for a huge splice => reject\n"));
+      debug9(printf("Probabilities and support are insufficient for a huge splice => reject\n"));
       return false;
     }
 
   } else if (innerp == false && splice_distance >= MEDIUM_SPLICE) {
     /* Special requirements for large outer splices */
-    if (splice_prob_1 >= 0.8 && splice_prob_2 >= 0.8 &&
+    if (splice_prob_i >= 0.8 && splice_prob_j >= 0.8 &&
 	supporti >= 12 && supportj >= 12) {
       /* Sufficient probabilities and support for a medium splice */
-      debug1(printf("Probabilities and support are sufficient for a medium splice => accept\n"));
+      debug9(printf("Probabilities and support are sufficient for a medium splice => accept\n"));
       return true;
     } else {
-      debug1(printf("Probabilities and support are insufficient for a medium splice => reject\n"));
+      debug9(printf("Probabilities and support are insufficient for a medium splice => reject\n"));
       return false;
     }
 
-  } else if (splice_prob_1 >= 0.8 && splice_prob_2 >= 0.8) {
+  } else if (splice_prob_i >= 0.8 && splice_prob_j >= 0.8) {
     /* Both are good */
-    debug1(printf("Both probabilities are good => accept\n"));
+    debug9(printf("Both probabilities are good => accept\n"));
     return true;
 
   } else if (supporti >= 20 && supportj >= 20) {
     /* Sufficient support */
-    debug1(printf("Both supports are long => accept\n"));
+    debug9(printf("Both supports are long => accept\n"));
     return true;
 
   } else if (splice_distance > SMALL_SPLICE) {
-    debug1(printf("Long splice needs two good probabilities or support => reject\n"));
+    debug9(printf("Long splice needs two good probabilities or support => reject\n"));
     return false;
 
-  } else if (splice_prob_1 < 0.8 && splice_prob_2 < 0.8) {
+  } else if (splice_prob_i < 0.8 && splice_prob_j < 0.8) {
     /* Both are poor */
-    debug1(printf("Short splice needs one good probability or support => reject\n"));
+    debug9(printf("Short splice needs one good probability or support => reject\n"));
     return false;
 
   } else if (supporti < 8 || supportj < 8) {
     /* Allow one splice prob to be low if there is sufficient support */
     /* Lack support on at least one end */
-    debug1(printf("Short splice but one poor probability needs support of 8 => reject\n"));
+    debug9(printf("Short splice but one poor probability needs support of 8 => reject\n"));
     return false;
 
   } else {
     /* Has support on both ends */
-    debug1(printf("Short splice but one poor probability has support of 8 => accept\n"));
+    debug9(printf("Short splice but one poor probability has support of 8 => accept\n"));
     return true;
   }
 }
@@ -2457,6 +2497,7 @@ spliceindel_resolve (int *best_type, int *trimpos5, int *trimpos3, int *best_nin
 }
 
 
+#if 0
 /* ? Needs to be at least 3 to handle indels near splice site.  Now we
    are using IGNORE_MATCHES for spliceindel */
 
@@ -2494,7 +2535,7 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 
   int type;
   int best_splice_qpos, bound5, bound3, best_splice_querypos = -1;
-  int splice_region_low, splice_region_high, splice_qpos_low, splice_qpos_high;
+  int splice_region_low, splice_region_high, splice_qpos_qstart, splice_qpos_qend;
   int splice_qpos_i_low, splice_qpos_i_high, splice_qpos_j_low, splice_qpos_j_high;
   int *mismatch_positions_left, *mismatch_positions_right;
   int nmismatches_left, nmismatches_right;
@@ -2606,36 +2647,37 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 	 printf("\n");
 	 );
 
-
-  splice_qpos_high = Spliceends_trim_qend_nosplice(&nmismatches_to_trimpos,mismatch_positions_left,nmismatches_left,
+  /* was splice_qpos_high */
+  splice_qpos_qend = Spliceends_trim_qend_nosplice(&nmismatches_to_trimpos,mismatch_positions_left,nmismatches_left,
 						   pos5,pos3,querylength);
-  splice_qpos_low = Spliceends_trim_qstart_nosplice(&nmismatches_to_trimpos,mismatch_positions_right,nmismatches_right,
+  /* was splice_qpos_low */
+  splice_qpos_qstart = Spliceends_trim_qstart_nosplice(&nmismatches_to_trimpos,mismatch_positions_right,nmismatches_right,
 						    pos5,pos3);
   debug1(printf("trim_nosplice for pos5 %d, pos3 %d yields low %d and high %d\n",
-		pos5,pos3,splice_qpos_low,splice_qpos_high));
+		pos5,pos3,splice_qpos_qstart,splice_qpos_qend));
 
   /* Trimming */
   if (trim5p == false) {
     *trimpos5 = pos5;
-  } else if (splice_qpos_high - pos5 < 8) {
+  } else if (splice_qpos_qend - pos5 < 8) {
     *trimpos5 = pos5;
   } else {
-    debug1(printf("(1) Calling Genomebits_trim_qstart with %d..%d",pos5,splice_qpos_high));
+    debug1(printf("(1) Calling Genomebits_trim_qstart with %d..%d",pos5,splice_qpos_qend));
     *trimpos5 = Genomebits_trim_qstart(&ignore_nmismatches,query_compress,genomebits,
 				       univdiagonal_i,querylength,
-				       pos5,/*pos3*/splice_qpos_high,plusp,genestrand);
+				       pos5,/*pos3*/splice_qpos_qend,plusp,genestrand);
     debug1(printf(" to yield %d..\n",*trimpos5));
   }
 
   if (trim3p == false) {
     *trimpos3 = pos3;
-  } else if (pos3 - splice_qpos_low < 8) {
+  } else if (pos3 - splice_qpos_qstart < 8) {
     *trimpos3 = pos3;
   } else {
-    debug1(printf("(1) Calling Genomebits_trim_qend with %d..%d",splice_qpos_low,pos3));
+    debug1(printf("(1) Calling Genomebits_trim_qend with %d..%d",splice_qpos_qstart,pos3));
     *trimpos3 = Genomebits_trim_qend(&ignore_nmismatches,query_compress,genomebits,
 				     univdiagonal_j,querylength,
-				     /*pos5*/splice_qpos_low,pos3,plusp,genestrand);
+				     /*pos5*/splice_qpos_qstart,pos3,plusp,genestrand);
     debug1(printf(" to yield ..%d\n",*trimpos3));
   }
 
@@ -2675,8 +2717,8 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 	 );
 
 
-  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_low));
-  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_high));
+  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_qstart));
+  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_qend));
 
 
 #ifdef DEBUG1
@@ -2704,17 +2746,17 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 
 
 
-  if (splice_qpos_low <= splice_qpos_high + MISMATCHES_AT_SITE) {
+  if (splice_qpos_qstart <= splice_qpos_qend + MISMATCHES_AT_SITE) {
     /* Appears to have matches to both splice sites.  Span just the crossing parts */
-    splice_qpos_i_low = subtract_bounded(splice_qpos_high,EXTRA_MATCHES,pos5 + 1);
-    splice_qpos_i_high = add_bounded(splice_qpos_high,EXTRA_MISMATCHES,pos3 - 1);
-    splice_qpos_j_low = subtract_bounded(splice_qpos_low,EXTRA_MISMATCHES,pos5 + 1);
-    splice_qpos_j_high = add_bounded(splice_qpos_low,EXTRA_MATCHES,pos3 - 1);
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
 
   } else {
     /* There is a gap in matches.  Span the entire region */
-    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_high,EXTRA_MATCHES,pos5 + 1);
-    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_low,EXTRA_MATCHES,pos3 - 1);
+    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
   }
 
   debug1(printf("  Splice i bounds: %d..%d\n",splice_qpos_i_low,splice_qpos_i_high));
@@ -2888,15 +2930,16 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 
 
   if (best_splice_qpos <= 0 &&
-      splice_qpos_low >= splice_qpos_high + MIN_EXONLEN) {
+      splice_qpos_qstart >= splice_qpos_qend + MIN_EXONLEN) {
     /* Possible middle exon or multiple sequencing errors */
-    debug1(printf("splice_qpos_low %d >= splice_qpos_high %d + %d, so trying to find a middle exon\n",
-		  splice_qpos_low,splice_qpos_high,MIN_EXONLEN));
+    debug1(printf("splice_qpos_qstart %d >= splice_qpos_qend %d + %d, so trying to find a middle exon\n",
+		  splice_qpos_qstart,splice_qpos_qend,MIN_EXONLEN));
 
     if (plusp == true) {
       n_middle_univdiagonals =
 	Spliceends_middle_plus(&middle_univdiagonals,
-			       stage1,/*qstart*/splice_qpos_high,/*qend*/splice_qpos_low,querylength,
+			       stage1,streamspace_max_alloc,streamspace_alloc,
+			       /*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
 			       /*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
 			       query_compress,queryptr,
 			       univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
@@ -2907,7 +2950,8 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
     } else {
       n_middle_univdiagonals =
 	Spliceends_middle_minus(&middle_univdiagonals,
-				stage1,/*qstart*/splice_qpos_high,/*qend*/splice_qpos_low,querylength,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				/*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
 				/*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
 				query_compress,queryptr,
 				univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
@@ -2949,7 +2993,7 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 			    &(*best_donor1_prob),&(*best_acceptor1_prob),
 			    &(*best_donor2_prob),&(*best_acceptor2_prob),
 			    middle_univdiagonals,n_middle_univdiagonals,univdiagonal_i,univdiagonal_j,
-			    pos5,pos3,/*splice_qpos_5*/splice_qpos_high,/*splice_qpos_3*/splice_qpos_low,querylength,
+			    pos5,pos3,/*splice_qpos_5*/splice_qpos_qend,/*splice_qpos_3*/splice_qpos_qstart,querylength,
 			    
 			    mismatch_positions_left,nmismatches_left,
 			    mismatch_positions_right,nmismatches_right,
@@ -3080,15 +3124,15 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
     debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
 
     if (splice_qpos_i_low < splice_qpos_j_low) {
-      splice_qpos_low = splice_qpos_i_low;
+      splice_qpos_qstart = splice_qpos_i_low;
     } else {
-      splice_qpos_low = splice_qpos_j_low;
+      splice_qpos_qstart = splice_qpos_j_low;
     }
 
     if (splice_qpos_i_high > splice_qpos_j_high) {
-      splice_qpos_high = splice_qpos_i_high;
+      splice_qpos_qend = splice_qpos_i_high;
     } else {
-      splice_qpos_high = splice_qpos_j_high;
+      splice_qpos_qend = splice_qpos_j_high;
     }
 
     if (sense_forward_p == true) {
@@ -3102,7 +3146,7 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 			 /*plusDp*/true,/*plusAp*/true,querylength,
 			 /*donor*/mismatch_positions_left,nmismatches_left,
 			 /*acceptor*/mismatch_positions_right,nmismatches_right,
-			 /*splice_querypos_low*/splice_qpos_low,/*splice_querypos_high*/splice_qpos_high);
+			 /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
 	  
 	if (best_splice_querypos <= 0) {
 	  best_splice_qpos = -1;
@@ -3120,8 +3164,8 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 			 /*plusDp*/false,/*plusAp*/false,querylength,
 			 /*donor*/mismatch_positions_right,nmismatches_right,
 			 /*acceptor*/mismatch_positions_left,nmismatches_left,
-			 /*splice_querypos_low*/querylength - splice_qpos_high,
-			 /*splice_querypos_high*/querylength - splice_qpos_low);
+			 /*splice_querypos_low*/querylength - splice_qpos_qend,
+			 /*splice_querypos_high*/querylength - splice_qpos_qstart);
 
 	if (best_splice_querypos <= 0) {
 	  best_splice_qpos = -1;
@@ -3141,7 +3185,7 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 			     /*plusAp*/true,/*plusDp*/true,querylength,
 			     /*acceptor*/mismatch_positions_left,nmismatches_left,
 			     /*donor*/mismatch_positions_right,nmismatches_right,
-			     /*splice_querypos_low*/splice_qpos_low,/*splice_querypos_high*/splice_qpos_high);
+			     /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
 
 	if (best_splice_querypos <= 0) {
 	  best_splice_qpos = -1;
@@ -3159,8 +3203,8 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
 			     /*plusAp*/false,/*plusDp*/false,querylength,
 			     /*acceptor*/mismatch_positions_right,nmismatches_right,
 			     /*donor*/mismatch_positions_left,nmismatches_left,
-			     /*splice_querypos_low*/querylength - splice_qpos_high,
-			     /*splice_querypos_high*/querylength - splice_qpos_low);
+			     /*splice_querypos_low*/querylength - splice_qpos_qend,
+			     /*splice_querypos_high*/querylength - splice_qpos_qstart);
 
 	if (best_splice_querypos <= 0) {
 	  best_splice_qpos = -1;
@@ -3258,7 +3302,7 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
       
 #if 0
     if (supporti >= 25 && supportj >= 25 && (*best_nmismatches_i) + (*best_nmismatches_j) <= 1 &&
-	       adj_supporti > 0 && adj_supportj > 0) {
+	adj_supporti > 0 && adj_supportj > 0) {
       /* Can give rise to very bad splices */
       debug1(printf("For %u and %u, accepting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f, mismatches_indel %d, based on support\n\n",
 		    univdiagonal_i,univdiagonal_j,
@@ -3304,17 +3348,19 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
     }
 #endif
 
-    if (Splice_accept_p(*best_donor1_prob,*best_acceptor2_prob,/*splice_distance*/univdiagonal_j - univdiagonal_i,
+    if (Splice_accept_p(best_splice_qpos,querylength,
+			*best_donor1_prob,*best_acceptor2_prob,
+			univdiagonal_i,univdiagonal_j,
 			supporti,*best_nmismatches_i,supportj,*best_nmismatches_j,
-			innerp,/*strictp*/false) == false) {
-      debug1(printf("Splice_resolve on dist %u rejecting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f, based on probs\n\n",
+			plusp,sense_forward_p,innerp) == false) {
+      debug1(printf("Splice_resolve_qstart on dist %u rejecting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f, based on probs\n\n",
 		    /*splice_distance*/univdiagonal_j - univdiagonal_i,
 		    best_splice_qpos,*best_nindels,*best_indel_pos,supporti,*best_nmismatches_i,*best_donor1_prob,
 		    supportj,*best_nmismatches_j,*best_acceptor2_prob));
       return -1;		/* Fail */
 
     } else {
-      debug1(printf("Splice_resolve on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+      debug1(printf("Splice_resolve_qstart on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
 		    /*splice_distance*/univdiagonal_j - univdiagonal_i,
 		    best_splice_qpos,*best_nindels,(*best_nindels < 0) ? "insertion" : (*best_nindels > 0) ? "deletion" : "",
 		    *best_indel_pos,supporti,*best_nmismatches_i,*best_donor1_prob,
@@ -3323,8 +3369,2570 @@ Splice_resolve (int *best_type, int *typei, int *typej, int *trimpos5, int *trim
     }
   }
 }
+#endif
 
 
+
+/* ? Needs to be at least 3 to handle indels near splice site.  Now we
+   are using IGNORE_MATCHES for spliceindel */
+
+/* Note: types holds joffset + j + 1, so 0 represents no known site
+   and values greater than 0 represent a known site.  Need to subtract
+   1 to obtain joffset + j. */
+
+/* We set check_support_p to be false for inner resolve, where we can
+   expect short pieces, and have some certainty in the short
+   concordant region that they are correct */
+int
+Splice_resolve_qstart (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
+		       Intlist_T *endpoints, List_T *junctions,
+
+		       Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
+		       Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		       bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
+
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       
+		       Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		       Localdb_T localdb, int localdb_nmismatches_allowed,
+
+		       int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
+
+		       Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+		       Univcoordlistpool_T univcoordlistpool, Intlistpool_T intlistpool,
+		       Listpool_T listpool, Pathpool_T pathpool,
+
+		       int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
+		       bool allow_indels_p, bool find_middle_p) {
+
+  int type;
+  Univcoord_T middle_univdiagonal = (Univcoord_T) 0;
+  int best_nmismatches_i = querylength, best_nmismatches_j = querylength;
+  int best_ref_nmismatches_i = querylength, best_ref_nmismatches_j = querylength;
+
+  int best_nindels = 0, best_nmismatches_indel = 0, best_ref_nmismatches_indel = 0, ninserts;
+  int best_indel_pos = -1;
+  double best_donor1_prob = 0.0, best_acceptor2_prob = 0.0;
+  int trimpos5, trimpos3;
+
+  Chrpos_T splice_distance;
+
+#if 1
+  /* For middle exon */
+  Chrpos_T splice_distance_i, splice_distance_j;
+  double best_donor2_prob = 0.0, best_acceptor1_prob = 0.0;
+  int splice_qpos_i, splice_qpos_j;
+  int nmismatches_middle = querylength, ref_nmismatches_middle = querylength;
+  int typei, typej;
+  int n_middle_univdiagonals;
+  Univcoord_T *middle_univdiagonals;
+#endif  
+
+  int best_splice_qpos, best_splice_querypos = -1;
+  int splice_qpos_qstart, splice_qpos_qend;
+  int splice_qpos_i_low, splice_qpos_i_high, splice_qpos_j_low, splice_qpos_j_high;
+  int *mismatch_positions_left, *mismatch_positions_right;
+  int nmismatches_left, nmismatches_right;
+  char donor1, donor2, acceptor1, acceptor2;
+  int ignore_nmismatches;
+
+  int splice_qpos, indel_pos, spliceindel_trimpos5, spliceindel_trimpos3;
+  int nindels, spliceindel_nmismatches_i, spliceindel_nmismatches_j, nmismatches_indel,
+    spliceindel_ref_nmismatches_i, spliceindel_ref_nmismatches_j, ref_nmismatches_indel;
+  double spliceindel_donor1_prob, spliceindel_acceptor2_prob;
+
+  /* int best_nmismatches, nmismatches, segmenti_nmismatches, segmentj_nmismatches; */
+  /* double best_probi, best_probj; */
+  double optimal_donor1_prob, optimal_acceptor2_prob, optimal_segmenti_prob, optimal_segmentj_prob;
+  /* double best_prob, donor_prob, acceptor_prob; */
+
+  int *segmenti_sites, *segmentj_sites;
+  int *segmenti_types, *segmentj_types;
+  double *segmenti_probs, *segmentj_probs;
+  int segmenti_nsites, segmentj_nsites;
+
+  int supporti, supportj;
+  
+  int nmismatches_to_trimpos;
+  int nmatches_trim_i, nmatches_trim_j,
+    nmismatches_trim_i, nmismatches_trim_j, ignore;
+  int endpoint_i, endpoint_j;
+
+  int nmatches_stay, nmismatches_stay;
+  int score_stay, score_splice;
+
+  bool invertedp = false;
+  bool sense_forward_p = (sensedir == SENSE_FORWARD);
+
+#ifdef DEBUG1
+  char *gbuffer1, *gbuffer2;
+  static int ncalls = 0;
+#endif
+
+#if defined(DEBUG1) || defined(TRIM_AT_CHROMOSOME_BOUNDS)
+  Univcoord_T segmenti_left = univdiagonal_i - querylength;
+  Univcoord_T segmentj_left = univdiagonal_j - querylength;
+#endif
+
+#ifdef DEBUG1
+  printf("Splice_resolve_qstart (%s), plusp %d, compress_fwdp %d, sense_forward_p %d, call %d: Getting genome at univdiagonal_i %u [%u] and univdiagonal_j %u [%u] (diff: %d), range %d..%d\n",
+	 sensedir == SENSE_FORWARD ? "sense" : "antisense",
+	 plusp,Compress_fwdp(query_compress),sense_forward_p,++ncalls,
+	 univdiagonal_i,univdiagonal_i - chroffset,univdiagonal_j,univdiagonal_j - chroffset,
+	 univdiagonal_j-univdiagonal_i,pos5,pos3);
+#endif
+  assert(Compress_fwdp(query_compress) == plusp);
+  assert(univdiagonal_j > univdiagonal_i);
+
+
+#ifdef TRIM_AT_CHROMOSOME_BOUNDS
+  Univcoord_T univdiagonali, univdiagonalj;
+  pos5 = (univdiagonal_i + pos5 >= chroffset + querylength) ? pos5 : (int) (chroffset - segmenti_left);
+  pos3 = (univdiagonal_j + pos3 <= chrhigh + querylength) ? pos3 : (int) (chrhigh - segmentj_left);
+#endif
+
+
+  /* Require separation from endpoints */
+#if 0
+  splice_qpos_start = pos5 + 1;
+  splice_qpos_end = pos3 - 1;
+  if (splice_qpos_start < min_shortend) {
+    splice_qpos_start = min_shortend;
+  }
+  if (splice_qpos_end > (querylength - 1) - min_shortend) {
+    splice_qpos_end = (querylength - 1) - min_shortend;
+  }
+#endif
+
+  /* Determine feasibility of a splice */
+
+  /* New method, different from relying on nmismatches_allowed */
+  mismatch_positions_left = spliceinfo->mismatch_positions_left1; /* Use allocated memory */
+  mismatch_positions_right = spliceinfo->mismatch_positions_right2; /* Use allocated memory */
+
+  /* ascending */
+  nmismatches_left =
+    Genomebits_mismatches_fromleft_for_trim(mismatch_positions_left,/*max_mismatches*/pos3 - pos5,
+					    genomebits,genomebits_alt,query_compress,
+					    univdiagonal_i,querylength,pos5,pos3,plusp,genestrand);
+
+  /* descending */
+  nmismatches_right =
+    Genomebits_mismatches_fromright_for_trim(mismatch_positions_right,/*max_mismatches*/pos3 - pos5,
+					     genomebits,genomebits_alt,query_compress,
+					     univdiagonal_j,querylength,pos5,pos3,plusp,genestrand);
+
+  debug1(
+	 printf("(3) %d mismatches on left from %d to %d at:",nmismatches_left,pos5,pos3);
+	 for (int i = 0; i <= nmismatches_left; i++) {
+	   printf(" %d",mismatch_positions_left[i]);
+	 }
+	 printf("\n");
+	 );
+
+  debug1(
+	 printf("(3) %d mismatches on right from %d to %d at:",nmismatches_right,pos3,pos5);
+	 for (int i = 0; i <= nmismatches_right; i++) {
+	   printf(" %d",mismatch_positions_right[i]);
+	 }
+	 printf("\n");
+	 );
+
+
+  splice_qpos_qend = Spliceends_trim_qend_nosplice(&nmismatches_to_trimpos,mismatch_positions_left,nmismatches_left,
+						   pos5,pos3,querylength);
+  splice_qpos_qstart = Spliceends_trim_qstart_nosplice(&nmismatches_to_trimpos,mismatch_positions_right,nmismatches_right,
+						    pos5,pos3);
+  debug1(printf("trim_nosplice for pos5 %d, pos3 %d yields low %d and high %d\n",
+		pos5,pos3,splice_qpos_qstart,splice_qpos_qend));
+
+  /* Trimming */
+  if (trim5p == false) {
+    trimpos5 = pos5;
+  } else if (splice_qpos_qend - pos5 < 8) {
+    trimpos5 = pos5;
+  } else {
+    debug1(printf("(1) Calling Genomebits_trim_qstart with %d..%d",pos5,splice_qpos_qend));
+    trimpos5 = Genomebits_trim_qstart(&ignore_nmismatches,query_compress,genomebits,
+				       univdiagonal_i,querylength,
+				       pos5,/*pos3*/splice_qpos_qend,plusp,genestrand);
+    debug1(printf(" to yield %d..\n",trimpos5));
+  }
+
+  if (trim3p == false) {
+    trimpos3 = pos3;
+  } else if (pos3 - splice_qpos_qstart < 8) {
+    trimpos3 = pos3;
+  } else {
+    debug1(printf("(1) Calling Genomebits_trim_qend with %d..%d",splice_qpos_qstart,pos3));
+    trimpos3 = Genomebits_trim_qend(&ignore_nmismatches,query_compress,genomebits,
+				     univdiagonal_j,querylength,
+				     /*pos5*/splice_qpos_qstart,pos3,plusp,genestrand);
+    debug1(printf(" to yield ..%d\n",trimpos3));
+  }
+
+  if (trimpos5 != pos5) {
+    /* ascending */
+    nmismatches_left =
+      Genomebits_mismatches_fromleft_for_trim(mismatch_positions_left,/*max_mismatches*/pos3 - pos5,
+					      genomebits,genomebits_alt,query_compress,
+					      univdiagonal_i,querylength,trimpos5,pos3,plusp,genestrand);
+  }
+
+  if (trimpos3 != pos3) {
+    /* descending */
+    nmismatches_right =
+      Genomebits_mismatches_fromright_for_trim(mismatch_positions_right,/*max_mismatches*/pos3 - pos5,
+					       genomebits,genomebits_alt,query_compress,
+					       univdiagonal_j,querylength,pos5,trimpos3,plusp,genestrand);
+  }
+
+  pos5 = trimpos5;
+  pos3 = trimpos3;
+
+  debug1(
+	 printf("(3) %d mismatches on left from %d to %d at:",nmismatches_left,pos5,pos3);
+	 for (int i = 0; i <= nmismatches_left; i++) {
+	   printf(" %d",mismatch_positions_left[i]);
+	 }
+	 printf("\n");
+	 );
+
+  debug1(
+	 printf("(3) %d mismatches on right from %d to %d at:",nmismatches_right,pos3,pos5);
+	 for (int i = 0; i <= nmismatches_right; i++) {
+	   printf(" %d",mismatch_positions_right[i]);
+	 }
+	 printf("\n");
+	 );
+
+#if 0
+  /* From Splice_nomiddle */
+  if (splice_qpos_qstart < pos5 + 1) {
+    splice_qpos_qstart = pos5 + 1;
+  }
+  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_qstart));
+
+  if (splice_qpos_qend > pos3 - 1) {
+    splice_qpos_qend = pos3 - 1;
+  }
+  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_qend));
+#endif
+
+  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_qstart));
+  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_qend));
+
+
+#ifdef DEBUG1
+  gbuffer1 = (char *) CALLOC(querylength+1,sizeof(char));
+  gbuffer2 = (char *) CALLOC(querylength+1,sizeof(char));
+  Genome_fill_buffer(univdiagonal_i - querylength,querylength,gbuffer1);
+  Genome_fill_buffer(univdiagonal_j - querylength,querylength,gbuffer2);
+  char *queryseq = Compress_queryseq(query_compress,querylength);
+
+  printf("Splice_resolve, plusp %d: Getting genome at left %llu and %llu\n",
+	 plusp,(unsigned long long) segmenti_left,(unsigned long long) segmentj_left);
+  printf("g1: %s\n",gbuffer1);
+  printf("    ");
+  print_diffs(gbuffer1,queryseq,querylength);
+  printf("\n");
+  printf("q:  %s\n",queryseq);
+  printf("    ");
+  print_diffs(gbuffer2,queryseq,querylength);
+  printf("\n");
+  printf("g2: %s\n",gbuffer2);
+  FREE(queryseq);
+  FREE(gbuffer2);
+  FREE(gbuffer1);
+#endif
+
+
+  debug1(printf("find_middle_p: %d\n",find_middle_p));
+
+#if 1
+  if (0 && find_middle_p == false) {
+    /* From Splice_nomiddle */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+  } else if (splice_qpos_qstart <= splice_qpos_qend + MISMATCHES_AT_SITE) {
+    /* Appears to have matches to both splice sites.  Span just the crossing parts */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+    /* Set both to min */
+    if (splice_qpos_i_low < splice_qpos_j_low) {
+      splice_qpos_j_low = splice_qpos_i_low;
+    } else {
+      splice_qpos_i_low = splice_qpos_j_low;
+    }
+
+    /* Set both to max */
+    if (splice_qpos_i_high > splice_qpos_j_high) {
+      splice_qpos_j_high = splice_qpos_i_high;
+    } else {
+      splice_qpos_i_high = splice_qpos_j_high;
+    }
+
+  } else {
+    /* There is a gap in matches.  Span the entire region */
+    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+  }
+
+#else
+  /* This code is not in Splice_nomiddle */
+  if (splice_qpos_qstart <= splice_qpos_qend + MISMATCHES_AT_SITE) {
+    /* Appears to have matches to both splice sites.  Span just the crossing parts */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+  } else {
+    /* There is a gap in matches.  Span the entire region */
+    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+  }
+
+  splice_region_low = /*min*/ (splice_qpos_i_low < splice_qpos_j_low) ? splice_qpos_i_low : splice_qpos_j_low;
+  splice_region_high = /*max*/ (splice_qpos_i_high > splice_qpos_j_high) ? splice_qpos_i_high : splice_qpos_j_high;
+
+  /* Good */
+  debug1(printf("  Splice region: %d..%d\n",splice_region_low,splice_region_high));
+#endif
+
+
+  debug1(printf("  Splice i bounds: %d..%d\n",splice_qpos_i_low,splice_qpos_i_high));
+  debug1(printf("  Splice j bounds: %d..%d\n",splice_qpos_j_low,splice_qpos_j_high));
+
+
+  if (plusp == sense_forward_p) {
+    /* geneplus */
+    segmenti_nsites = compute_donor_sites(&optimal_donor1_prob,&segmenti_sites,&segmenti_types,&segmenti_probs,
+					  spliceinfo->segmenti_sites_alloc1,spliceinfo->segmenti_types_alloc1,
+					  spliceinfo->segmenti_sites_alloc2,spliceinfo->segmenti_types_alloc2,
+					  spliceinfo->segmenti_probs_alloc,
+#if 0
+					  splice_region_low,splice_region_high,
+#else
+					  splice_qpos_i_low,splice_qpos_i_high,
+#endif
+					  querylength,univdiagonal_i,chroffset,knownsplicing,intlistpool);
+    
+    segmentj_nsites = compute_acceptor_sites(&optimal_acceptor2_prob,&segmentj_sites,&segmentj_types,&segmentj_probs,
+					     spliceinfo->segmentj_sites_alloc1,spliceinfo->segmentj_types_alloc1,
+					     spliceinfo->segmentj_sites_alloc2,spliceinfo->segmentj_types_alloc2,
+					     spliceinfo->segmentj_probs_alloc,
+#if 0
+					     splice_region_low,splice_region_high,
+#else
+					     splice_qpos_j_low,splice_qpos_j_high,
+#endif
+					     querylength,univdiagonal_j,chroffset,knownsplicing,intlistpool);
+    optimal_segmenti_prob = optimal_donor1_prob;
+    optimal_segmentj_prob = optimal_acceptor2_prob;
+
+  } else {
+    /* geneminus */
+    segmenti_nsites = compute_antiacceptor_sites(&optimal_acceptor2_prob,&segmenti_sites,&segmenti_types,&segmenti_probs,
+						 spliceinfo->segmenti_sites_alloc1,spliceinfo->segmenti_types_alloc1,
+						 spliceinfo->segmenti_sites_alloc2,spliceinfo->segmenti_types_alloc2,
+						 spliceinfo->segmenti_probs_alloc,
+#if 0
+						 splice_region_low,splice_region_high,
+#else
+						 splice_qpos_i_low,splice_qpos_i_high,
+#endif
+						 querylength,univdiagonal_i,chroffset,knownsplicing,intlistpool);
+    
+    segmentj_nsites = compute_antidonor_sites(&optimal_donor1_prob,&segmentj_sites,&segmentj_types,&segmentj_probs,
+					      spliceinfo->segmentj_sites_alloc1,spliceinfo->segmentj_types_alloc1,
+					      spliceinfo->segmentj_sites_alloc2,spliceinfo->segmentj_types_alloc2,
+					      spliceinfo->segmentj_probs_alloc,
+#if 0
+					      splice_region_low,splice_region_high,
+#else
+					      splice_qpos_j_low,splice_qpos_j_high,
+#endif
+					      querylength,univdiagonal_j,chroffset,knownsplicing,intlistpool);
+    optimal_segmenti_prob = optimal_acceptor2_prob;
+    optimal_segmentj_prob = optimal_donor1_prob;
+  }
+
+
+  best_splice_qpos = -1;
+
+  /* Try standard splicing */
+  debug1(printf("Computing splice sites\n"));
+    
+  /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
+  if (plusp == true) {
+    /* Skip */
+    check_ascending(mismatch_positions_left,nmismatches_left);
+    check_descending(mismatch_positions_right,nmismatches_right);
+
+#if 0
+  } else if (invertedp == true) {
+    /* Already inverted */
+    check_descending(mismatch_positions_left,nmismatches_left);
+    check_ascending(mismatch_positions_right,nmismatches_right);
+#endif
+
+  } else {
+    invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+    invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+    invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+    invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+
+    check_descending(mismatch_positions_left,nmismatches_left);
+    check_ascending(mismatch_positions_right,nmismatches_right);
+
+    invertedp = true;
+  }
+    
+  debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
+
+  if (sense_forward_p == true) {
+    if (plusp == true) {
+      /* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+		     /*D*/&best_nmismatches_i,/*A*/&best_nmismatches_j,
+		     /*D*/&best_ref_nmismatches_i,/*A*/&best_ref_nmismatches_j,
+		     /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/true,/*plusAp*/true,querylength,
+		     /*donor*/mismatch_positions_left,/*donor*/nmismatches_left,
+		     /*acceptor*/mismatch_positions_right,/*acceptor*/nmismatches_right,
+		     /*D*/segmenti_sites,/*A*/segmentj_sites,
+		     /*D*/segmenti_types,/*A*/segmentj_types,
+		     /*D*/segmenti_probs,/*A*/segmentj_probs,
+		     /*D*/segmenti_nsites,/*A*/segmentj_nsites);
+	
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = best_splice_querypos;
+	/* best_type = type; */
+      }
+      
+    } else {
+      /* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+		     /*D*/&best_nmismatches_j,/*A*/&best_nmismatches_i,
+		     /*D*/&best_ref_nmismatches_j,/*A*/&best_ref_nmismatches_i,
+		     /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/false,/*plusAp*/false,querylength,
+		     /*donor*/mismatch_positions_right,/*donor*/nmismatches_right,
+		     /*acceptor*/mismatch_positions_left,/*acceptor*/nmismatches_left,
+		     /*D*/segmentj_sites,/*A*/segmenti_sites,
+		     /*D*/segmentj_types,/*A*/segmenti_types,
+		     /*D*/segmentj_probs,/*A*/segmenti_probs,
+		     /*D*/segmentj_nsites,/*A*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = querylength - best_splice_querypos;
+	/* best_type = type; */
+      }
+    }
+    
+  } else {
+    if (plusp == true) {
+      /* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*A*/&best_nmismatches_i,/*D*/&best_nmismatches_j,
+			 /*A*/&best_ref_nmismatches_i,/*D*/&best_ref_nmismatches_j,
+			 /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/plusp,/*plusDp*/plusp,querylength,
+			 /*acceptor*/mismatch_positions_left,nmismatches_left,
+			 /*donor*/mismatch_positions_right,nmismatches_right,
+			 /*A*/segmenti_sites,/*D*/segmentj_sites,
+			 /*A*/segmenti_types,/*D*/segmentj_types,
+			 /*A*/segmenti_probs,/*D*/segmentj_probs,
+			 /*A*/segmenti_nsites,/*D*/segmentj_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = best_splice_querypos;
+	/* best_type = type; */
+      }
+      
+    } else {
+      /* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*A*/&best_nmismatches_j,/*D*/&best_nmismatches_i,
+			 /*A*/&best_ref_nmismatches_j,/*D*/&best_ref_nmismatches_i,
+			 /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/false,/*plusDp*/false,querylength,
+			 /*acceptor*/mismatch_positions_right,nmismatches_right,
+			 /*donor*/mismatch_positions_left,nmismatches_left,
+			 /*A*/segmentj_sites,/*D*/segmenti_sites,
+			 /*A*/segmentj_types,/*D*/segmenti_types,
+			 /*A*/segmentj_probs,/*D*/segmenti_probs,
+			 /*A*/segmentj_nsites,/*D*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = querylength - best_splice_querypos;
+	/* best_type = type; */
+      }
+    }
+  }
+
+
+  if (find_middle_p == false) {
+    /* Skip */
+
+  } else if (best_splice_qpos <= 0 &&
+	     splice_qpos_qstart >= splice_qpos_qend + MIN_EXONLEN) {
+    /* Possible middle exon or multiple sequencing errors */
+    debug1(printf("splice_qpos_qstart %d >= splice_qpos_qend %d + %d, so trying to find a middle exon\n",
+		  splice_qpos_qstart,splice_qpos_qend,MIN_EXONLEN));
+
+    if (plusp == true) {
+      n_middle_univdiagonals =
+	Spliceends_middle_plus(&middle_univdiagonals,
+			       stage1,streamspace_max_alloc,streamspace_alloc,
+			       /*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
+			       /*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
+			       query_compress,queryptr,
+			       univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			       localdb_nmismatches_allowed);
+      /* mismatch_positions_left is ascending */
+      /* mismatch_positions_right is descending */
+
+    } else {
+      n_middle_univdiagonals =
+	Spliceends_middle_minus(&middle_univdiagonals,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				/*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
+				/*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
+				query_compress,queryptr,
+				univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				localdb_nmismatches_allowed);
+    }
+
+
+    debug1(printf("The two ends cannot meet, and with knownsplicing trying to find a middle exon\n"));
+    if (n_middle_univdiagonals == 0) {
+      /* Skip: middle_univdiagonals is unassigned */
+
+    } else {
+      if (plusp == true) {
+	/* Skip */
+	check_ascending(mismatch_positions_left,nmismatches_left);
+	check_descending(mismatch_positions_right,nmismatches_right);
+
+      } else if (invertedp == true) {
+	/* Already inverted */
+	check_descending(mismatch_positions_left,nmismatches_left);
+	check_ascending(mismatch_positions_right,nmismatches_right);
+
+      } else {
+	invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+	invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+	invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+	invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+
+	check_descending(mismatch_positions_left,nmismatches_left);
+	check_ascending(mismatch_positions_right,nmismatches_right);
+
+	invertedp = true;
+      }
+      
+      if ((middle_univdiagonal =
+	   find_middle_exon(&typei,&typej,&splice_qpos_i,&splice_qpos_j,
+			    &best_nmismatches_i,&nmismatches_middle,&best_nmismatches_j,
+			    &best_ref_nmismatches_i,&ref_nmismatches_middle,&best_ref_nmismatches_j,
+			    &best_donor1_prob,&best_acceptor1_prob,
+			    &best_donor2_prob,&best_acceptor2_prob,
+			    middle_univdiagonals,n_middle_univdiagonals,univdiagonal_i,univdiagonal_j,
+			    pos5,pos3,/*splice_qpos_5*/splice_qpos_qend,/*splice_qpos_3*/splice_qpos_qstart,querylength,
+			    
+			    mismatch_positions_left,nmismatches_left,
+			    mismatch_positions_right,nmismatches_right,
+			    
+			    segmenti_sites,segmentj_sites,
+			    segmenti_types,segmentj_types,
+			    segmenti_probs,segmentj_probs,
+			    segmenti_nsites,segmentj_nsites,
+			    
+			    query_compress,chroffset,spliceinfo,knownsplicing,intlistpool,
+			    plusp,sense_forward_p,genestrand)) != 0) {
+	/* find_middle_exon returns values as qpos, not querypos */
+	debug1(printf("(1) Splice_resolve_qstart (%s): found a middle exon %u at splice_qpos %d and %d\n",
+		      sensedir == SENSE_FORWARD ? "sense" : "antisense",
+		      middle_univdiagonal,splice_qpos_i,splice_qpos_j));
+
+	FREE(middle_univdiagonals);
+	
+#if 0
+	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+							univcoordlistpool_trace(__FILE__,__LINE__));
+	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
+							univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+	*univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+						univcoordlistpool_trace(__FILE__,__LINE__));
+	*univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_i
+						univcoordlistpool_trace(__FILE__,__LINE__));
+#endif
+					      
+	/* For qstart, push j first, then push i */
+#if 0
+	Intlist_head_set(newpath->nmismatches,nmismatches_j);
+	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
+	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
+						intlistpool_trace(__FILE__,__LINE__));
+	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
+						    intlistpool_trace(__FILE__,__LINE__));
+	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
+						intlistpool_trace(__FILE__,__LINE__));
+	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
+						    intlistpool_trace(__FILE__,__LINE__));
+#else
+	*nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_j
+					intlistpool_trace(__FILE__,__LINE__));
+	*nmismatches = Intlistpool_push(*nmismatches,intlistpool,nmismatches_middle
+					intlistpool_trace(__FILE__,__LINE__));
+	*nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_i
+					intlistpool_trace(__FILE__,__LINE__));
+				      
+	*ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_j
+					    intlistpool_trace(__FILE__,__LINE__));
+	*ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,ref_nmismatches_middle
+					    intlistpool_trace(__FILE__,__LINE__));
+	*ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_i
+					    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+	Intlist_head_set(newpath->endpoints,splice_qpos_j);
+	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_i
+					      intlistpool_trace(__FILE__,__LINE__));
+	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5
+					      intlistpool_trace(__FILE__,__LINE__));
+#else
+	*endpoints = Intlistpool_push(NULL,intlistpool,splice_qpos_j
+				      intlistpool_trace(__FILE__,__LINE__));
+	*endpoints = Intlistpool_push(*endpoints,intlistpool,splice_qpos_i
+				      intlistpool_trace(__FILE__,__LINE__));
+	*endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos5
+				      intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+	splice_distance_j = univdiagonal - middle_univdiagonal;
+	splice_distance_i = middle_univdiagonal - low_univdiagonal;
+
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_splice(splice_distance_j,sensedir,
+									donor2_prob,acceptor2_prob,
+									pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_splice(splice_distance_i,sensedir,
+									donor1_prob,acceptor1_prob,
+									pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+#else
+	splice_distance_j = univdiagonal_j - middle_univdiagonal;
+	splice_distance_i = middle_univdiagonal - univdiagonal_i;
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_splice(splice_distance_j,sensedir,
+								best_donor2_prob,best_acceptor2_prob,
+								pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_splice(splice_distance_i,sensedir,
+								best_donor1_prob,best_acceptor1_prob,
+								pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+#endif
+
+	return 2;			/* 2 segments */
+
+      } else {
+	FREE(middle_univdiagonals);
+	/* Proceed below */
+      }
+    }
+  }
+
+  debug1(printf("(1) Before spliceindel_resolve, have splice_qpos %d, nsites %d and %d, probs %f vs %f and %f vs %f\n",
+		best_splice_qpos,segmenti_nsites,segmentj_nsites,
+		best_donor1_prob,optimal_donor1_prob,best_acceptor2_prob,optimal_acceptor2_prob));
+  if (allow_indels_p == false) {
+    /* Skip */
+    debug1(printf("(1) Indels not allowed\n"));
+
+  } else if (segmenti_nsites == 0 || segmentj_nsites == 0) {
+    debug1(printf("Cannot call spliceindel_resolve because nsites %d and %d\n",
+		  segmenti_nsites,segmentj_nsites));
+
+  } else if (best_donor1_prob == optimal_donor1_prob && best_acceptor2_prob == optimal_acceptor2_prob) {
+    debug1(printf("No need to call spliceindel_resolve because exact probs are optimal\n"));
+    
+  } else {
+    /* Try splice plus indel */
+
+    if (invertedp == true) {
+      /* Computes in qpos, not querypos, so undo inversions */
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+      invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+      invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+      invertedp = false;
+    }
+
+    debug1(printf("For comparison, exact nmismatches are %d + %d\n",
+		  best_nmismatches_i,best_nmismatches_j));
+    if ((splice_qpos =
+	 spliceindel_resolve(&type,&spliceindel_trimpos5,&spliceindel_trimpos3,&nindels,&indel_pos,
+			     &spliceindel_nmismatches_i,&spliceindel_nmismatches_j,&nmismatches_indel,
+			     &spliceindel_ref_nmismatches_i,&spliceindel_ref_nmismatches_j,
+			     &ref_nmismatches_indel,
+			     &spliceindel_donor1_prob,&spliceindel_acceptor2_prob,
+			     
+			     univdiagonal_i,univdiagonal_j,
+			     query_compress,plusp,chroffset,chrhigh,
+			     
+			     mismatch_positions_left,nmismatches_left,
+			     mismatch_positions_right,nmismatches_right,
+			     
+			     segmenti_sites,segmentj_sites,segmenti_types,segmentj_types,
+			     segmenti_probs,segmentj_probs,segmenti_nsites,segmentj_nsites,
+			     optimal_segmenti_prob,optimal_segmentj_prob,
+			     
+			     pos5,pos3,querylength,indelinfo,sense_forward_p,genestrand,
+			     trim5p,trim3p)) <= 0) {
+      /* No spliceindel found */
+      debug1(printf("Splice_resolve_qstart: No spliceindel found\n"));
+
+    } else if (best_splice_qpos > 0 &&
+	       spliceindel_nmismatches_i + nmismatches_indel + spliceindel_nmismatches_j >=
+	       best_nmismatches_i + best_nmismatches_j) {
+      /* Spliceindel not as good as exact splice */
+      debug1(printf("Splice_resolve_qstart: Spliceindel not as good as exact splice\n"));
+
+    } else if (abs(splice_qpos - indel_pos) - 4*nmismatches_indel < 0) {
+      debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
+		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
+		    best_nmismatches_i,best_nmismatches_j));
+      debug1(printf("Splice_resolve_qstart: Indel segment has too many mismatches\n"));
+      /* Fall through to atypical splice */
+
+    } else {
+      debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
+		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
+		    best_nmismatches_i,best_nmismatches_j));
+      debug1(printf("Splice_resolve_qstart: Spliceindel acceptable\n"));
+
+      /* best_type = type; */
+      trimpos5 = spliceindel_trimpos5;
+      trimpos3 = spliceindel_trimpos3;
+      best_nindels = nindels;
+      best_indel_pos = indel_pos;
+      best_nmismatches_i = spliceindel_nmismatches_i;
+      best_nmismatches_indel = nmismatches_indel;
+      best_nmismatches_j = spliceindel_nmismatches_j;
+      best_ref_nmismatches_i = spliceindel_ref_nmismatches_i;
+      best_ref_nmismatches_indel = ref_nmismatches_indel;
+      best_ref_nmismatches_j = spliceindel_ref_nmismatches_j;
+      best_donor1_prob = spliceindel_donor1_prob;
+      best_acceptor2_prob = spliceindel_acceptor2_prob;
+      best_splice_qpos = splice_qpos;
+    }
+  }
+
+#if 0
+  if (best_splice_qpos <= 0) {
+    /* Try atypical splicing */
+    debug1(printf("Computing splice sites\n"));
+    
+    /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
+    if (plusp == true) {
+      /* Skip */
+    } else if (invertedp == true) {
+      /* Skip */
+    } else {
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+      invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+      invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+      invertedp = true;
+    }
+    
+    debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
+
+    if (splice_qpos_i_low < splice_qpos_j_low) {
+      splice_qpos_qstart = splice_qpos_i_low;
+    } else {
+      splice_qpos_qstart = splice_qpos_j_low;
+    }
+
+    if (splice_qpos_i_high > splice_qpos_j_high) {
+      splice_qpos_qend = splice_qpos_i_high;
+    } else {
+      splice_qpos_qend = splice_qpos_j_high;
+    }
+
+    if (sense_forward_p == true) {
+      if (plusp == true) {
+	/* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
+	best_splice_querypos =
+	  atypical_sense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*D*/&best_nmismatches_i,/*A*/&best_nmismatches_j,
+			 /*D*/&best_ref_nmismatches_i,/*A*/&best_ref_nmismatches_j,
+			 /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
+			 /*plusDp*/true,/*plusAp*/true,querylength,
+			 /*donor*/mismatch_positions_left,nmismatches_left,
+			 /*acceptor*/mismatch_positions_right,nmismatches_right,
+			 /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
+	  
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = best_splice_querypos;
+	}
+
+      } else {
+	/* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+	best_splice_querypos =
+	  atypical_sense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*D*/&best_nmismatches_j,/*A*/&best_nmismatches_i,
+			 /*D*/&best_ref_nmismatches_j,/*A*/&best_ref_nmismatches_i,
+			 /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
+			 /*plusDp*/false,/*plusAp*/false,querylength,
+			 /*donor*/mismatch_positions_right,nmismatches_right,
+			 /*acceptor*/mismatch_positions_left,nmismatches_left,
+			 /*splice_querypos_low*/querylength - splice_qpos_qend,
+			 /*splice_querypos_high*/querylength - splice_qpos_qstart);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = querylength - best_splice_querypos;
+	}
+      }
+
+    } else {
+      if (plusp == true) {
+	/* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+	best_splice_querypos =
+	  atypical_antisense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			     /*A*/&best_nmismatches_i,/*D*/&best_nmismatches_j,
+			     /*A*/&best_ref_nmismatches_i,/*D*/&best_ref_nmismatches_j,
+			     /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
+			     /*plusAp*/true,/*plusDp*/true,querylength,
+			     /*acceptor*/mismatch_positions_left,nmismatches_left,
+			     /*donor*/mismatch_positions_right,nmismatches_right,
+			     /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = best_splice_querypos;
+	}
+
+      } else {
+	/* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
+	best_splice_querypos =
+	  atypical_antisense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			     /*A*/&best_nmismatches_j,/*D*/&best_nmismatches_i,
+			     /*A*/&best_ref_nmismatches_j,/*D*/&best_ref_nmismatches_i,
+			     /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
+			     /*plusAp*/false,/*plusDp*/false,querylength,
+			     /*acceptor*/mismatch_positions_right,nmismatches_right,
+			     /*donor*/mismatch_positions_left,nmismatches_left,
+			     /*splice_querypos_low*/querylength - splice_qpos_qend,
+			     /*splice_querypos_high*/querylength - splice_qpos_qstart);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = querylength - best_splice_querypos;
+	}
+      }
+    }
+  }    
+#endif
+
+
+#if 0
+  lefti = 0;
+  while (lefti < nmismatches_left && mismatch_positions_left[lefti] < best_splice_qpos) {
+    lefti++;
+  }
+  best_nmismatches_i = best_ref_nmismatches_i = lefti;
+  
+  righti = 0;
+  while (righti < nmismatches_right && mismatch_positions_right[righti] >= best_splice_qpos) {
+    righti++;
+  }
+  best_nmismatches_j = best_ref_nmismatches_j = righti;
+#endif
+
+
+  if (best_splice_qpos <= 0) {
+    assert(middle_univdiagonal == 0);
+    return 0;
+
+  } else {
+#if 0
+    if (plusp == sense_forward_p) {
+      best_probi = best_donor1_prob;
+      best_probj = best_acceptor2_prob;
+    } else {
+      best_probi = best_acceptor2_prob;
+      best_probj = best_donor1_prob;
+    }
+#endif
+    debug1(printf("donor1 %f, acceptor2 %f\n",best_donor1_prob,best_acceptor2_prob));
+
+    /* Check that the exon-intron boundaries are okay */
+    if (invertedp == true) {
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+    }
+
+#ifdef DEBUG1
+    printf("Checking bounds\n");
+    printf("%d mismatches on left:",nmismatches_left);
+    for (int i = 0; i <= nmismatches_left; i++) {
+      printf(" %d",mismatch_positions_left[i]);
+    }
+    printf("\n");
+
+    printf("%d mismatches on right:",nmismatches_right);
+    for (int i = 0; i <= nmismatches_right; i++) {
+      printf(" %d",mismatch_positions_right[i]);
+    }
+    printf("\n");
+#endif
+
+    supporti = best_splice_qpos - trimpos5;
+    supportj = trimpos3 - best_splice_qpos;
+
+#ifdef USE_TEST1
+    /* Benchmarking indicates this is generally worse, except cases of high sequence error */
+    if (best_nindels == 0) {
+      endpoint_i = endpoint_j = best_splice_qpos;
+    } else if (best_splice_qpos < best_indel_pos) {
+      endpoint_i = best_splice_qpos;
+      endpoint_j = best_indel_pos;
+    } else {
+      endpoint_i = best_indel_pos;
+      endpoint_j = best_splice_qpos;
+    }
+
+    /* Test 1 */
+    if (endpoint_i <= splice_qpos_qend) {
+      nmatches_trim_i = 1;
+      nmismatches_trim_i = 0;
+    } else {
+      nmismatches_trim_i =
+	Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					      query_compress,/*univdiagonal*/univdiagonal_i,querylength,
+					      /*pos5*/splice_qpos_qend,/*pos3*/endpoint_i,
+					      plusp,genestrand);
+      nmatches_trim_i = (endpoint_i - splice_qpos_qend) - nmismatches_trim_i;
+    }
+
+    if (endpoint_j >= splice_qpos_qstart) {
+      nmatches_trim_j = 1;
+      nmismatches_trim_j = 0;
+    } else {
+      nmismatches_trim_j =
+	Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					      query_compress,/*univdiagonal*/univdiagonal_j,querylength,
+					      /*pos5*/endpoint_j,/*pos3*/splice_qpos_qstart,
+					      plusp,genestrand);
+      nmatches_trim_j = (splice_qpos_qstart - endpoint_j) - nmismatches_trim_j;
+    }
+
+    debug1(printf("Solution has %d matches and %d mismatches in trim_i\n",
+		  nmatches_trim_i,nmismatches_trim_i));
+    debug1(printf("Solution has %d matches and %d mismatches in trim_j\n",
+		  nmatches_trim_j,nmismatches_trim_j));
+
+    if (nmismatches_trim_i >= nmatches_trim_i) {
+      return 0;
+
+    } else if (nmismatches_trim_j >= nmatches_trim_j) {
+      return 0;
+    }
+#endif
+
+    /* Test 2 */
+    /* Eventually want this */
+    /* See what happens we continue on univdiagonal_j */
+    score_splice = (supporti - best_nmismatches_i) - best_nmismatches_i;
+
+    nmismatches_stay =
+      Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					    query_compress,/*univdiagonal*/univdiagonal_j,querylength,
+					    /*pos5*/trimpos5,/*pos3*/best_splice_qpos,
+					    plusp,genestrand);
+    nmatches_stay = (best_splice_qpos - trimpos5) - nmismatches_stay;
+    score_stay = nmatches_stay - nmismatches_stay;
+    debug1(printf("splice_qpos %d is outside transition %d..%d.  Staying on univdiagonal_j yields %d matches and %d mismatches => score %d vs splice score %d\n",
+		  best_splice_qpos,splice_qpos_qend,splice_qpos_qstart,nmatches_stay,nmismatches_stay,score_stay,score_splice));
+    if (score_stay >= score_splice - 6) {
+      debug1(printf("Splice_resolve_qstart: Okay to stay on univdiagonal_j\n\n"));
+      return 0;
+    }
+
+    if (Splice_accept_p(best_splice_qpos,querylength,
+			best_donor1_prob,best_acceptor2_prob,
+			univdiagonal_i,univdiagonal_j,
+			supporti,best_nmismatches_i,supportj,best_nmismatches_j,
+			plusp,sense_forward_p,innerp) == false) {
+      debug1(printf("Splice_resolve_qstart on dist %u rejecting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f, based on probs\n\n",
+		    /*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,
+		    supportj,best_nmismatches_j,best_acceptor2_prob));
+      assert(middle_univdiagonal == 0);
+      return 0;		/* Fail */
+
+#if 1
+    } else if (cont_trimpos >= 0 &&
+	       (pos3 - trimpos5) - best_nmismatches_i - best_nmismatches_j - best_nmismatches_indel <= (pos3 - cont_trimpos) - cont_nmismatches) {
+      debug1(printf("Solution yields fewer matches than continuation: (%d - %d) - %d - %d - %d vs (%d - %d) - %d\n\n",
+		    pos3,trimpos5,best_nmismatches_i,best_nmismatches_j,best_nmismatches_indel,pos3,cont_trimpos,cont_nmismatches));
+      return 0;
+#endif
+
+    } else if (best_nindels == 0) {
+      /* Splice only */
+      debug1(printf("(2) Splice_resolve_qstart (%s) on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",/*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,univdiagonal_i
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+
+      /* For qstart, push j first, then push i */
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+      
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+      
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos5
+				    intlistpool_trace(__FILE__,__LINE__));
+
+      splice_distance = univdiagonal_j - univdiagonal_i;
+      *junctions = Listpool_push(NULL,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+      
+      return 1;			/* 1 segment */
+      
+    } else if (best_splice_qpos < best_indel_pos) {
+      /* Push indel (based on left) then splice.  splice is distal, indel is medial */
+      debug1(printf("(3) Splice_resolve_qstart (%s) on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",/*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+
+#if 0
+      middle_univdiagonal = univdiagonal - nindels; /* nindels = univdiagonal - middle_univdiagonal */
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+      middle_univdiagonal = univdiagonal_j - nindels; /* nindels = univdiagonal - middle_univdiagonal */
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+      *univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_i
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+#endif
+
+      /* For qstart, push j first, then push i */
+#if 0
+      Intlist_head_set(newpath->nmismatches,nmismatches_j);
+      Intlist_head_set(newpath->ref_nmismatches,nmismatches_j);
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
+						  intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
+						  intlistpool_trace(__FILE__,__LINE__));
+#else
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_indel
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_indel
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      Intlist_head_set(newpath->endpoints,indel_pos);
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
+					    intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5
+					    intlistpool_trace(__FILE__,__LINE__));
+#else
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_indel_pos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos5
+				    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      /* Indel first */
+      if (nindels < 0) {
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_insertion(-nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      } else {
+	/* deletionpos = low_left + splice_distance + indel_pos; -- qstart; add splice_distance if indel first */
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_deletion(nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      }
+      
+      /* Splice second */
+      splice_distance = middle_univdiagonal - low_univdiagonal;
+      newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					 (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
+								      donor1_prob,acceptor2_prob,pathpool)
+					 listpool_trace(__FILE__,__LINE__));
+#else
+      if (best_nindels < 0) {
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_insertion(-best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      } else {
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_deletion(best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      }
+	  
+      splice_distance = middle_univdiagonal - univdiagonal_i;
+      *junctions = Listpool_push(*junctions,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+#endif
+
+      return 2;
+	  
+    } else {
+      /* Push splice then indel (based on low_univdiagonal).  indel is distal, splice is medial */
+      debug1(printf("(4) Splice_resolve_qstart (%s) on dist %u accepting splice pos %d, distance %u, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",
+		    /*dist*/univdiagonal_j - univdiagonal_i,best_splice_qpos,
+		    /*splice_distance*/univdiagonal_j - middle_univdiagonal,
+		    best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+
+#if 0
+      middle_univdiagonal = low_univdiagonal + nindels; /* nindels = middle_univdiagonal - low_univdiagonal */
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+      middle_univdiagonal = univdiagonal_i + nindels;
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+      *univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_i
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      Intlist_head_set(newpath->nmismatches,nmismatches_j);
+      Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
+						  intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_i
+						  intlistpool_trace(__FILE__,__LINE__));
+#else
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_indel
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+      
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_indel
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      Intlist_head_set(newpath->endpoints,splice_qpos);
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
+					    intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
+					    intlistpool_trace(__FILE__,__LINE__));
+#else
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,best_indel_pos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos5
+				    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      /* Splice first */
+      splice_distance = univdiagonal - middle_univdiagonal;
+      newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					 (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
+								      donor1_prob,acceptor2_prob,pathpool)
+					 listpool_trace(__FILE__,__LINE__));
+	  
+      /* Indel second */
+      if (nindels < 0) {
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_insertion(-nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      } else {
+	/* deletionpos = low_left + indel_pos; -- qstart; do not add splice_distance if indel second */
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_deletion(nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      }
+#else
+      splice_distance = univdiagonal_j - middle_univdiagonal;
+      *junctions = Listpool_push(NULL,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+      
+      if (best_nindels < 0) {
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_insertion(-best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      } else {
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_deletion(best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      }
+#endif
+
+      return 2;		/* 2 segments */
+    }
+  }
+}
+
+
+int
+Splice_resolve_qend (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
+		     Intlist_T *endpoints, List_T *junctions,
+
+		     Univcoord_T univdiagonal_i, Univcoord_T univdiagonal_j,
+		     Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		     bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
+		     
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+
+		     Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     Localdb_T localdb, int localdb_nmismatches_allowed,
+
+		     int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
+		     Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+		     Univcoordlistpool_T univcoordlistpool, Intlistpool_T intlistpool,
+		     Listpool_T listpool, Pathpool_T pathpool,
+
+		     int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
+		     bool allow_indels_p, bool find_middle_p) {
+
+  int type;
+  Univcoord_T middle_univdiagonal = (Univcoord_T) 0;
+  int best_nmismatches_i = querylength, best_nmismatches_j = querylength;
+  int best_ref_nmismatches_i = querylength, best_ref_nmismatches_j = querylength;
+
+  int best_nindels = 0, best_nmismatches_indel = 0, best_ref_nmismatches_indel = 0, ninserts;
+  int best_indel_pos = -1;
+  double best_donor1_prob = 0.0, best_acceptor2_prob = 0.0;
+  int trimpos5, trimpos3;
+
+  Chrpos_T splice_distance;
+
+#if 1
+  /* For middle exon */
+  Chrpos_T splice_distance_i, splice_distance_j;
+  double best_donor2_prob = 0.0, best_acceptor1_prob = 0.0;
+  int splice_region_low, splice_region_high, splice_qpos_i, splice_qpos_j;
+  int nmismatches_middle = querylength, ref_nmismatches_middle = querylength;
+  int typei, typej;
+  int n_middle_univdiagonals;
+  Univcoord_T *middle_univdiagonals;
+#endif  
+
+  int best_splice_qpos, best_splice_querypos = -1;
+  int splice_qpos_qstart, splice_qpos_qend;
+  int splice_qpos_i_low, splice_qpos_i_high, splice_qpos_j_low, splice_qpos_j_high;
+  int *mismatch_positions_left, *mismatch_positions_right;
+  int nmismatches_left, nmismatches_right;
+  char donor1, donor2, acceptor1, acceptor2;
+  int ignore_nmismatches;
+
+  int splice_qpos, indel_pos, spliceindel_trimpos5, spliceindel_trimpos3;
+  int nindels, spliceindel_nmismatches_i, spliceindel_nmismatches_j, nmismatches_indel,
+    spliceindel_ref_nmismatches_i, spliceindel_ref_nmismatches_j, ref_nmismatches_indel;
+  double spliceindel_donor1_prob, spliceindel_acceptor2_prob;
+
+  /* int best_nmismatches, nmismatches, segmenti_nmismatches, segmentj_nmismatches; */
+  /* double best_probi, best_probj; */
+  double optimal_donor1_prob, optimal_acceptor2_prob, optimal_segmenti_prob, optimal_segmentj_prob;
+  /* double best_prob, donor_prob, acceptor_prob; */
+
+  int *segmenti_sites, *segmentj_sites;
+  int *segmenti_types, *segmentj_types;
+  double *segmenti_probs, *segmentj_probs;
+  int segmenti_nsites, segmentj_nsites;
+
+  int supporti, supportj;
+  
+  int nmismatches_to_trimpos;
+  int nmatches_trim_i, nmatches_trim_j,
+    nmismatches_trim_i, nmismatches_trim_j, ignore;
+  int endpoint_i, endpoint_j;
+
+  int nmatches_stay, nmismatches_stay;
+  int score_stay, score_splice;
+
+  bool invertedp = false;
+  bool sense_forward_p = (sensedir == SENSE_FORWARD);
+
+#ifdef DEBUG1
+  char *gbuffer1, *gbuffer2;
+  static int ncalls = 0;
+#endif
+
+#if defined(DEBUG1) || defined(TRIM_AT_CHROMOSOME_BOUNDS)
+  Univcoord_T segmenti_left = univdiagonal_i - querylength;
+  Univcoord_T segmentj_left = univdiagonal_j - querylength;
+#endif
+
+#ifdef DEBUG1
+  printf("Splice_resolve_qend (%s), plusp %d, compress_fwdp %d, sense_forward_p %d, call %d: Getting genome at univdiagonal_i %u [%u] and univdiagonal_j %u [%u] (diff: %d), range %d..%d\n",
+	 sensedir == SENSE_FORWARD ? "sense" : "antisense",
+	 plusp,Compress_fwdp(query_compress),sense_forward_p,++ncalls,
+	 univdiagonal_i,univdiagonal_i - chroffset,univdiagonal_j,univdiagonal_j - chroffset,
+	 univdiagonal_j-univdiagonal_i,pos5,pos3);
+#endif
+  assert(Compress_fwdp(query_compress) == plusp);
+  assert(univdiagonal_j > univdiagonal_i);
+
+
+#ifdef TRIM_AT_CHROMOSOME_BOUNDS
+  Univcoord_T univdiagonali, univdiagonalj;
+  pos5 = (univdiagonal_i + pos5 >= chroffset + querylength) ? pos5 : (int) (chroffset - segmenti_left);
+  pos3 = (univdiagonal_j + pos3 <= chrhigh + querylength) ? pos3 : (int) (chrhigh - segmentj_left);
+#endif
+
+
+  /* Require separation from endpoints */
+#if 0
+  splice_qpos_start = pos5 + 1;
+  splice_qpos_end = pos3 - 1;
+  if (splice_qpos_start < min_shortend) {
+    splice_qpos_start = min_shortend;
+  }
+  if (splice_qpos_end > (querylength - 1) - min_shortend) {
+    splice_qpos_end = (querylength - 1) - min_shortend;
+  }
+#endif
+
+  /* Determine feasibility of a splice */
+
+  /* New method, different from relying on nmismatches_allowed */
+  mismatch_positions_left = spliceinfo->mismatch_positions_left1; /* Use allocated memory */
+  mismatch_positions_right = spliceinfo->mismatch_positions_right2; /* Use allocated memory */
+
+  /* ascending */
+  nmismatches_left =
+    Genomebits_mismatches_fromleft_for_trim(mismatch_positions_left,/*max_mismatches*/pos3 - pos5,
+					    genomebits,genomebits_alt,query_compress,
+					    univdiagonal_i,querylength,pos5,pos3,plusp,genestrand);
+
+  /* descending */
+  nmismatches_right =
+    Genomebits_mismatches_fromright_for_trim(mismatch_positions_right,/*max_mismatches*/pos3 - pos5,
+					     genomebits,genomebits_alt,query_compress,
+					     univdiagonal_j,querylength,pos5,pos3,plusp,genestrand);
+
+  debug1(
+	 printf("(3) %d mismatches on left from %d to %d at:",nmismatches_left,pos5,pos3);
+	 for (int i = 0; i <= nmismatches_left; i++) {
+	   printf(" %d",mismatch_positions_left[i]);
+	 }
+	 printf("\n");
+	 );
+
+  debug1(
+	 printf("(3) %d mismatches on right from %d to %d at:",nmismatches_right,pos3,pos5);
+	 for (int i = 0; i <= nmismatches_right; i++) {
+	   printf(" %d",mismatch_positions_right[i]);
+	 }
+	 printf("\n");
+	 );
+
+
+  /* was splice_qpos_high */
+  splice_qpos_qend = Spliceends_trim_qend_nosplice(&nmismatches_to_trimpos,mismatch_positions_left,nmismatches_left,
+						   pos5,pos3,querylength);
+  /* was splice_qpos_low */
+  splice_qpos_qstart = Spliceends_trim_qstart_nosplice(&nmismatches_to_trimpos,mismatch_positions_right,nmismatches_right,
+						    pos5,pos3);
+  debug1(printf("trim_nosplice for pos5 %d, pos3 %d yields low %d and high %d\n",
+		pos5,pos3,splice_qpos_qstart,splice_qpos_qend));
+
+  /* Trimming */
+  if (trim5p == false) {
+    trimpos5 = pos5;
+  } else if (splice_qpos_qend - pos5 < 8) {
+    trimpos5 = pos5;
+  } else {
+    debug1(printf("(1) Calling Genomebits_trim_qstart with %d..%d",pos5,splice_qpos_qend));
+    trimpos5 = Genomebits_trim_qstart(&ignore_nmismatches,query_compress,genomebits,
+				       univdiagonal_i,querylength,
+				       pos5,/*pos3*/splice_qpos_qend,plusp,genestrand);
+    debug1(printf(" to yield %d..\n",trimpos5));
+  }
+
+  if (trim3p == false) {
+    trimpos3 = pos3;
+  } else if (pos3 - splice_qpos_qstart < 8) {
+    trimpos3 = pos3;
+  } else {
+    debug1(printf("(1) Calling Genomebits_trim_qend with %d..%d",splice_qpos_qstart,pos3));
+    trimpos3 = Genomebits_trim_qend(&ignore_nmismatches,query_compress,genomebits,
+				     univdiagonal_j,querylength,
+				     /*pos5*/splice_qpos_qstart,pos3,plusp,genestrand);
+    debug1(printf(" to yield ..%d\n",trimpos3));
+  }
+
+  if (trimpos5 != pos5) {
+    /* ascending */
+    nmismatches_left =
+      Genomebits_mismatches_fromleft_for_trim(mismatch_positions_left,/*max_mismatches*/pos3 - pos5,
+					      genomebits,genomebits_alt,query_compress,
+					      univdiagonal_i,querylength,trimpos5,pos3,plusp,genestrand);
+  }
+
+  if (trimpos3 != pos3) {
+    /* descending */
+    nmismatches_right =
+      Genomebits_mismatches_fromright_for_trim(mismatch_positions_right,/*max_mismatches*/pos3 - pos5,
+					       genomebits,genomebits_alt,query_compress,
+					       univdiagonal_j,querylength,pos5,trimpos3,plusp,genestrand);
+  }
+
+  pos5 = trimpos5;
+  pos3 = trimpos3;
+
+  debug1(
+	 printf("(3) %d mismatches on left from %d to %d at:",nmismatches_left,pos5,pos3);
+	 for (int i = 0; i <= nmismatches_left; i++) {
+	   printf(" %d",mismatch_positions_left[i]);
+	 }
+	 printf("\n");
+	 );
+
+  debug1(
+	 printf("(3) %d mismatches on right from %d to %d at:",nmismatches_right,pos3,pos5);
+	 for (int i = 0; i <= nmismatches_right; i++) {
+	   printf(" %d",mismatch_positions_right[i]);
+	 }
+	 printf("\n");
+	 );
+
+#if 0
+  /* From Splice_nomiddle */
+  if (splice_qpos_qstart < pos5 + 1) {
+    splice_qpos_qstart = pos5 + 1;
+  }
+  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_qstart));
+
+  if (splice_qpos_qend > pos3 - 1) {
+    splice_qpos_qend = pos3 - 1;
+  }
+  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_qend));
+#endif
+
+  debug1(printf("  Splice low qpos bound for exact splice: %d\n",splice_qpos_qstart));
+  debug1(printf("  Splice high qpos bound for exact splice: %d\n",splice_qpos_qend));
+
+
+#ifdef DEBUG1
+  gbuffer1 = (char *) CALLOC(querylength+1,sizeof(char));
+  gbuffer2 = (char *) CALLOC(querylength+1,sizeof(char));
+  Genome_fill_buffer(univdiagonal_i - querylength,querylength,gbuffer1);
+  Genome_fill_buffer(univdiagonal_j - querylength,querylength,gbuffer2);
+  char *queryseq = Compress_queryseq(query_compress,querylength);
+
+  printf("Splice_resolve_qend, plusp %d: Getting genome at left %llu and %llu\n",
+	 plusp,(unsigned long long) segmenti_left,(unsigned long long) segmentj_left);
+  printf("g1: %s\n",gbuffer1);
+  printf("    ");
+  print_diffs(gbuffer1,queryseq,querylength);
+  printf("\n");
+  printf("q:  %s\n",queryseq);
+  printf("    ");
+  print_diffs(gbuffer2,queryseq,querylength);
+  printf("\n");
+  printf("g2: %s\n",gbuffer2);
+  FREE(queryseq);
+  FREE(gbuffer2);
+  FREE(gbuffer1);
+#endif
+
+
+  debug1(printf("find_middle_p: %d\n",find_middle_p));
+
+#if 1
+  if (0 && find_middle_p == false) {
+    /* From Splice_nomiddle */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+  } else if (splice_qpos_qstart <= splice_qpos_qend + MISMATCHES_AT_SITE) {
+    /* Appears to have matches to both splice sites.  Span just the crossing parts */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+    /* Set both to min */
+    if (splice_qpos_i_low < splice_qpos_j_low) {
+      splice_qpos_j_low = splice_qpos_i_low;
+    } else {
+      splice_qpos_i_low = splice_qpos_j_low;
+    }
+
+    /* Set both to max */
+    if (splice_qpos_i_high > splice_qpos_j_high) {
+      splice_qpos_j_high = splice_qpos_i_high;
+    } else {
+      splice_qpos_i_high = splice_qpos_j_high;
+    }
+
+  } else {
+    /* There is a gap in matches.  Span the entire region */
+    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+  }
+#else
+  if (splice_qpos_qstart <= splice_qpos_qend + MISMATCHES_AT_SITE) {
+    /* Appears to have matches to both splice sites.  Span just the crossing parts */
+    splice_qpos_i_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = add_bounded(splice_qpos_qend,EXTRA_MISMATCHES,pos3 - 1);
+    splice_qpos_j_low = subtract_bounded(splice_qpos_qstart,EXTRA_MISMATCHES,pos5 + 1);
+    splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+
+  } else {
+    /* There is a gap in matches.  Span the entire region */
+    splice_qpos_i_low = splice_qpos_j_low = subtract_bounded(splice_qpos_qend,EXTRA_MATCHES,pos5 + 1);
+    splice_qpos_i_high = splice_qpos_j_high = add_bounded(splice_qpos_qstart,EXTRA_MATCHES,pos3 - 1);
+  }
+
+  splice_region_low = /*min*/ (splice_qpos_i_low < splice_qpos_j_low) ? splice_qpos_i_low : splice_qpos_j_low;
+  splice_region_high = /*max*/ (splice_qpos_i_high > splice_qpos_j_high) ? splice_qpos_i_high : splice_qpos_j_high;
+
+  debug1(printf("  Splice region: %d..%d\n",splice_region_low,splice_region_high));
+#endif
+
+  debug1(printf("  Splice i bounds: %d..%d\n",splice_qpos_i_low,splice_qpos_i_high));
+  debug1(printf("  Splice j bounds: %d..%d\n",splice_qpos_j_low,splice_qpos_j_high));
+
+
+  if (plusp == sense_forward_p) {
+    /* geneplus */
+    segmenti_nsites = compute_donor_sites(&optimal_donor1_prob,&segmenti_sites,&segmenti_types,&segmenti_probs,
+					  spliceinfo->segmenti_sites_alloc1,spliceinfo->segmenti_types_alloc1,
+					  spliceinfo->segmenti_sites_alloc2,spliceinfo->segmenti_types_alloc2,
+					  spliceinfo->segmenti_probs_alloc,
+#if 0
+					  splice_region_low,splice_region_high,
+#else
+					  splice_qpos_i_low,splice_qpos_i_high,
+#endif
+					  querylength,univdiagonal_i,chroffset,knownsplicing,intlistpool);
+    
+    segmentj_nsites = compute_acceptor_sites(&optimal_acceptor2_prob,&segmentj_sites,&segmentj_types,&segmentj_probs,
+					     spliceinfo->segmentj_sites_alloc1,spliceinfo->segmentj_types_alloc1,
+					     spliceinfo->segmentj_sites_alloc2,spliceinfo->segmentj_types_alloc2,
+					     spliceinfo->segmentj_probs_alloc,
+#if 0
+					     splice_region_low,splice_region_high,
+#else
+					     splice_qpos_j_low,splice_qpos_j_high,
+#endif
+					     querylength,univdiagonal_j,chroffset,knownsplicing,intlistpool);
+    optimal_segmenti_prob = optimal_donor1_prob;
+    optimal_segmentj_prob = optimal_acceptor2_prob;
+
+  } else {
+    /* geneminus */
+    segmenti_nsites = compute_antiacceptor_sites(&optimal_acceptor2_prob,&segmenti_sites,&segmenti_types,&segmenti_probs,
+						 spliceinfo->segmenti_sites_alloc1,spliceinfo->segmenti_types_alloc1,
+						 spliceinfo->segmenti_sites_alloc2,spliceinfo->segmenti_types_alloc2,
+						 spliceinfo->segmenti_probs_alloc,
+#if 0
+						 splice_region_low,splice_region_high,
+#else
+						 splice_qpos_i_low,splice_qpos_i_high,
+#endif
+						 querylength,univdiagonal_i,chroffset,knownsplicing,intlistpool);
+    
+    segmentj_nsites = compute_antidonor_sites(&optimal_donor1_prob,&segmentj_sites,&segmentj_types,&segmentj_probs,
+					      spliceinfo->segmentj_sites_alloc1,spliceinfo->segmentj_types_alloc1,
+					      spliceinfo->segmentj_sites_alloc2,spliceinfo->segmentj_types_alloc2,
+					      spliceinfo->segmentj_probs_alloc,
+#if 0
+					      splice_region_low,splice_region_high,
+#else
+					      splice_qpos_j_low,splice_qpos_j_high,
+#endif
+					      querylength,univdiagonal_j,chroffset,knownsplicing,intlistpool);
+    optimal_segmenti_prob = optimal_acceptor2_prob;
+    optimal_segmentj_prob = optimal_donor1_prob;
+  }
+
+
+  best_splice_qpos = -1;
+
+  /* Try standard splicing */
+  debug1(printf("Computing splice sites\n"));
+    
+  /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
+  if (plusp == true) {
+    /* Skip */
+    check_ascending(mismatch_positions_left,nmismatches_left);
+    check_descending(mismatch_positions_right,nmismatches_right);
+
+#if 0
+  } else if (invertedp == true) {
+    /* Already inverted */
+    check_descending(mismatch_positions_left,nmismatches_left);
+    check_ascending(mismatch_positions_right,nmismatches_right);
+#endif
+
+  } else {
+    invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+    invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+    invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+    invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+
+    check_descending(mismatch_positions_left,nmismatches_left);
+    check_ascending(mismatch_positions_right,nmismatches_right);
+
+    invertedp = true;
+  }
+    
+  debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
+
+  if (sense_forward_p == true) {
+    if (plusp == true) {
+      /* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+		     /*D*/&best_nmismatches_i,/*A*/&best_nmismatches_j,
+		     /*D*/&best_ref_nmismatches_i,/*A*/&best_ref_nmismatches_j,
+		     /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/true,/*plusAp*/true,querylength,
+		     /*donor*/mismatch_positions_left,/*donor*/nmismatches_left,
+		     /*acceptor*/mismatch_positions_right,/*acceptor*/nmismatches_right,
+		     /*D*/segmenti_sites,/*A*/segmentj_sites,
+		     /*D*/segmenti_types,/*A*/segmentj_types,
+		     /*D*/segmenti_probs,/*A*/segmentj_probs,
+		     /*D*/segmenti_nsites,/*A*/segmentj_nsites);
+	
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = best_splice_querypos;
+	/* best_type = type; */
+      }
+      
+    } else {
+      /* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+		     /*D*/&best_nmismatches_j,/*A*/&best_nmismatches_i,
+		     /*D*/&best_ref_nmismatches_j,/*A*/&best_ref_nmismatches_i,
+		     /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/false,/*plusAp*/false,querylength,
+		     /*donor*/mismatch_positions_right,/*donor*/nmismatches_right,
+		     /*acceptor*/mismatch_positions_left,/*acceptor*/nmismatches_left,
+		     /*D*/segmentj_sites,/*A*/segmenti_sites,
+		     /*D*/segmentj_types,/*A*/segmenti_types,
+		     /*D*/segmentj_probs,/*A*/segmenti_probs,
+		     /*D*/segmentj_nsites,/*A*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = querylength - best_splice_querypos;
+	/* best_type = type; */
+      }
+    }
+    
+  } else {
+    if (plusp == true) {
+      /* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*A*/&best_nmismatches_i,/*D*/&best_nmismatches_j,
+			 /*A*/&best_ref_nmismatches_i,/*D*/&best_ref_nmismatches_j,
+			 /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/plusp,/*plusDp*/plusp,querylength,
+			 /*acceptor*/mismatch_positions_left,nmismatches_left,
+			 /*donor*/mismatch_positions_right,nmismatches_right,
+			 /*A*/segmenti_sites,/*D*/segmentj_sites,
+			 /*A*/segmenti_types,/*D*/segmentj_types,
+			 /*A*/segmenti_probs,/*D*/segmentj_probs,
+			 /*A*/segmenti_nsites,/*D*/segmentj_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = best_splice_querypos;
+	/* best_type = type; */
+      }
+      
+    } else {
+      /* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*A*/&best_nmismatches_j,/*D*/&best_nmismatches_i,
+			 /*A*/&best_ref_nmismatches_j,/*D*/&best_ref_nmismatches_i,
+			 /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/false,/*plusDp*/false,querylength,
+			 /*acceptor*/mismatch_positions_right,nmismatches_right,
+			 /*donor*/mismatch_positions_left,nmismatches_left,
+			 /*A*/segmentj_sites,/*D*/segmenti_sites,
+			 /*A*/segmentj_types,/*D*/segmenti_types,
+			 /*A*/segmentj_probs,/*D*/segmenti_probs,
+			 /*A*/segmentj_nsites,/*D*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = querylength - best_splice_querypos;
+	/* best_type = type; */
+      }
+    }
+  }
+
+
+  if (find_middle_p == false) {
+    /* Skip */
+
+  } else if (best_splice_qpos <= 0 &&
+	     splice_qpos_qstart >= splice_qpos_qend + MIN_EXONLEN) {
+    /* Possible middle exon or multiple sequencing errors */
+    debug1(printf("splice_qpos_qstart %d >= splice_qpos_qend %d + %d, so trying to find a middle exon\n",
+		  splice_qpos_qstart,splice_qpos_qend,MIN_EXONLEN));
+
+    if (plusp == true) {
+      n_middle_univdiagonals =
+	Spliceends_middle_plus(&middle_univdiagonals,
+			       stage1,streamspace_max_alloc,streamspace_alloc,
+			       /*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
+			       /*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
+			       query_compress,queryptr,
+			       univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			       localdb_nmismatches_allowed);
+      /* mismatch_positions_left is ascending */
+      /* mismatch_positions_right is descending */
+
+    } else {
+      n_middle_univdiagonals =
+	Spliceends_middle_minus(&middle_univdiagonals,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				/*qstart*/splice_qpos_qend,/*qend*/splice_qpos_qstart,querylength,
+				/*low_univdiagonal*/univdiagonal_i + 1,/*high_univdiagonal*/univdiagonal_j - 1,
+				query_compress,queryptr,
+				univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				localdb_nmismatches_allowed);
+    }
+
+
+    debug1(printf("The two ends cannot meet, and with knownsplicing trying to find a middle exon\n"));
+    if (n_middle_univdiagonals == 0) {
+      /* Skip: middle_univdiagonals is unassigned */
+
+    } else {
+      if (plusp == true) {
+	/* Skip */
+	check_ascending(mismatch_positions_left,nmismatches_left);
+	check_descending(mismatch_positions_right,nmismatches_right);
+
+      } else if (invertedp == true) {
+	/* Already inverted */
+	check_descending(mismatch_positions_left,nmismatches_left);
+	check_ascending(mismatch_positions_right,nmismatches_right);
+
+      } else {
+	invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+	invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+	invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+	invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+
+	check_descending(mismatch_positions_left,nmismatches_left);
+	check_ascending(mismatch_positions_right,nmismatches_right);
+
+	invertedp = true;
+      }
+      
+      if ((middle_univdiagonal =
+	   find_middle_exon(&typei,&typej,&splice_qpos_i,&splice_qpos_j,
+			    &best_nmismatches_i,&nmismatches_middle,&best_nmismatches_j,
+			    &best_ref_nmismatches_i,&ref_nmismatches_middle,&best_ref_nmismatches_j,
+			    &best_donor1_prob,&best_acceptor1_prob,
+			    &best_donor2_prob,&best_acceptor2_prob,
+			    middle_univdiagonals,n_middle_univdiagonals,univdiagonal_i,univdiagonal_j,
+			    pos5,pos3,/*splice_qpos_5*/splice_qpos_qend,/*splice_qpos_3*/splice_qpos_qstart,querylength,
+			    
+			    mismatch_positions_left,nmismatches_left,
+			    mismatch_positions_right,nmismatches_right,
+			    
+			    segmenti_sites,segmentj_sites,
+			    segmenti_types,segmentj_types,
+			    segmenti_probs,segmentj_probs,
+			    segmenti_nsites,segmentj_nsites,
+			    
+			    query_compress,chroffset,spliceinfo,knownsplicing,intlistpool,
+			    plusp,sense_forward_p,genestrand)) != 0) {
+	/* find_middle_exon returns values as qpos, not querypos */
+	debug1(printf("(1) Splice_resolve_qend (%s): found a middle exon %u at splice qpos %d and %d\n",
+		      sensedir == SENSE_FORWARD ? "sense" : "antisense",
+		      middle_univdiagonal,splice_qpos_i,splice_qpos_j));
+
+	FREE(middle_univdiagonals);
+	
+#if 0
+	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+							univcoordlistpool_trace(__FILE__,__LINE__));
+	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
+							univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+	*univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+						univcoordlistpool_trace(__FILE__,__LINE__));
+	*univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_j
+						univcoordlistpool_trace(__FILE__,__LINE__));
+#endif
+
+	/* For qend, push i first, then push j */
+#if 0
+	Intlist_head_set(newpath->nmismatches,nmismatches_i);
+	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
+	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
+						intlistpool_trace(__FILE__,__LINE__));
+	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
+						    intlistpool_trace(__FILE__,__LINE__));
+	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
+						intlistpool_trace(__FILE__,__LINE__));
+	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
+						    intlistpool_trace(__FILE__,__LINE__));
+#else    
+	*nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_i
+					intlistpool_trace(__FILE__,__LINE__));
+	*nmismatches = Intlistpool_push(*nmismatches,intlistpool,nmismatches_middle
+					intlistpool_trace(__FILE__,__LINE__));
+	*nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_j
+					intlistpool_trace(__FILE__,__LINE__));
+  
+	*ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_i
+					    intlistpool_trace(__FILE__,__LINE__));
+	*ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,ref_nmismatches_middle
+					    intlistpool_trace(__FILE__,__LINE__));
+	*ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_j
+					    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+	Intlist_head_set(newpath->endpoints,splice_qpos_i);
+	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_j
+					      intlistpool_trace(__FILE__,__LINE__));
+	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3
+					      intlistpool_trace(__FILE__,__LINE__));
+#else
+	*endpoints = Intlistpool_push(NULL,intlistpool,splice_qpos_i
+				      intlistpool_trace(__FILE__,__LINE__));
+	*endpoints = Intlistpool_push(*endpoints,intlistpool,splice_qpos_j
+				      intlistpool_trace(__FILE__,__LINE__));
+	*endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos3
+				      intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+	splice_distance_j = high_univdiagonal - middle_univdiagonal;
+	splice_distance_i = middle_univdiagonal - univdiagonal;
+    
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_splice(splice_distance_i,sensedir,
+									donor1_prob,acceptor1_prob,
+									pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_splice(splice_distance_j,sensedir,
+									donor2_prob,acceptor2_prob,
+									pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+#else
+	splice_distance_j = univdiagonal_j - middle_univdiagonal;
+	splice_distance_i = middle_univdiagonal - univdiagonal_i;
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_splice(splice_distance_i,sensedir,
+								best_donor2_prob,best_acceptor2_prob,
+								pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_splice(splice_distance_j,sensedir,
+								best_donor1_prob,best_acceptor1_prob,
+								pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+#endif
+    
+	return 2;
+
+      } else {
+	FREE(middle_univdiagonals);
+	/* Proceed below */
+      }
+    }
+  }
+
+  debug1(printf("(1) Before spliceindel_resolve, have splice_qpos %d, nsites %d and %d, probs %f vs %f and %f vs %f\n",
+		best_splice_qpos,segmenti_nsites,segmentj_nsites,
+		best_donor1_prob,optimal_donor1_prob,best_acceptor2_prob,optimal_acceptor2_prob));
+  if (allow_indels_p == false) {
+    /* Skip */
+    debug1(printf("(1) Indels not allowed\n"));
+
+  } else if (segmenti_nsites == 0 || segmentj_nsites == 0) {
+    debug1(printf("Cannot call spliceindel_resolve because nsites %d and %d\n",
+		  segmenti_nsites,segmentj_nsites));
+
+  } else if (best_donor1_prob == optimal_donor1_prob && best_acceptor2_prob == optimal_acceptor2_prob) {
+    debug1(printf("No need to call spliceindel_resolve because exact probs are optimal\n"));
+    
+  } else {
+    /* Try splice plus indel */
+
+    if (invertedp == true) {
+      /* Computes in qpos, not querypos, so undo inversions */
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+      invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+      invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+      invertedp = false;
+    }
+
+    debug1(printf("For comparison, exact nmismatches are %d + %d\n",
+		  best_nmismatches_i,best_nmismatches_j));
+    if ((splice_qpos =
+	 spliceindel_resolve(&type,&spliceindel_trimpos5,&spliceindel_trimpos3,&nindels,&indel_pos,
+			     &spliceindel_nmismatches_i,&spliceindel_nmismatches_j,&nmismatches_indel,
+			     &spliceindel_ref_nmismatches_i,&spliceindel_ref_nmismatches_j,
+			     &ref_nmismatches_indel,
+			     &spliceindel_donor1_prob,&spliceindel_acceptor2_prob,
+			     
+			     univdiagonal_i,univdiagonal_j,
+			     query_compress,plusp,chroffset,chrhigh,
+			     
+			     mismatch_positions_left,nmismatches_left,
+			     mismatch_positions_right,nmismatches_right,
+			     
+			     segmenti_sites,segmentj_sites,segmenti_types,segmentj_types,
+			     segmenti_probs,segmentj_probs,segmenti_nsites,segmentj_nsites,
+			     optimal_segmenti_prob,optimal_segmentj_prob,
+			     
+			     pos5,pos3,querylength,indelinfo,sense_forward_p,genestrand,
+			     trim5p,trim3p)) <= 0) {
+      /* No spliceindel found */
+      debug1(printf("Splice_resolve_qend: No spliceindel found\n"));
+
+    } else if (best_splice_qpos > 0 &&
+	       spliceindel_nmismatches_i + nmismatches_indel + spliceindel_nmismatches_j >=
+	       best_nmismatches_i + best_nmismatches_j) {
+      /* Spliceindel not as good as exact splice */
+      debug1(printf("Splice_resolve_qend: Spliceindel not as good as exact splice\n"));
+
+    } else if (abs(splice_qpos - indel_pos) - 4*nmismatches_indel < 0) {
+      debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
+		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
+		    best_nmismatches_i,best_nmismatches_j));
+      debug1(printf("Splice_resolve_qend: Indel segment has too many mismatches\n"));
+      /* Fall through to atypical splice */
+
+    } else {
+      debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
+		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
+		    best_nmismatches_i,best_nmismatches_j));
+      debug1(printf("Splice_resolve_qend: Spliceindel acceptable\n"));
+
+      /* best_type = type; */
+      trimpos5 = spliceindel_trimpos5;
+      trimpos3 = spliceindel_trimpos3;
+      best_nindels = nindels;
+      best_indel_pos = indel_pos;
+      best_nmismatches_i = spliceindel_nmismatches_i;
+      best_nmismatches_indel = nmismatches_indel;
+      best_nmismatches_j = spliceindel_nmismatches_j;
+      best_ref_nmismatches_i = spliceindel_ref_nmismatches_i;
+      best_ref_nmismatches_indel = ref_nmismatches_indel;
+      best_ref_nmismatches_j = spliceindel_ref_nmismatches_j;
+      best_donor1_prob = spliceindel_donor1_prob;
+      best_acceptor2_prob = spliceindel_acceptor2_prob;
+      best_splice_qpos = splice_qpos;
+    }
+  }
+
+#if 0
+  if (best_splice_qpos <= 0) {
+    /* Try atypical splicing */
+    debug1(printf("Computing splice sites\n"));
+    
+    /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
+    if (plusp == true) {
+      /* Skip */
+    } else if (invertedp == true) {
+      /* Skip */
+    } else {
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+      invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+      invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+      invertedp = true;
+    }
+    
+    debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
+
+    if (splice_qpos_i_low < splice_qpos_j_low) {
+      splice_qpos_qstart = splice_qpos_i_low;
+    } else {
+      splice_qpos_qstart = splice_qpos_j_low;
+    }
+
+    if (splice_qpos_i_high > splice_qpos_j_high) {
+      splice_qpos_qend = splice_qpos_i_high;
+    } else {
+      splice_qpos_qend = splice_qpos_j_high;
+    }
+
+    if (sense_forward_p == true) {
+      if (plusp == true) {
+	/* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
+	best_splice_querypos =
+	  atypical_sense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*D*/&best_nmismatches_i,/*A*/&best_nmismatches_j,
+			 /*D*/&best_ref_nmismatches_i,/*A*/&best_ref_nmismatches_j,
+			 /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
+			 /*plusDp*/true,/*plusAp*/true,querylength,
+			 /*donor*/mismatch_positions_left,nmismatches_left,
+			 /*acceptor*/mismatch_positions_right,nmismatches_right,
+			 /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
+	  
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = best_splice_querypos;
+	}
+
+      } else {
+	/* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+	best_splice_querypos =
+	  atypical_sense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			 /*D*/&best_nmismatches_j,/*A*/&best_nmismatches_i,
+			 /*D*/&best_ref_nmismatches_j,/*A*/&best_ref_nmismatches_i,
+			 /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
+			 /*plusDp*/false,/*plusAp*/false,querylength,
+			 /*donor*/mismatch_positions_right,nmismatches_right,
+			 /*acceptor*/mismatch_positions_left,nmismatches_left,
+			 /*splice_querypos_low*/querylength - splice_qpos_qend,
+			 /*splice_querypos_high*/querylength - splice_qpos_qstart);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = querylength - best_splice_querypos;
+	}
+      }
+
+    } else {
+      if (plusp == true) {
+	/* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+	best_splice_querypos =
+	  atypical_antisense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			     /*A*/&best_nmismatches_i,/*D*/&best_nmismatches_j,
+			     /*A*/&best_ref_nmismatches_i,/*D*/&best_ref_nmismatches_j,
+			     /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
+			     /*plusAp*/true,/*plusDp*/true,querylength,
+			     /*acceptor*/mismatch_positions_left,nmismatches_left,
+			     /*donor*/mismatch_positions_right,nmismatches_right,
+			     /*splice_querypos_low*/splice_qpos_qstart,/*splice_querypos_high*/splice_qpos_qend);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = best_splice_querypos;
+	}
+
+      } else {
+	/* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
+	best_splice_querypos =
+	  atypical_antisense(&donor1,&donor2,&acceptor1,&acceptor2,&best_donor1_prob,&best_acceptor2_prob,
+			     /*A*/&best_nmismatches_j,/*D*/&best_nmismatches_i,
+			     /*A*/&best_ref_nmismatches_j,/*D*/&best_ref_nmismatches_i,
+			     /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
+			     /*plusAp*/false,/*plusDp*/false,querylength,
+			     /*acceptor*/mismatch_positions_right,nmismatches_right,
+			     /*donor*/mismatch_positions_left,nmismatches_left,
+			     /*splice_querypos_low*/querylength - splice_qpos_qend,
+			     /*splice_querypos_high*/querylength - splice_qpos_qstart);
+
+	if (best_splice_querypos <= 0) {
+	  best_splice_qpos = -1;
+	} else {
+	  best_splice_qpos = querylength - best_splice_querypos;
+	}
+      }
+    }
+  }    
+#endif
+
+
+#if 0
+  lefti = 0;
+  while (lefti < nmismatches_left && mismatch_positions_left[lefti] < best_splice_qpos) {
+    lefti++;
+  }
+  best_nmismatches_i = best_ref_nmismatches_i = lefti;
+  
+  righti = 0;
+  while (righti < nmismatches_right && mismatch_positions_right[righti] >= best_splice_qpos) {
+    righti++;
+  }
+  best_nmismatches_j = best_ref_nmismatches_j = righti;
+#endif
+
+
+  if (best_splice_qpos <= 0) {
+    assert(middle_univdiagonal == 0);
+    return 0;			/* Fail */
+
+  } else {
+#if 0
+    if (plusp == sense_forward_p) {
+      best_probi = best_donor1_prob;
+      best_probj = best_acceptor2_prob;
+    } else {
+      best_probi = best_acceptor2_prob;
+      best_probj = best_donor1_prob;
+    }
+#endif
+    debug1(printf("donor1 %f, acceptor2 %f\n",best_donor1_prob,best_acceptor2_prob));
+
+    /* Check that the exon-intron boundaries are okay */
+    if (invertedp == true) {
+      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+    }
+
+#ifdef DEBUG1
+    printf("Checking bounds\n");
+    printf("%d mismatches on left:",nmismatches_left);
+    for (int i = 0; i <= nmismatches_left; i++) {
+      printf(" %d",mismatch_positions_left[i]);
+    }
+    printf("\n");
+
+    printf("%d mismatches on right:",nmismatches_right);
+    for (int i = 0; i <= nmismatches_right; i++) {
+      printf(" %d",mismatch_positions_right[i]);
+    }
+    printf("\n");
+#endif
+
+    supporti = best_splice_qpos - trimpos5;
+    supportj = trimpos3 - best_splice_qpos;
+
+#ifdef USE_TEST1
+    /* Benchmarking indicates this is generally worse, except cases of high sequence error */
+    if (best_nindels == 0) {
+      endpoint_i = endpoint_j = best_splice_qpos;
+    } else if (best_splice_qpos < best_indel_pos) {
+      endpoint_i = best_splice_qpos;
+      endpoint_j = best_indel_pos;
+    } else {
+      endpoint_i = best_indel_pos;
+      endpoint_j = best_splice_qpos;
+    }
+
+    /* Test 1 */
+    if (endpoint_i <= splice_qpos_qend) {
+      nmatches_trim_i = 1;
+      nmismatches_trim_i = 0;
+    } else {
+      nmismatches_trim_i =
+	Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					      query_compress,/*univdiagonal*/univdiagonal_i,querylength,
+					      /*pos5*/splice_qpos_qend,/*pos3*/endpoint_i,
+					      plusp,genestrand);
+      nmatches_trim_i = (endpoint_i - splice_qpos_qend) - nmismatches_trim_i;
+    }
+
+    if (endpoint_j >= splice_qpos_qstart) {
+      nmatches_trim_j = 1;
+      nmismatches_trim_j = 0;
+    } else {
+      nmismatches_trim_j =
+	Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					      query_compress,/*univdiagonal*/univdiagonal_j,querylength,
+					      /*pos5*/endpoint_j,/*pos3*/splice_qpos_qstart,
+					      plusp,genestrand);
+      nmatches_trim_j = (splice_qpos_qstart - endpoint_j) - nmismatches_trim_j;
+    }
+
+    debug1(printf("Solution has %d matches and %d mismatches in trim_i\n",
+		  nmatches_trim_i,nmismatches_trim_i));
+    debug1(printf("Solution has %d matches and %d mismatches in trim_j\n",
+		  nmatches_trim_j,nmismatches_trim_j));
+
+    if (nmismatches_trim_i >= nmatches_trim_i) {
+      return 0;
+
+    } else if (nmismatches_trim_j >= nmatches_trim_j) {
+      return 0;
+    }
+#endif
+
+    /* Test 2 */
+    /* Eventually want this */
+    /* See what happens we continue on univdiagonal_i */
+    score_splice = (supportj - best_nmismatches_j) - best_nmismatches_j;
+
+    nmismatches_stay =
+      Genomebits_count_mismatches_substring(&ignore,genomebits,genomebits_alt,
+					    query_compress,/*univdiagonal*/univdiagonal_i,querylength,
+					    /*pos5*/best_splice_qpos,/*pos3*/trimpos3,
+					    plusp,genestrand);
+    nmatches_stay = (trimpos3 - best_splice_qpos) - nmismatches_stay;
+    score_stay = nmatches_stay - nmismatches_stay;
+    debug1(printf("splice_qpos %d is outside transition %d..%d.  Staying on univdiagonal_j yields %d matches and %d mismatches => score %d vs splice score %d\n",
+		  best_splice_qpos,splice_qpos_qend,splice_qpos_qstart,nmatches_stay,nmismatches_stay,score_stay,score_splice));
+    if (score_stay >= score_splice - 6) {
+      debug1(printf("Splice_resolve_qend: Okay to stay on univdiagonal_i\n\n"));
+      return 0;
+    }
+
+    if (Splice_accept_p(best_splice_qpos,querylength,
+			       best_donor1_prob,best_acceptor2_prob,
+			       univdiagonal_i,univdiagonal_j,
+			       supporti,best_nmismatches_i,supportj,best_nmismatches_j,
+			       plusp,sense_forward_p,innerp) == false) {
+      debug1(printf("Splice_resolve_qend on dist %u rejecting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f, based on probs\n\n",
+		    /*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,
+		    supportj,best_nmismatches_j,best_acceptor2_prob));
+      assert(middle_univdiagonal == 0);
+      return 0;		/* Fail */
+
+#if 1
+    } else if (cont_trimpos >= 0 &&
+	       trimpos3 - best_nmismatches_i - best_nmismatches_j - best_nmismatches_indel <= cont_trimpos - cont_nmismatches) {
+      debug1(printf("Solution yields fewer matches than continuation: %d - %d - %d - %d vs %d - %d\n\n",
+		    trimpos3,best_nmismatches_i,best_nmismatches_j,best_nmismatches_indel,cont_trimpos,cont_nmismatches));
+      return 0;
+#endif
+
+    } else if (best_nindels == 0) {
+      /* Splice only */
+      debug1(printf("(2) Splice_resolve_qend (%s) on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",/*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+      
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,univdiagonal_j
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+
+      /* For qend, push i first, then push j */
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos3
+				    intlistpool_trace(__FILE__,__LINE__));
+      
+      splice_distance = univdiagonal_j - univdiagonal_i;
+      *junctions = Listpool_push(NULL,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+
+      return 1;			/* 1 segment */
+      
+    } else if (best_indel_pos < best_splice_qpos) {
+      /* Push indel (based on left) then splice.  indel is medial, splice is distal. */
+      debug1(printf("(3) Splice_resolve_qend (%s) on dist %u accepting splice pos %d, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",/*splice_distance*/univdiagonal_j - univdiagonal_i,
+		    best_splice_qpos,best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+
+#if 0
+      middle_univdiagonal = univdiagonal + nindels; /* nindels = middle_univdiagonal - univdiagonal */
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+      middle_univdiagonal = univdiagonal_i + nindels;
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+      *univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_j
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+#endif      
+
+      /* For qend, push i first, then push j */
+#if 0
+      Intlist_head_set(newpath->nmismatches,nmismatches_i);
+      Intlist_head_set(newpath->ref_nmismatches,nmismatches_i);
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
+						  intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
+						  intlistpool_trace(__FILE__,__LINE__));
+#else
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_indel
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+				      
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_indel
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+#endif
+      
+#if 0
+      Intlist_head_set(newpath->endpoints,indel_pos);
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
+					    intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
+					    intlistpool_trace(__FILE__,__LINE__));
+#else      
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_indel_pos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos3
+				    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      /* Indel first */
+      if (nindels < 0) {
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_insertion(-nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      } else {
+	/* deletionpos = left + indel_pos; -- qend; do not add splice_distance if indel first */
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_deletion(nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      }
+      
+      /* Splice second */
+      splice_distance = high_univdiagonal - middle_univdiagonal;
+      newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					 (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
+								      donor1_prob,acceptor2_prob,pathpool)
+					 listpool_trace(__FILE__,__LINE__));
+#else
+      if (best_nindels < 0) {
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_insertion(-best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      } else {
+	*junctions = Listpool_push(NULL,listpool,
+				   (void *) Junction_new_deletion(best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      }
+	  
+      splice_distance = univdiagonal_j - middle_univdiagonal;
+      *junctions = Listpool_push(*junctions,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+#endif
+
+      return 2;			/* 2 segments */
+      
+    } else {
+      /* Push splice then indel (based on high_univdiagonal).  splice is medial, indel is distal. */
+      debug1(printf("(4) Splice_resolve_qend (%s) on dist %u accepting splice pos %d, distance %u, nindels %d (%s), indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
+		    sensedir == SENSE_FORWARD ? "sense" : "antisense",
+		    /*dist*/univdiagonal_j - univdiagonal_i,best_splice_qpos,
+		    /*splice_distance*/ middle_univdiagonal - univdiagonal_i,
+		    best_nindels,(best_nindels < 0) ? "insertion" : (best_nindels > 0) ? "deletion" : "",
+		    best_indel_pos,supporti,best_nmismatches_i,best_donor1_prob,supportj,best_nmismatches_j,best_acceptor2_prob));
+
+#if 0
+      middle_univdiagonal = high_univdiagonal - nindels; /* nindels = high_univdiagonal - middle_univdiagonal */
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+      newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
+						      univcoordlistpool_trace(__FILE__,__LINE__));
+#else
+      middle_univdiagonal = univdiagonal_j - nindels;  /* nindels = middle_univdiagonal - low_univdiagonal */
+      *univdiagonals = Univcoordlistpool_push(NULL,univcoordlistpool,middle_univdiagonal
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+      *univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,univdiagonal_j
+					      univcoordlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      Intlist_head_set(newpath->nmismatches,nmismatches_i);
+      Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_indel
+						  intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
+					      intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
+						  intlistpool_trace(__FILE__,__LINE__));
+#else      
+      *nmismatches = Intlistpool_push(NULL,intlistpool,best_nmismatches_i
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_indel
+				      intlistpool_trace(__FILE__,__LINE__));
+      *nmismatches = Intlistpool_push(*nmismatches,intlistpool,best_nmismatches_j
+				      intlistpool_trace(__FILE__,__LINE__));
+      
+      *ref_nmismatches = Intlistpool_push(NULL,intlistpool,best_ref_nmismatches_i
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_indel
+					  intlistpool_trace(__FILE__,__LINE__));
+      *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,best_ref_nmismatches_j
+					  intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0
+      Intlist_head_set(newpath->endpoints,splice_qpos);
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
+					    intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
+					    intlistpool_trace(__FILE__,__LINE__));
+#else
+      *endpoints = Intlistpool_push(NULL,intlistpool,best_splice_qpos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,best_indel_pos
+				    intlistpool_trace(__FILE__,__LINE__));
+      *endpoints = Intlistpool_push(*endpoints,intlistpool,trimpos3
+				    intlistpool_trace(__FILE__,__LINE__));
+#endif
+
+#if 0      
+      /* Splice first */
+      splice_distance = middle_univdiagonal - univdiagonal;
+      newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					 (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
+								      donor1_prob,acceptor2_prob,pathpool)
+					 listpool_trace(__FILE__,__LINE__));
+      
+      /* Indel second */
+      if (nindels < 0) {
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_insertion(-nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      } else {
+	/* deletionpos = left + splice_distance + indel_pos; -- qend; add splice_distance if indel second */
+	newpath->junctions = Listpool_push(newpath->junctions,listpool,
+					   (void *) Junction_new_deletion(nindels,pathpool)
+					   listpool_trace(__FILE__,__LINE__));
+      }
+#else
+      splice_distance = middle_univdiagonal - univdiagonal_i;
+      *junctions = Listpool_push(NULL,listpool,
+				 (void *) Junction_new_splice(splice_distance,sensedir,
+							      best_donor1_prob,best_acceptor2_prob,pathpool)
+				 listpool_trace(__FILE__,__LINE__));
+      
+      if (best_nindels < 0) {
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_insertion(-best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      } else {
+	*junctions = Listpool_push(*junctions,listpool,
+				   (void *) Junction_new_deletion(best_nindels,pathpool)
+				   listpool_trace(__FILE__,__LINE__));
+      }
+#endif
+      
+      return 2;		/* 2 segments */
+    }
+  }
+}
+
+
+#if 1
 /* Called by Path_qstart_resolve and Path_qend_resolve */
 int
 Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, int *supportj,
@@ -3533,7 +6141,7 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
   Genome_fill_buffer(univdiagonal_j - querylength,querylength,gbuffer2);
   char *queryseq = Compress_queryseq(query_compress,querylength);
 
-  printf("Splice_resolve, plusp %d: Getting genome at left %llu and %llu\n",
+  printf("Splice_nomiddle, plusp %d: Getting genome at left %llu and %llu\n",
 	 plusp,(unsigned long long) segmenti_left,(unsigned long long) segmentj_left);
   printf("g1: %s\n",gbuffer1);
   printf("    ");
@@ -3549,6 +6157,14 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
   FREE(gbuffer1);
 #endif
 
+
+#if 0
+  printf("Splice_nomiddle computing %d..%d and %d..%d\n",
+	 /*splice_qpos_low*/subtract_bounded(splice_qpos_high,EXTRA_MATCHES,pos5 + 1),
+	 /*splice_qpos_high*/add_bounded(splice_qpos_high,EXTRA_MISMATCHES,pos3 - 1),
+	 /*splice_qpos_low*/subtract_bounded(splice_qpos_low,EXTRA_MISMATCHES,pos5 + 1),
+	 /*splice_qpos_high*/add_bounded(splice_qpos_low,EXTRA_MATCHES,pos3 - 1));
+#endif
 
   if (plusp == sense_forward_p) {
     /* geneplus */
@@ -3592,118 +6208,125 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
   }
 
 
+#if 0
+  /* This code is specific to Splice_nomiddle, and not in Splice_resolve_qstart or Splice_resolve_qend */
   if (splice_qpos_low >= splice_qpos_high + MIN_EXONLEN) {
     /* Not allowing for middle exons */
+    debug1(printf("Since splice_qpos_low %d >= splice_qpos_high %d + MIN_EXONLEN %d, returning -1\n",
+		  splice_qpos_low,splice_qpos_high,MIN_EXONLEN));
     return -1;
   } else {
     best_splice_qpos = -1;
   }
+#else
+  best_splice_qpos = -1;
+#endif
 
-  if (splice_qpos_low <= splice_qpos_high + MISMATCHES_AT_SITE) {
-    /* Try standard splicing */
-    debug1(printf("Computing splice sites\n"));
+  /* Splice_nomiddle required splice_qpos_low <= splice_qpos_high + MISMATCHES_AT_SITE */
+  
+  /* Try standard splicing */
+  debug1(printf("Computing splice sites\n"));
     
-    /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
-    if (plusp == false) {
-      invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
-      invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
-      invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
-      invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
-      invertedp = true;
-    }
+  /* Convert from qpos to querypos before calling splice_sense or splice_antisense */
+  if (plusp == false) {
+    invert_mismatch_positions(mismatch_positions_left,nmismatches_left,querylength);
+    invert_mismatch_positions(mismatch_positions_right,nmismatches_right,querylength);
+    invert_sites(segmenti_sites,segmenti_types,segmenti_probs,segmenti_nsites,querylength);
+    invert_sites(segmentj_sites,segmentj_types,segmentj_probs,segmentj_nsites,querylength);
+    invertedp = true;
+  }
     
-    debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
+  debug1(printf("plusp %d, sense_forward_p %d\n",plusp,sense_forward_p));
 
-    if (sense_forward_p == true) {
-      if (plusp == true) {
-	/* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
-	best_splice_querypos =
-	  splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
-		       /*D*/&(*best_nmismatches_i),/*A*/&(*best_nmismatches_j),
-		       /*D*/&(*best_ref_nmismatches_i),/*A*/&(*best_ref_nmismatches_j),
-		       /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
-		       /*plusDp*/true,/*plusAp*/true,querylength,
-		       /*donor*/mismatch_positions_left,/*donor*/nmismatches_left,
-		       /*acceptor*/mismatch_positions_right,/*acceptor*/nmismatches_right,
-		       /*D*/segmenti_sites,/*A*/segmentj_sites,
-		       /*D*/segmenti_types,/*A*/segmentj_types,
-		       /*D*/segmenti_probs,/*A*/segmentj_probs,
-		       /*D*/segmenti_nsites,/*A*/segmentj_nsites);
-	
-	if (best_splice_querypos <= 0) {
-	  best_splice_qpos = -1;
-	} else {
-	  best_splice_qpos = best_splice_querypos;
-	  *best_type = type;
-	}
-
+  if (sense_forward_p == true) {
+    if (plusp == true) {
+      /* sense, gplus: geneplus.  donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
+		     /*D*/&(*best_nmismatches_i),/*A*/&(*best_nmismatches_j),
+		     /*D*/&(*best_ref_nmismatches_i),/*A*/&(*best_ref_nmismatches_j),
+		     /*D*/univdiagonal_i,/*A*/univdiagonal_j,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/true,/*plusAp*/true,querylength,
+		     /*donor*/mismatch_positions_left,/*donor*/nmismatches_left,
+		     /*acceptor*/mismatch_positions_right,/*acceptor*/nmismatches_right,
+		     /*D*/segmenti_sites,/*A*/segmentj_sites,
+		     /*D*/segmenti_types,/*A*/segmentj_types,
+		     /*D*/segmenti_probs,/*A*/segmentj_probs,
+		     /*D*/segmenti_nsites,/*A*/segmentj_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
       } else {
-	/* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
-	best_splice_querypos =
-	  splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
-		       /*D*/&(*best_nmismatches_j),/*A*/&(*best_nmismatches_i),
-		       /*D*/&(*best_ref_nmismatches_j),/*A*/&(*best_ref_nmismatches_i),
-		       /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
-		       /*plusDp*/false,/*plusAp*/false,querylength,
-		       /*donor*/mismatch_positions_right,/*donor*/nmismatches_right,
-		       /*acceptor*/mismatch_positions_left,/*acceptor*/nmismatches_left,
-		       /*D*/segmentj_sites,/*A*/segmenti_sites,
-		       /*D*/segmentj_types,/*A*/segmenti_types,
-		       /*D*/segmentj_probs,/*A*/segmenti_probs,
-		       /*D*/segmentj_nsites,/*A*/segmenti_nsites);
-
-	if (best_splice_querypos <= 0) {
-	  best_splice_qpos = -1;
-	} else {
-	  best_splice_qpos = querylength - best_splice_querypos;
-	  *best_type = type;
-	}
+	best_splice_qpos = best_splice_querypos;
+	*best_type = type;
       }
 
     } else {
-      if (plusp == true) {
-	/* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
-	best_splice_querypos =
-	  splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
-			   /*A*/&(*best_nmismatches_i),/*D*/&(*best_nmismatches_j),
-			   /*A*/&(*best_ref_nmismatches_i),/*D*/&(*best_ref_nmismatches_j),
-			   /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
-			   /*plusAp*/plusp,/*plusDp*/plusp,querylength,
-			   /*acceptor*/mismatch_positions_left,nmismatches_left,
-			   /*donor*/mismatch_positions_right,nmismatches_right,
-			   /*A*/segmenti_sites,/*D*/segmentj_sites,
-			   /*A*/segmenti_types,/*D*/segmentj_types,
-			   /*A*/segmenti_probs,/*D*/segmentj_probs,
-			   /*A*/segmenti_nsites,/*D*/segmentj_nsites);
-
-	if (best_splice_querypos <= 0) {
-	  best_splice_qpos = -1;
-	} else {
-	  best_splice_qpos = best_splice_querypos;
-	  *best_type = type;
-	}
-
+      /* sense, gminus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_sense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
+		     /*D*/&(*best_nmismatches_j),/*A*/&(*best_nmismatches_i),
+		     /*D*/&(*best_ref_nmismatches_j),/*A*/&(*best_ref_nmismatches_i),
+		     /*D*/univdiagonal_j,/*A*/univdiagonal_i,/*D*/chroffset,/*A*/chroffset,
+		     /*plusDp*/false,/*plusAp*/false,querylength,
+		     /*donor*/mismatch_positions_right,/*donor*/nmismatches_right,
+		     /*acceptor*/mismatch_positions_left,/*acceptor*/nmismatches_left,
+		     /*D*/segmentj_sites,/*A*/segmenti_sites,
+		     /*D*/segmentj_types,/*A*/segmenti_types,
+		     /*D*/segmentj_probs,/*A*/segmenti_probs,
+		     /*D*/segmentj_nsites,/*A*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
       } else {
-	/* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
-	best_splice_querypos =
-	  splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
-			   /*A*/&(*best_nmismatches_j),/*D*/&(*best_nmismatches_i),
-			   /*A*/&(*best_ref_nmismatches_j),/*D*/&(*best_ref_nmismatches_i),
-			   /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
-			   /*plusAp*/false,/*plusDp*/false,querylength,
-			   /*acceptor*/mismatch_positions_right,nmismatches_right,
-			   /*donor*/mismatch_positions_left,nmismatches_left,
-			   /*A*/segmentj_sites,/*D*/segmenti_sites,
-			   /*A*/segmentj_types,/*D*/segmenti_types,
-			   /*A*/segmentj_probs,/*D*/segmenti_probs,
-			   /*A*/segmentj_nsites,/*D*/segmenti_nsites);
-
-	if (best_splice_querypos <= 0) {
-	  best_splice_qpos = -1;
-	} else {
-	  best_splice_qpos = querylength - best_splice_querypos;
-	  *best_type = type;
-	}
+	best_splice_qpos = querylength - best_splice_querypos;
+	*best_type = type;
+      }
+    }
+    
+  } else {
+    if (plusp == true) {
+      /* antisense, gplus: geneminus.  donor is univdiagonal_j and acceptor is univdiagonal_i */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
+			 /*A*/&(*best_nmismatches_i),/*D*/&(*best_nmismatches_j),
+			 /*A*/&(*best_ref_nmismatches_i),/*D*/&(*best_ref_nmismatches_j),
+			 /*A*/univdiagonal_i,/*D*/univdiagonal_j,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/plusp,/*plusDp*/plusp,querylength,
+			 /*acceptor*/mismatch_positions_left,nmismatches_left,
+			 /*donor*/mismatch_positions_right,nmismatches_right,
+			 /*A*/segmenti_sites,/*D*/segmentj_sites,
+			 /*A*/segmenti_types,/*D*/segmentj_types,
+			 /*A*/segmenti_probs,/*D*/segmentj_probs,
+			 /*A*/segmenti_nsites,/*D*/segmentj_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = best_splice_querypos;
+	*best_type = type;
+      }
+      
+    } else {
+      /* antisense, gminus: geneplus, donor is univdiagonal_i and acceptor is univdiagonal_j */
+      best_splice_querypos =
+	splice_antisense(&type,&donor1,&donor2,&acceptor1,&acceptor2,&(*best_donor_prob),&(*best_acceptor_prob),
+			 /*A*/&(*best_nmismatches_j),/*D*/&(*best_nmismatches_i),
+			 /*A*/&(*best_ref_nmismatches_j),/*D*/&(*best_ref_nmismatches_i),
+			 /*A*/univdiagonal_j,/*D*/univdiagonal_i,/*A*/chroffset,/*D*/chroffset,
+			 /*plusAp*/false,/*plusDp*/false,querylength,
+			 /*acceptor*/mismatch_positions_right,nmismatches_right,
+			 /*donor*/mismatch_positions_left,nmismatches_left,
+			 /*A*/segmentj_sites,/*D*/segmenti_sites,
+			 /*A*/segmentj_types,/*D*/segmenti_types,
+			 /*A*/segmentj_probs,/*D*/segmenti_probs,
+			 /*A*/segmentj_nsites,/*D*/segmenti_nsites);
+      
+      if (best_splice_querypos <= 0) {
+	best_splice_qpos = -1;
+      } else {
+	best_splice_qpos = querylength - best_splice_querypos;
+	*best_type = type;
       }
     }
   }
@@ -3758,22 +6381,25 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
 			     pos5,pos3,querylength,indelinfo,sense_forward_p,genestrand,
 			     trim5p,trim3p)) <= 0) {
       /* No spliceindel found */
+      debug1(printf("Splice_nomiddle: No spliceindel found\n"));
 
     } else if (best_splice_qpos > 0 &&
 	       spliceindel_nmismatches_i + nmismatches_indel + spliceindel_nmismatches_j >=
 	       *best_nmismatches_i + *best_nmismatches_j) {
       /* Spliceindel not as good as exact splice */
+      debug1(printf("Splice_nomiddle: Spliceindel not as good as exact splice\n"));
 
     } else if (abs(splice_qpos - indel_pos) - 4*nmismatches_indel < 0) {
       debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
 		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
 		    *best_nmismatches_i,*best_nmismatches_j));
-      debug1(printf("Indel segment has too many mismatches\n"));
+      debug1(printf("Splice_nomiddle: Indel segment has too many mismatches\n"));
 
     } else {
       debug1(printf("Have nmismatches %d + %d + %d vs %d vs %d\n",
 		    spliceindel_nmismatches_i,nmismatches_indel,spliceindel_nmismatches_j,
 		    *best_nmismatches_i,*best_nmismatches_j));
+      debug1(printf("Splice_nomiddle: Spliceindel acceptable\n"));
 
       *best_type = type;
       *trimpos5 = spliceindel_trimpos5;
@@ -3937,9 +6563,10 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
 #endif
 
     /* This procedure is called for transcriptome-guided paths, but we still want to check for correctness */
-    if (Splice_accept_p(best_probi,best_probj,/*splice_distance*/univdiagonal_j - univdiagonal_i,
+    if (Splice_accept_p(best_splice_qpos,querylength,
+			best_probi,best_probj,univdiagonal_i,univdiagonal_j,
 			*supporti,*best_nmismatches_i,*supportj,*best_nmismatches_j,
-			innerp,/*strictp*/true) == false) {
+			plusp,sense_forward_p,innerp) == false) {
       debug1(printf("Splice_nomiddle on dist %u rejecting splice pos %d, nindels %d, indel pos %d with supporti %d, mismatches %d, probi %f and supportj %d, mismatches %d, probj %f\n\n",
 		    /*splice_distance*/univdiagonal_j - univdiagonal_i,
 		    best_splice_qpos,*best_nindels,*best_indel_pos,*supporti,*best_nmismatches_i,best_probi,
@@ -3955,6 +6582,7 @@ Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, in
     }
   }
 }
+#endif
 
 
 

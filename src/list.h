@@ -1,4 +1,3 @@
-/* $Id: 1757dbc286ece3ade3520754a663cace5377c4c7 $ */
 #ifndef LIST_INCLUDED
 #define LIST_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -29,6 +28,7 @@ extern T List_pop (T list, void **x);
 extern T List_pop_keep (T list, void **x);
 extern void *List_head (T list);
 extern T List_next (T list);
+extern void *List_second_value (T list);
 extern void List_free (T *list);
 extern int List_length (T list);
 extern T List_reverse (T list);
@@ -157,6 +157,11 @@ List_next (T list) {
   }
 }
 
+static inline void *
+List_second_value (T list) {
+  return list->rest->first;
+}
+
 /* extern inline void List_free (T *list); */
 static inline void
 List_free (T *list) {
@@ -240,7 +245,7 @@ List_last_set (T list, void *x);
 extern void *
 List_last_value (T this, T end);
 extern T
-List_last_item (T this, T end);
+List_last_elt (T this, T end);
 extern void *
 List_index (T this, int index);
 extern void

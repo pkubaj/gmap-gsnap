@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: splicetrie_build.c 224705 2021-11-08 16:52:24Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

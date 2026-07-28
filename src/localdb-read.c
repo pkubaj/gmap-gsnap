@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 09d160895b63d0a23e261ab143902118e348c1e0 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -21,12 +20,19 @@ static char rcsid[] = "$Id: 09d160895b63d0a23e261ab143902118e348c1e0 $";
 #include "intersect-uint2.h"
 #include "mergeinfo.h"
 
-#ifndef LARGE_GENOMES
+#include "merge-method.h"
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint4.h"
+#elif defined(USE_SIMD_MERGE)
 #include "merge-diagonals-simd-uint4.h"
-#elif defined(HAVE_AVX512) || defined(HAVE_AVX2)
+#endif
+
+#ifdef LARGE_GENOMES
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint8.h"
+#elif defined(USE_SIMD_MERGE)
 #include "merge-diagonals-simd-uint8.h"
-#else
-#include "merge-diagonals-heap.h"
+#endif
 #endif
 
 
@@ -844,7 +850,7 @@ print_univdiagonals (Univcoord_T *diagonals, int nentries) {
 }
 #endif
 
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG2)
 static void
 print_univdiags (Univdiag_T *univdiags, int nentries) {
   int i;
@@ -1998,11 +2004,16 @@ find_prevalent (int *nloci, Univcoord_T *values, int nvalues, int subopt_count) 
 
 /* Gets positions of 4-mers from low_position to high_position.  We do
    not worry about the small regions */
+
+/* If trim5p or trim3p is true, this indicates where distal trimming
+   can be performed.  Otherwise, medial trimming is not done, since
+   we want to know what that solution yields. */
 static int
 get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdiag_T *univdiags,
-		T this, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
-		Univcoord_T **streamptr_alloc, int *streamsize_alloc, Mergeinfo_T mergeinfo,
+		T this, int streamspace_max_alloc, Univcoord_T *streamspace_alloc, 
+		Univcoord_T **streamptr_alloc, int *streamsize_alloc, int max_nstreams, Mergeinfo_T mergeinfo,
 		char *queryptr, int pos5, int pos3, int querylength,
+		Univcoord_T anchor_univdiagonal,
 		Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		Compress_T query_compress, bool plusp, int genestrand, Genomebits_T genomebits,
 		bool extend5p, bool trim5p, bool trim3p) {
@@ -2030,7 +2041,7 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 #ifdef MEASURE_WHOLE_END
   int best_mismatches, ref_nmismatches, mm;
 #else
-  int matchlength, trimpos5, trimpos3;
+  int matchlength, trimpos5, trimpos3, ninserts;
   int nmismatches_to_trimpos;
   int best_nmatches, nmatches;
 #endif
@@ -2041,6 +2052,9 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 
 
   *trimmedp = false;
+
+  /* This would allow medial trimming, but we want to know what the medial alignment yields */
+  /* trim5p = trim3p = true; */
 
   debug2(printf("Entering get_exhaustive with %.*s\n",pos3-pos5,&(queryptr[pos5])));
   last_space = streamspace_alloc;
@@ -2059,6 +2073,12 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 
   low_regioni = low_position_start/SARRAY16_LENGTH;
   high_regioni = high_position_start/SARRAY16_LENGTH;
+
+  if ((high_regioni - low_regioni + 1) * (pos3 - pos5) > (Univcoord_T) max_nstreams) {
+    debug2(printf("Too many streams from regions (%d) * segment_length (%d).  Would exceed max_nstreams %d\n",
+		  high_regioni - low_regioni + 1,pos3 - pos5,max_nstreams));
+    return 0;
+  }
 
   region_term = low_regioni * SARRAY16_LENGTH;
   for (regioni = low_regioni; regioni <= high_regioni; regioni++) {
@@ -2107,7 +2127,7 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	if (_stream + spacesize >= streamspace_alloc + streamspace_max_alloc) {
 	  /* About to overflow streamspace_alloc, so align instead */
 	  debug2(printf("Space of %d would overflow, so allocating instead\n",spacesize));
-	  MALLOC_ALIGN(_stream,spacesize*sizeof(Univcoord_T));
+	  _stream = (Univcoord_T *) MALLOC_ALIGN(spacesize*sizeof(Univcoord_T));
 	  allocated = List_push(allocated,(void *) _stream);
 	} else {
 	  last_space = _stream;
@@ -2122,8 +2142,8 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	for (ptr = lowi; ptr <= highi; ptr++) {
 	  *out++ = region_term + sasort16[ptr] - pos + querylength; /* diagonal */
 	}
-	debug2(printf("At querypos %d, %d entries\n",pos,streamsize));
-
+	debug2(printf("regioni %u in %u..%u, at querypos %d, %d entries\n",
+		      regioni,low_regioni,high_regioni,pos,streamsize));
 	streami++;
       }
     }
@@ -2174,9 +2194,17 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
   /* Remove repetitive diagonals */
 #ifdef DEBUG2
     printf("\n");
-    printf("%d entries before removing repetitive:",nentries);
+    printf("%d entries before removing repetitive:\n",nentries);
     for (int i = 0; i < nentries; i++) {
-      printf(" %u",merged_start[i]);
+      if (anchor_univdiagonal == 0) {
+	printf(" %u (%u from low_univdiagonal; %u from high_univdiagonal)\n",
+	       merged_start[i],merged_start[i] - low_univdiagonal,high_univdiagonal - merged_start[i]);
+      } else if (extend5p == true) {
+	printf(" %u (%d from anchor_univdiagonal)\n",merged_start[i],anchor_univdiagonal - merged_start[i]);
+      } else {
+	printf(" %u (%d from anchor_univdiagonal)\n",merged_start[i],merged_start[i] - anchor_univdiagonal);
+      }
+
       assert(merged_start[i] >= low_univdiagonal && merged_start[i] <= high_univdiagonal);
     }
     printf("\n");
@@ -2195,38 +2223,59 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
       } else {
 	if (extend5p == true) {
 	  /* Perform medial trim first, where we expect mismatches for an insertion */
+	  /* printf("(3' medial) Comparing %u with %u (%d)\n",(*p),anchor_univdiagonal,anchor_univdiagonal - (*p)); */
+	  if (anchor_univdiagonal == 0 || (*p) <= anchor_univdiagonal) {
+	    ninserts = 0;
+	  } else {
+	    ninserts = (*p) - anchor_univdiagonal;
+	    pos3 -= ninserts;
+	    /* printf("Reducing pos3 by %d: %d..%d\n",ninserts,pos5,pos3); */
+	  }
+
 	  if (trim3p == false) {
+	    trimpos3 = pos3;
+	  } else if (pos5 > pos3) {
+	    /* From modification above for an insertion */
 	    trimpos3 = pos3;
 	  } else {
 	    trimpos3 = Genomebits_trim_qend(&nmismatches_to_trimpos,query_compress,genomebits,
 					    /*univdiagonal*/(*p),querylength,pos5,pos3,plusp,genestrand);
+	    /* printf("(3' medial) pos3 %d, trimpos3 %d\n",pos3,trimpos3); */
 	  }
-      
+
 	  if (trimpos3 <= pos5) {
 	    trimpos5 = pos5;
-	  } else if (trim5p == false) {
-	    trimpos5 = pos5;
 	  } else {
+	    /* Always trim, but check later to see if it was too much */
 	    trimpos5 = Genomebits_trim_qstart(&nmismatches_to_trimpos,query_compress,genomebits,
 					      /*univdiagonal*/(*p),querylength,pos5,trimpos3,plusp,genestrand);
 	  }
 
 	} else {
 	  /* Perform medial trim first, where we expect mismatches for an insertion */
+	  /* printf("(5' medial) Comparing %u with %u (%d)\n",(*p),anchor_univdiagonal,(*p) - anchor_univdiagonal); */
+	  if (anchor_univdiagonal == 0 || (*p) >= anchor_univdiagonal) {
+	    ninserts = 0;
+	  } else {
+	    ninserts = anchor_univdiagonal - (*p);
+	    pos5 += ninserts;
+	    /* printf("Increasing pos5 by %d: %d..%d\n",ninserts,pos5,pos3); */
+	  }
+
 	  if (trim5p == false) {
 	    trimpos5 = pos5;
+	  } else if (pos5 > pos3) {
+	    /* From modification above for an insertion */
+	    trimpos5 = pos5;
 	  } else {
-	    /* printf("Calling Genomebits_trim_qstart with %u, pos5 %d, pos3 %d\n",(*p),pos5,pos3); */
 	    trimpos5 = Genomebits_trim_qstart(&nmismatches_to_trimpos,query_compress,genomebits,
 					      /*univdiagonal*/(*p),querylength,pos5,pos3,plusp,genestrand);
+	    /* printf("(5' medial) pos5 %d, trimpos5 %d\n",pos5,trimpos5); */
 	  }
 
 	  if (trimpos5 >= pos3) {
 	    trimpos3 = pos3;
-	  } else if (trim3p == false) {
-	    trimpos3 = pos3;
 	  } else {
-	    /* printf("Calling Genomebits_trim_qend with %u, trimpos5 %d, pos3 %d\n",(*p),trimpos5,pos3); */
 	    trimpos3 = Genomebits_trim_qend(&nmismatches_to_trimpos,query_compress,genomebits,
 					    /*univdiagonal*/(*p),querylength,trimpos5,pos3,plusp,genestrand);
 	  }
@@ -2236,7 +2285,18 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	  /* Skip */
 	  debug2(printf("%u has trimpos %d..%d\n",(*p),trimpos5,trimpos3));
 
-	} else if ((nmatches = matchlength - nmismatches_to_trimpos) > best_nmatches) {
+#if 0
+	} else if (trim5p == false && trimpos5 - pos5 > 3) {
+	  /* Skip */
+	  debug2(printf("%u has pos5 %d => trimpos5 %d\n",(*p),pos5,trimpos5));
+
+	} else if (trim3p == false && pos3 - trimpos3 > 3) {
+	  /* Skip */
+	  debug2(printf("%u has pos3 %d => trimpos3 %d\n",(*p),pos3,trimpos3));
+#endif
+
+	} else if ((nmatches = matchlength - nmismatches_to_trimpos) > best_nmatches &&
+		   matchlength > (*best_matchlength)) {
 	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => more so resetting q\n",
 			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
 	  /* New winner */
@@ -2254,7 +2314,9 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	    *trimmedp = true;
 	  }
 
+#if 0
 	} else if (nmatches == best_nmatches && matchlength < (*best_matchlength)) {
+	  /* More compact way to achieve best_nmatches */
 	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => shorter so resetting q\n",
 			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
 	  /* New winner */
@@ -2270,10 +2332,11 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	  if (trimpos5 != pos5 || trimpos3 != pos3) {
 	    *trimmedp = true;
 	  }
+#endif
 
-	} else if (nmatches == best_nmatches && matchlength == (*best_matchlength)) {
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => same so saving and advancing q\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
+	} else if (nmatches + ninserts >= best_nmatches || matchlength + ninserts >= (*best_matchlength)) {
+	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d, ninserts %d => same so saving and advancing q\n",
+			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength,ninserts));
 	  univdiag = *q++;
 	  univdiag->univdiagonal = *p;
 	  univdiag->qstart = trimpos5;
@@ -2286,8 +2349,8 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	  }
 	  
 	} else {
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => fewer so skipping\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
+	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d, ninserts %d => fewer so skipping\n",
+			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength,ninserts));
 	  /* Worse */
 	}
       }
@@ -2336,18 +2399,18 @@ int
 Localdb_get (bool *sortedp, bool *trimmedp,
 	     int *matchlength, int *nmismatches, Univdiag_T *univdiags_alloc, 
 	     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-	     Stage1_T stage1, char *queryptr, int pos5, int pos3, int querylength,
-	     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+	     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     char *queryptr, int pos5, int pos3, int querylength,
+	     Univcoord_T anchor_univdiagonal, Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 	     Compress_T query_compress, bool plusp, int genestrand,
 	     Genomebits_T genomebits, int nmismatches_allowed,
 	     bool extend5p, bool trim5p, bool trim3p) {
   int nhits;
 
-  int streamspace_max_alloc = stage1->streamspace_max_alloc;
-  Univcoord_T *streamspace_alloc = stage1->streamspace_alloc;
   Univcoord_T **streamptr_alloc = stage1->streamptr_alloc;
   int *streamsize_alloc = stage1->streamsize_alloc;
   Mergeinfo_T mergeinfo = stage1->mergeinfo;
+
 
   debug(printf("\nEntered Localdb_get with low_univdiagonal %u, high_univdiagonal %u, plusp %d, pos5 %d, pos3 %d, query %s, compress_fwdp %d\n",
 	       low_univdiagonal,high_univdiagonal,plusp,pos5,pos3,queryptr,Compress_fwdp(query_compress)));
@@ -2394,7 +2457,8 @@ Localdb_get (bool *sortedp, bool *trimmedp,
 		 (pos3 - pos5)/2,nhits));
     nhits = get_exhaustive(&(*trimmedp),&(*matchlength),&(*nmismatches),&(*univdiags_alloc),this,
 			   streamspace_max_alloc,streamspace_alloc,streamptr_alloc,streamsize_alloc,
-			   mergeinfo,queryptr,pos5,pos3,querylength,low_univdiagonal,high_univdiagonal,
+			   stage1->max_nstreams,mergeinfo,queryptr,pos5,pos3,querylength,
+			   anchor_univdiagonal,low_univdiagonal,high_univdiagonal,
 			   query_compress,plusp,genestrand,genomebits,extend5p,trim5p,trim3p);
     *sortedp = true;
     return nhits;
@@ -2405,7 +2469,8 @@ Localdb_get (bool *sortedp, bool *trimmedp,
 Univcoord_T
 Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 		     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		     Stage1_T stage1, char *queryptr, int querylength,
+		     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     char *queryptr, int querylength,
 		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		     Compress_T query_compress, bool plusp, int genestrand,
 		     Genomebits_T genomebits, int nmismatches_allowed) {
@@ -2415,8 +2480,10 @@ Localdb_get_one_low (Univdiag_T *univdiags_alloc,
   int nunivdiags, i;
 
   if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&nmismatches,univdiags_alloc,
-				this,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				/*pos5*/0,/*pos3*/querylength,querylength,
+				this,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				queryptr,/*pos5*/0,/*pos3*/querylength,querylength,
+				/*anchor_univdiagonal*/low_univdiagonal,
 				low_univdiagonal,high_univdiagonal,
 				query_compress,plusp,genestrand,genomebits,nmismatches_allowed,
 				/*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
@@ -2450,7 +2517,8 @@ Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 Univcoord_T
 Localdb_get_one_high (Univdiag_T *univdiags_alloc, 
 		      T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		      Stage1_T stage1, char *queryptr, int querylength,
+		      Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      char *queryptr, int querylength,
 		      Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		      Compress_T query_compress, bool plusp, int genestrand,
 		      Genomebits_T genomebits, int nmismatches_allowed) {
@@ -2460,8 +2528,10 @@ Localdb_get_one_high (Univdiag_T *univdiags_alloc,
   int nunivdiags, i;
 
   if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&nmismatches,univdiags_alloc,
-				this,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				/*pos5*/0,/*pos3*/querylength,querylength,
+				this,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				queryptr,/*pos5*/0,/*pos3*/querylength,querylength,
+				/*anchor_univdiagonal*/high_univdiagonal,
 				low_univdiagonal,high_univdiagonal,
 				query_compress,plusp,genestrand,genomebits,nmismatches_allowed,
 				/*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {

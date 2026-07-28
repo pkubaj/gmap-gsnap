@@ -1,4 +1,3 @@
-/* $Id: popcount.h 226315 2023-02-28 18:22:20Z twu $ */
 #ifndef POPCOUNT_INCLUDED
 #define POPCOUNT_INCLUDED
 #ifdef HAVE_CONFIG_H

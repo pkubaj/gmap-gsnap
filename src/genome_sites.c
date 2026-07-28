@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 409f22a8e09fabb5606eaf12207d27bc46805a21 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -417,7 +416,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
 			       intlistpool_trace(__FILE__,__LINE__));
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return Intlist_reverse(sites);
@@ -446,7 +445,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
 			       intlistpool_trace(__FILE__,__LINE__));
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     ptr = &(genome->blocks[startblocki+3]);
@@ -462,7 +461,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
       }
 
       if (low_halfsite & prev_high_halfsite) {
-	debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+	debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
 	pos = offset - 1;	/* verified that this should be offset - 1 */
 	sites = Intlistpool_push(sites,intlistpool,pos
 				 intlistpool_trace(__FILE__,__LINE__));
@@ -481,7 +480,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
 				 intlistpool_trace(__FILE__,__LINE__));
 	found -= lowbit;
 #endif
-	debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+	debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
       }
 
       ptr += 3;
@@ -500,7 +499,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
     debug2(printf("adding end mask %08x\n",clear_end_mask(enddiscard)));
 
     if (low_halfsite & prev_high_halfsite) {
-      debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+      debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
       pos = offset - 1;		/* verified that this should be offset - 1 */
       sites = Intlistpool_push(sites,intlistpool,pos
 			       intlistpool_trace(__FILE__,__LINE__));
@@ -519,7 +518,7 @@ novel_splicesites (Univcoord_T left, int pos5, int pos3,
 			       intlistpool_trace(__FILE__,__LINE__));
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return Intlist_reverse(sites);
@@ -740,7 +739,11 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
 		(unsigned long long) left,pos5,pos3,(unsigned long long) startblocki,(unsigned long long) endblocki));
   debug2(printf("startdiscard = %d, enddiscard = %d\n",startdiscard,enddiscard));
 
-  if (endblocki == startblocki) {
+  if (pos5 >= pos3) {
+    /* Can occur with new code in spliceends.c */
+    return;
+
+  } else if (endblocki == startblocki) {
     if (genomealt != genome) {
       found = block_find_snp(&high_halfsite,&low_halfsite,
 			     &(genome->blocks[startblocki]),&(genomealt->blocks[startblocki]),splicesite_bits);
@@ -762,7 +765,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
       sitep[pos] = true;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return;
@@ -789,7 +792,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
       sitep[pos] = true;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     ptr = &(genome->blocks[startblocki+3]);
@@ -805,7 +808,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
       }
 
       if (low_halfsite & prev_high_halfsite) {
-	debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+	debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
 	pos = offset - 1;	/* verified that this should be offset - 1 */
 	sitep[pos] = true;
       }
@@ -821,7 +824,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
 	sitep[pos] = true;
 	found -= lowbit;
 #endif
-	debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+	debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
       }
 
       ptr += 3;
@@ -840,7 +843,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
     debug2(printf("adding end mask %08x\n",clear_end_mask(enddiscard)));
 
     if (low_halfsite & prev_high_halfsite) {
-      debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+      debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
       pos = offset - 1;		/* verified that this should be offset - 1 */
       sitep[pos] = true;
     }
@@ -856,7 +859,7 @@ fill_splicesites (bool *sitep, Univcoord_T left, int pos5, int pos3,
       sitep[pos] = true;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return;
@@ -872,6 +875,18 @@ Genome_fill_donor_gtgc_sites (bool *sitep, Univcoord_T left, int pos5, int pos3)
 
 void
 Genome_fill_acceptor_ag_sites (bool *sitep, Univcoord_T left, int pos5, int pos3) {
+#if 0
+  /* Avoids negative value given to fill_splicesites */
+  if (pos5 < /*splicepos_offset*/2) {
+    pos5 = /*splicepos_offset*/2;
+  }
+  if (pos3 < /*splicepos_offset*/2) {
+    pos3 = /*splicepos_offset*/2;
+  }
+#else
+  /* But negative values should be okay, and allow splice sites at the first and last position */
+#endif
+
   fill_splicesites(sitep,left,pos5 - /*splicepos_offset*/2,pos3 - /*splicepos_offset*/2,
 		   acceptor_ag_bits,/*splicepos_offset*/2);
   return;
@@ -879,6 +894,18 @@ Genome_fill_acceptor_ag_sites (bool *sitep, Univcoord_T left, int pos5, int pos3
 
 void
 Genome_fill_antidonor_gtgc_sites (bool *sitep, Univcoord_T left, int pos5, int pos3) {
+#if 0
+  /* Avoids negative value given to fill_splicesites */
+  if (pos5 < /*splicepos_offset*/2) {
+    pos5 = /*splicepos_offset*/2;
+  }
+  if (pos3 < /*splicepos_offset*/2) {
+    pos3 = /*splicepos_offset*/2;
+  }
+#else
+  /* But negative values should be okay, and allow splice sites at the first and last position */
+#endif
+
   fill_splicesites(sitep,left,pos5 - /*splicepos_offset*/2,pos3 - /*splicepos_offset*/2,
 		   antidonor_gtgc_bits,/*splicepos_offset*/2);
   return;
@@ -953,7 +980,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
       sites[nfound++] = pos;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return nfound;
@@ -980,7 +1007,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
       sites[nfound++] = pos;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     ptr = &(genome->blocks[startblocki+3]);
@@ -996,7 +1023,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
       }
 
       if (low_halfsite & prev_high_halfsite) {
-	debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+	debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
 	pos = offset - 1;	/* verified that this should be offset - 1 */
 	sites[nfound++] = pos;
       }
@@ -1012,7 +1039,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
 	sites[nfound++] = pos;
 	found -= lowbit;
 #endif
-	debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+	debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
       }
 
       ptr += 3;
@@ -1031,7 +1058,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
     debug2(printf("adding end mask %08x\n",clear_end_mask(enddiscard)));
 
     if (low_halfsite & prev_high_halfsite) {
-      debug2(printf("low_halfsite & prev_high_halfsite => offset %llu - 1\n",(unsigned long long) offset));
+      debug2(printf("low_halfsite & prev_high_halfsite => offset %d - 1\n",offset));
       pos = offset - 1;		/* verified that this should be offset - 1 */
       sites[nfound++] = pos;
     }
@@ -1047,7 +1074,7 @@ splicesites_novel (int *sites, Univcoord_T left, int pos5, int pos3,
       sites[nfound++] = pos;
       found -= lowbit;
 #endif
-      debug2(printf("found is %08X => offset %llu + relpos %d\n",found,(unsigned long long) offset,relpos));
+      debug2(printf("found is %08X => offset %d + relpos %d\n",found,offset,relpos));
     }
 
     return nfound;

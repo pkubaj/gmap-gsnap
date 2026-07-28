@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 3c6cc7085a888103177cf6ee40c84cc31b656e45 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -62,23 +61,6 @@ static char rcsid[] = "$Id: 3c6cc7085a888103177cf6ee40c84cc31b656e45 $";
 
 
 #define T Knownsplicing_T
-struct T {
-  EF64_T donor_ef;
-  Univcoord_T *donor_endpoints;
-  int donor_nintervals;
-
-  EF64_T acceptor_ef;
-  Univcoord_T *acceptor_endpoints;
-  int acceptor_nintervals;
-
-  EF64_T antidonor_ef;
-  Univcoord_T *antidonor_endpoints;
-  int antidonor_nintervals;
-
-  EF64_T antiacceptor_ef;
-  Univcoord_T *antiacceptor_endpoints;
-  int antiacceptor_nintervals;
-};
 
 void
 Knownsplicing_free (T *old) {
@@ -298,14 +280,13 @@ static EF64_T
 store_intervals (Univcoord_T **endpoints, int *nintervals,
 		 Univcoord_T *candidates, int ncandidates,
 		 Univcoord_T *rejections, int nrejections,
-		 Univcoord_T genomelength, FILE *dump_splices_fp,
-		 Univ_IIT_T chromosome_iit, EF64_T chromosome_ef64) {
+		 Univcoord_T genomelength, Univ_IIT_T chromosome_iit, EF64_T chromosome_ef64) {
   Univcoord_T startpoint, partner;
-  Chrnum_T chrnum;
-  char *chr = NULL;
-  Univcoord_T chroffset, chrhigh = 0;
+  /* Chrnum_T chrnum; */
+  /* Univcoord_T chroffset, chrhigh = 0; */
   int i, j, k;
-  bool allocp;
+  /* char *chr = NULL; */
+  /* bool allocp; */
 
   if (candidates == NULL) {
     *endpoints = (Univcoord_T *) NULL;
@@ -329,6 +310,7 @@ store_intervals (Univcoord_T **endpoints, int *nintervals,
       } else {
 	candidates[k++] = startpoint;
 	candidates[k++] = partner;
+#if 0
 	debug(printf("Writing %u..%u\n",startpoint,partner));
 	if (dump_splices_fp != NULL) {
 	  if (startpoint > partner) {
@@ -353,6 +335,7 @@ store_intervals (Univcoord_T **endpoints, int *nintervals,
 	  fprintf(dump_splices_fp," %s:%u..%u\n",
 		  chr,(Chrpos_T) (startpoint - chroffset),(Chrpos_T) (partner - chroffset));
 	}
+#endif
       }
       
       i += 2;
@@ -384,9 +367,11 @@ store_intervals (Univcoord_T **endpoints, int *nintervals,
     }
   }
 
+#if 0
   if (chr != NULL && allocp == true) {
     FREE(chr);
   }
+#endif
 
   return EF64_new_from_interleaved_univcoords(*endpoints,*nintervals,genomelength);
 }
@@ -401,7 +386,7 @@ Knownsplicing_new (Univcoordlist_T donor_startpoints, Univcoordlist_T donor_part
 		   Univcoordlist_T antiacceptor_startpoints, Univcoordlist_T antiacceptor_partners,
 		   Univcoordtableuint_T donor_table, Univcoordtableuint_T acceptor_table, 
 		   Univcoordtableuint_T antidonor_table, Univcoordtableuint_T antiacceptor_table, 
-		   Univcoord_T genomelength, FILE *dump_splices_fp, Univ_IIT_T chromosome_iit,
+		   Univcoord_T genomelength, Univ_IIT_T chromosome_iit,
 		   EF64_T chromosome_ef64, bool intron_level_p) {
   T new;
   int from_donor_nintervals, from_acceptor_nintervals,
@@ -425,21 +410,25 @@ Knownsplicing_new (Univcoordlist_T donor_startpoints, Univcoordlist_T donor_part
 					       acceptor_startpoints,acceptor_partners,
 					       acceptor_table,/*partner_table*/donor_table);
   
+#if 0
   if (dump_splices_fp != NULL) {
     fprintf(dump_splices_fp,">Donors\n");
   }
-  
+#endif
   new->donor_ef = store_intervals(&new->donor_endpoints,&new->donor_nintervals,
 				  from_donor_endpoints,from_donor_nintervals,
 				  from_donor_rejections,from_donor_nrejections,
-				  genomelength,dump_splices_fp,chromosome_iit,chromosome_ef64);
+				  genomelength,chromosome_iit,chromosome_ef64);
+
+#if 0
   if (dump_splices_fp != NULL) {
     fprintf(dump_splices_fp,">Acceptors\n");
   }
+#endif
   new->acceptor_ef = store_intervals(&new->acceptor_endpoints,&new->acceptor_nintervals,
 				     from_acceptor_endpoints,from_acceptor_nintervals,
 				     from_acceptor_rejections,from_acceptor_nrejections,
-				     genomelength,dump_splices_fp,chromosome_iit,chromosome_ef64);
+				     genomelength,chromosome_iit,chromosome_ef64);
   debug(printf("\n"));
 
   debug(printf("Minus genestrand\n"));
@@ -451,20 +440,24 @@ Knownsplicing_new (Univcoordlist_T donor_startpoints, Univcoordlist_T donor_part
 						   &from_antidonor_rejections,&from_antidonor_nrejections,
 						   antiacceptor_startpoints,antiacceptor_partners,
 						   antiacceptor_table,/*partner_table*/antidonor_table);
+#if 0
   if (dump_splices_fp != NULL) {
     fprintf(dump_splices_fp,">Antidonors\n");
   }
+#endif
   new->antidonor_ef = store_intervals(&new->antidonor_endpoints,&new->antidonor_nintervals,
 				      from_antidonor_endpoints,from_antidonor_nintervals,
 				      from_antidonor_rejections,from_antidonor_nrejections,
-				      genomelength,dump_splices_fp,chromosome_iit,chromosome_ef64);
+				      genomelength,chromosome_iit,chromosome_ef64);
+#if 0
   if (dump_splices_fp != NULL) {
     fprintf(dump_splices_fp,">Antiacceptors\n");
   }
+#endif
   new->antiacceptor_ef = store_intervals(&new->antiacceptor_endpoints,&new->antiacceptor_nintervals,
 					 from_antiacceptor_endpoints,from_antiacceptor_nintervals,
 					 from_antiacceptor_rejections,from_antiacceptor_nrejections,
-					 genomelength,dump_splices_fp,chromosome_iit,chromosome_ef64);
+					 genomelength,chromosome_iit,chromosome_ef64);
   debug(printf("\n"));
 
   if (intron_level_p == true && new->donor_nintervals != new->acceptor_nintervals) {
@@ -629,6 +622,8 @@ Knownsplicing_nintervals (T this) {
 }
     
 
+/* Subtracting 1 from second argument because we need 1 bp as
+   overhang, but adding 1 because EF64_two_ranks expects it */
 Univcoord_T *
 Knownsplicing_donors (uint64_t *low_rank, uint64_t *high_rank, T this,
 		      Univcoord_T univdiagonal, int querylength, int pos5, int pos3) {
@@ -649,11 +644,13 @@ Knownsplicing_donors (uint64_t *low_rank, uint64_t *high_rank, T this,
     assert(univdiagonal + pos5 >= (Univcoord_T) querylength);
     left = univdiagonal - querylength;
     EF64_two_ranks(&(*low_rank),&(*high_rank),this->donor_ef,
-		   /*low*/left + pos5,/*high*/left + pos3 - 1);
+		   /*low*/left + pos5,/*high*/left + pos3 /*- 1 + 1*/);
     return this->donor_endpoints;
   }
 }
 
+/* Subtracting 1 from second argument because we need 1 bp as
+   overhang, but adding 1 because EF64_two_ranks expects it */
 Univcoord_T *
 Knownsplicing_acceptors (uint64_t *low_rank, uint64_t *high_rank, T this,
 			 Univcoord_T univdiagonal, int querylength, int pos5, int pos3) {
@@ -674,11 +671,13 @@ Knownsplicing_acceptors (uint64_t *low_rank, uint64_t *high_rank, T this,
     assert(univdiagonal + pos5 >= (Univcoord_T) querylength);
     left = univdiagonal - querylength;
     EF64_two_ranks(&(*low_rank),&(*high_rank),this->acceptor_ef,
-		   /*low*/left + pos5,/*high*/left + pos3 - 1);
+		   /*low*/left + pos5,/*high*/left + pos3 /*- 1 + 1*/);
     return this->acceptor_endpoints;
   }
 }
 
+/* Subtracting 1 from second argument because we need 1 bp as
+   overhang, but adding 1 because EF64_two_ranks expects it */
 Univcoord_T *
 Knownsplicing_antidonors (uint64_t *low_rank, uint64_t *high_rank, T this,
 			  Univcoord_T univdiagonal, int querylength, int pos5, int pos3) {
@@ -699,11 +698,13 @@ Knownsplicing_antidonors (uint64_t *low_rank, uint64_t *high_rank, T this,
     assert(univdiagonal + pos5 >= (Univcoord_T) querylength);
     left = univdiagonal - querylength;
     EF64_two_ranks(&(*low_rank),&(*high_rank),this->antidonor_ef,
-		   /*low*/left + pos5,/*high*/left + pos3 - 1);
+		   /*low*/left + pos5,/*high*/left + pos3 /*- 1 + 1*/);
     return this->antidonor_endpoints;
   }
 }
 
+/* Subtracting 1 from second argument because we need 1 bp as
+   overhang, but adding 1 because EF64_two_ranks expects it */
 Univcoord_T *
 Knownsplicing_antiacceptors (uint64_t *low_rank, uint64_t *high_rank, T this,
 			     Univcoord_T univdiagonal, int querylength, int pos5, int pos3) {
@@ -724,10 +725,63 @@ Knownsplicing_antiacceptors (uint64_t *low_rank, uint64_t *high_rank, T this,
     assert(univdiagonal + pos5 >= (Univcoord_T) querylength);
     left = univdiagonal - querylength;
     EF64_two_ranks(&(*low_rank),&(*high_rank),this->antiacceptor_ef,
-		   /*low*/left + pos5,/*high*/left + pos3 - 1);
+		   /*low*/left + pos5,/*high*/left + pos3 /*- 1 + 1*/);
     return this->antiacceptor_endpoints;
   }
 }
+
+
+bool
+Knownsplicing_intron_p (T this, Univcoord_T donor_position, Univcoord_T acceptor_position) {
+  uint64_t low_rank, high_rank, rank;
+
+  if (this->donor_ef == NULL) {
+    return false;
+
+  } else {
+    /* Need to subtract 1 from donor_position to make this work,
+       perhaps to make it 0-based, and second argument needs to be 1
+       more */
+    EF64_two_ranks(&low_rank,&high_rank,this->donor_ef,
+		   /*low*/donor_position - 1,/*high*/donor_position);
+    /* printf("For donor position %u, ranks are %u and %u\n",
+       donor_position,low_rank,high_rank); */
+    for (rank = low_rank; rank < high_rank; rank++) {
+      if (this->donor_endpoints[2*rank + 1] == acceptor_position) {
+	return true;
+      }
+    }
+      
+    return false;
+  }
+}
+
+
+bool
+Knownsplicing_antiintron_p (T this, Univcoord_T acceptor_position, Univcoord_T donor_position) {
+  uint64_t low_rank, high_rank, rank;
+
+  if (this->antiacceptor_ef == NULL) {
+    return false;
+
+  } else {
+    /* Need to subtract 1 from acceptor_position to make this work,
+       perhaps to make it 0-based, and second argument needs to be 1
+       more */
+    EF64_two_ranks(&low_rank,&high_rank,this->antiacceptor_ef,
+		   /*low*/acceptor_position - 1,/*high*/acceptor_position);
+    /* printf("For acceptor position %u, ranks are %u and %u\n",
+       acceptor_position,low_rank,high_rank); */
+    for (rank = low_rank; rank < high_rank; rank++) {
+      if (this->antiacceptor_endpoints[2*rank + 1] == donor_position) {
+	return true;
+      }
+    }
+      
+    return false;
+  }
+}
+
 
 
 #if 0
@@ -992,7 +1046,7 @@ Knownsplicing_from_splicing_iit (IIT_T splicing_iit, int *splicing_divint_crosst
 			   antiacceptor_startpoints,antiacceptor_partners,
 			   /*donor_table*/NULL,/*acceptor_table*/NULL,
 			   /*antidonor_table*/NULL,/*antiacceptor_table*/NULL,
-			   genomelength,/*dump_splices_fp*/NULL,/*chromosome_iit*/NULL,
+			   genomelength,/*chromosome_iit*/NULL,
 			   /*chromosome_ef64*/NULL,intron_level_p);
 }
 
@@ -1054,7 +1108,7 @@ Knownsplicing_from_transcriptome (Transcriptome_T transcriptome, int nalignments
     antidonor_startpoints = NULL, antidonor_partners = NULL, antiacceptor_startpoints = NULL, antiacceptor_partners = NULL;
 
   for (map_index = 1; map_index <= nalignments; map_index++) {
-    if ((trnum = Transcriptome_trnum(&nexons,&exonbounds,&exonstarts,transcriptome,map_index)) < 1) {
+    if ((trnum = Transcriptome_trnum(&nexons,&exonbounds,&exonstarts,transcriptome,map_index)) == 0) {
       /* Skip.  Not in transcriptome */
     } else {
       chrnum = Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
@@ -1113,7 +1167,7 @@ Knownsplicing_from_transcriptome (Transcriptome_T transcriptome, int nalignments
 			   antiacceptor_startpoints,antiacceptor_partners,
 			   /*donor_table*/NULL,/*acceptor_table*/NULL,
 			   /*antidonor_table*/NULL,/*antiacceptor_table*/NULL,
-			   genomelength,/*dump_splices_fp*/NULL,/*chromosome_iit*/NULL,
+			   genomelength,/*chromosome_iit*/NULL,
 			   /*chromosome_ef64*/NULL,intron_level_p);
 }
 

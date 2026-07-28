@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: iit-write-univ.c 223349 2020-10-28 02:49:25Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -86,7 +85,8 @@ is_right_split (int i, int j, int r, Univcoord_T value, int *sigmas,
 }  
 
 static bool
-is_sorted (int array[], int i, int j, Univcoord_T (*endpoint)(), struct Univinterval_T *intervals) {
+is_sorted (int array[], int i, int j, Univcoord_T (*endpoint)(struct Univinterval_T *, int),
+	   struct Univinterval_T *intervals) {
   int lambda;
 
   for (lambda = i; lambda <= j - 1; lambda++) {

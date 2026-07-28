@@ -1,4 +1,4 @@
-/* $Id: 1ed7cf64ca60da1018d1e7300059e3d93bf48f7e $ */
+/* $Id: eb04236e95cdc02fe7a65394255e1fe814df25d6 $ */
 #ifndef DINUCL_BITS_INCLUDED
 #define DINUCL_BITS_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: dynprog.h 226315 2023-02-28 18:22:20Z twu $ */
 #ifndef DYNPROG_INCLUDED
 #define DYNPROG_INCLUDED
 #ifdef HAVE_CONFIG_H

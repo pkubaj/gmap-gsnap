@@ -1,4 +1,3 @@
-/* $Id: genomicpos.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef GENOMICPOS_INCLUDED
 #define GENOMICPOS_INCLUDED
 #ifdef HAVE_CONFIG_H

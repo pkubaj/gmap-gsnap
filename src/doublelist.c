@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: doublelist.c 224642 2021-08-25 22:03:29Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

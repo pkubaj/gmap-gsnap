@@ -1,4 +1,3 @@
-/* $Id: scores.h 105294 2013-08-20 16:42:39Z twu $ */
 #ifndef SCORES_INCLUDED
 #define SCORES_INCLUDED
 

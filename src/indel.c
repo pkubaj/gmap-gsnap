@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 083c3aa58cfcb45dea95c5ef353df3b5501be40d $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -51,6 +50,7 @@ Indel_setup (Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in,
 }
 
 
+/* Use keep memory pool because we retain this memory if the querylength remains the same */
 void
 Indelinfo_free (Indelinfo_T *old) {
   FREE((*old)->int_memory);
@@ -58,6 +58,7 @@ Indelinfo_free (Indelinfo_T *old) {
   return;
 }
 
+/* Use keep memory pool because we retain this memory if the querylength remains the same */
 Indelinfo_T
 Indelinfo_new (int querylength) {
   Indelinfo_T new = (Indelinfo_T) MALLOC(sizeof(*new));

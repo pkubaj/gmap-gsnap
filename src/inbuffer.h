@@ -1,4 +1,3 @@
-/* $Id: 2ef7587de59aa67bed1dc86675c02ee1cb8fad0e $ */
 #ifndef INBUFFER_INCLUDED
 #define INBUFFER_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -63,6 +62,7 @@ Inbuffer_new (int nextchar, FILE *input,
 #if !defined(GFILTER) && !defined(GEXACT) && !defined(GSNAP)
 	      bool user_pairalign_p, List_T user_genomes,
 #endif
+	      double skip_prob, unsigned int seed,
 	      unsigned int part_modulus, unsigned int part_interval);
 
 extern void

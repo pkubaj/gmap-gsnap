@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: getline.c 224712 2021-11-15 16:21:18Z twu $";
 
 /* #define STANDALONE 1 */
 

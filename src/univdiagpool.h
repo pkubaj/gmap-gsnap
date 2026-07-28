@@ -1,4 +1,3 @@
-/* $Id: 901ba20db2ab43bfcf03583a347cbbde9fc4602e $ */
 #ifndef UNIVDIAGPOOL_INCLUDED
 #define UNIVDIAGPOOL_INCLUDED
 
@@ -28,6 +27,8 @@ Univdiagpool_new (void);
 extern Univdiag_T
 Univdiag_new (T this, int qstart, int qend, int nmismatches, Univcoord_T univdiagonal);
 
+
+#if 0
 #ifdef UNIVDIAGPOOL_REUSE
 extern void
 Univdiagpool_free_univdiag (Univdiag_T *old, T this
@@ -47,6 +48,7 @@ Univdiagpool_free_univdiag (Univdiag_T *old, T this
   (void)(this);
   return;
 }
+#endif
 #endif
 
 
@@ -130,12 +132,14 @@ Univdiagpool_push_existing (List_T list, T this, Univdiag_T univdiag
 #endif
 			    );
 
+#if 0
 extern Univdiag_T
 Univdiagpool_new_univdiag (T this, int qstart, int qend, int nmismatches, Univcoord_T univdiagonal
 #ifdef UNIVDIAGPOOL_TRACE
 			   , const char *file, int line
 #endif
 			   );
+#endif
 
 extern void
 Univdiagpool_init (T this);

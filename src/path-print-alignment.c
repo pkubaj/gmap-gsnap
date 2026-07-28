@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: d98df0b573aa10a24d049efcf0114fa2f2d01337 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -21,9 +20,8 @@ static char rcsid[] = "$Id: d98df0b573aa10a24d049efcf0114fa2f2d01337 $";
 #include "complement.h"
 
 
-#ifndef CHECK_ASSERTIONS
+/* Previously turned off if CHECK_ASSERTIONS was true */
 #define PRINT_SUB 1
-#endif
 
 
 /* making substrings */

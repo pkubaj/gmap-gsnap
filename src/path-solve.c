@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: db2d143fa915f52999a4b8cf70017ab815822db9 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -9,6 +8,7 @@ static char rcsid[] = "$Id: db2d143fa915f52999a4b8cf70017ab815822db9 $";
 #include "path.h"
 #include "path-solve.h"
 #include "path-eval.h"
+#include "path-trim.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -172,6 +172,7 @@ attach_indel_qstart_simple (int adj, T path, int indel_pos,
 			    Genomebits_T genomebits, Genomebits_T genomebits_alt,
 			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh, bool find_splices_p, 
 
+			    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			    unsigned short *localdb_alloc, 
 
@@ -196,7 +197,7 @@ attach_indel_qstart_simple (int adj, T path, int indel_pos,
   debug13(printf("Calling Spliceends_qstart_trim with indel_pos %d\n",indel_pos));
   splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,
 				    &found_sensedir,&splicetype5,&ambig_prob_5,
-				    stage1,knownsplicing,try_sensedir,
+				    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 				    distal_univdiagonal,querylength,
 				    /*pos3*/indel_pos,exon_origin,chrnum,chroffset,chrhigh,
 				    plusp,genestrand,mismatch_positions_alloc,
@@ -442,7 +443,7 @@ attach_splice_qstart (T path, int splice_qpos, int trimpos, int nmismatches_to_t
   debug13(printf("attach_splice_qstart with splice_qpos %d, trimpos %d\n",splice_qpos,trimpos));
 #if 0
   splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,&found_sensedir,&splicetype5,&ambig_prob_5,
-				    stage1,knownsplicing,try_sensedir,
+				    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 				    distal_univdiagonal,querylength,
 				    /*pos3*/splice_qpos,exon_origin,chrnum,chroffset,
 				    plusp,genestrand,mismatch_positions_alloc,
@@ -570,6 +571,7 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
 		       Univcoord_T chroffset, Univcoord_T chrhigh, int querylength,
 		       Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 		       Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 		       unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 		       bool plusp, int genestrand, bool innerp,
@@ -580,20 +582,26 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   Univcoord_T univdiagonal, low_left;
   int qend;
 
+  Univcoordlist_T new_univdiagonals;
+  Intlist_T new_nmismatches, new_ref_nmismatches, new_endpoints;
+  List_T new_junctions;
+  int ignore;
+
   int type, typei, typej;
   int nindels, indel_pos, splice_qpos, splice_qpos_i, splice_qpos_j, trimpos5, trimpos3;
   Univcoord_T middle_univdiagonal;
   Chrpos_T splice_distance, splice_distance_i, splice_distance_j;
   double donor1_prob, acceptor1_prob, donor2_prob, acceptor2_prob;
   int supporti, supportj;
-  int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j, 
+  int nmismatches_i, nmismatches_j, nmismatches_indel,
+    ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel,
     nmismatches, ref_nmismatches, nmismatches_middle, ref_nmismatches_middle;
+  int cont_trimpos, cont_nmismatches, cont_ref_nmismatches;
+
 #ifdef DEBUG13
   int qstart;
 #endif
   
-  int nmismatches_indel, ref_nmismatches_indel;
-
 #if 0
   if (low_univdiagonal + low_qstart < (Univcoord_T) querylength) {
     /* low segment is before the beginning of the genome */
@@ -619,6 +627,11 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   printf("Entering attach_unknown_qstart with try_sensedir %d, low_univdiagonal %u and univdiagonal %u %d..%d (diff %d)\n",
 	 try_sensedir,low_univdiagonal - chroffset,univdiagonal - chroffset,qstart,qend,univdiagonal - low_univdiagonal);
 #endif
+
+  /* Compute continuation along univdiagonal for baseline */
+  cont_trimpos = Genomebits_trim_qstart(&cont_nmismatches,query_compress,genomebits,
+					univdiagonal,querylength,
+					/*pos5*/0,/*pos3*/qend,plusp,genestrand);
 
   if (low_qstart >= qend) {
     debug13(printf("Does not add to start of path: low_qstart %d >= qend %d\n",low_qstart,qend));
@@ -766,7 +779,7 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
     /* Unable to try splicing */
 
   } else {
-    /* (C) Splice with possible indel */
+    /* (C) Splice with or without indel */
     low_left = low_univdiagonal - (Univcoord_T) querylength;
     /* left = univdiagonal - (Univcoord_T) querylength; */
 
@@ -774,497 +787,40 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
        on donors and antiacceptors for segmenti and segmentj, now
        done in Splice_resolve */
     
-    if (try_sensedir == SENSE_FORWARD) {
-      /* (C1) Sense */
-      /* low_left = low_univdiagonal - querylength; -- Combined above */
-      /* left = univdiagonal - querylength; -- Combined above */
+    debug13(printf("BEFORE call to Splice_resolve_qstart, %d..%d\n",low_qstart,qend));
+    debug13(Path_print(path));
 
-      debug13(printf("BEFORE call to Splice_resolve, %d..%d\n",low_qstart,qend));
-      debug13(Path_print(path));
+    if (Splice_resolve_qstart(&new_univdiagonals,&new_nmismatches,&new_ref_nmismatches,&new_endpoints,&new_junctions,
+			      /*univdiagonal_i*/low_univdiagonal,/*univdiagonal_j*/univdiagonal,
+			      stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
+			      streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			      localdb_nmismatches_allowed,
+			      /*pos5*/low_qstart,/*pos3*/qend,querylength,cont_trimpos,cont_nmismatches,
+			      indelinfo,spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
+			      /*sensedir*/try_sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,innerp,
+			      /*allow_indels_p*/true,/*find_middle_p*/true) == 0) {
+      debug13(printf("Splice_resolve_qstart: fails\n"));
+      newpath = (T) NULL;
 
-      newpath = Path_copy_5(path,/*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
-			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool);
-
-      splice_distance = univdiagonal - low_univdiagonal;
-      if ((splice_qpos = Splice_resolve(&type,&typei,&typej,&trimpos5,&trimpos3,
-					&middle_univdiagonal,&splice_qpos_i,&splice_qpos_j,&nindels,&indel_pos,
-					&nmismatches_i,&nmismatches_middle,&nmismatches_j,&nmismatches_indel,
-					&ref_nmismatches_i,&ref_nmismatches_middle,&ref_nmismatches_j,
-					&ref_nmismatches_indel,&donor1_prob,&acceptor1_prob,&donor2_prob,&acceptor2_prob,
-					/*univdiagonal_i*/low_univdiagonal,/*univdiagonal_j*/univdiagonal,
-					stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
-					localdb_nmismatches_allowed,/*pos5*/low_qstart,/*pos3*/qend,querylength,
-					indelinfo,spliceinfo,knownsplicing,intlistpool,/*sense_forward_p*/true,
-					genestrand,/*trim5p*/true,/*trim3p*/false,innerp,
-					/*allow_indels_p*/true)) < 0) {
-	if (middle_univdiagonal != 0) {
-	  debug13(printf("Splice_resolve (qstart, sense): found a middle exon %u at splice_qpos %d and %d\n",
-			 middle_univdiagonal,splice_qpos_i,splice_qpos_j));
-	  splice_distance_j = univdiagonal - middle_univdiagonal;
-	  splice_distance_i = middle_univdiagonal - low_univdiagonal;
-	  
-	  debug13(printf("(6) attach_unknown_qstart is modifying path %p\n",newpath));
-	  Intlist_head_set(newpath->endpoints,splice_qpos_j);
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_i
-						intlistpool_trace(__FILE__,__LINE__));
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-						intlistpool_trace(__FILE__,__LINE__));
-	  
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_j,SENSE_FORWARD,
-									  donor2_prob,acceptor2_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_i,SENSE_FORWARD,
-									  donor1_prob,acceptor1_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	  
-	  /* For qstart, push j first, then push i */
-	  Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	  Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						      intlistpool_trace(__FILE__,__LINE__));
-	  
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  
-	} else {
-	  debug13(printf("Splice_resolve (qstart, sense): fails\n"));
-	  
-#if 0
-	  /* Put in a temporary junction, to be fixed later if it is worth it */
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-						intlistpool_trace(__FILE__,__LINE__));
-#ifdef ALLOCATE_UNSOLVED_JUNCTION
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) Junction_new_unsolved(pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-#else
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) JUNCTION_UNSOLVED
-					     listpool_trace(__FILE__,__LINE__));
-#endif
-
-	  Intlist_head_set(newpath->nmismatches,-1);
-	  Intlist_head_set(newpath->ref_nmismatches,-1);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,-1
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,-1
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  debug13(printf("attach_unknown_qstart is returning path %p with an unsolved junction\n",newpath));
-#endif
-#if 0
-	  /* Already in qstart direction */
-	  *unextended_paths = Hitlist_push(*unextended_paths,hitlistpool,(void *) newpath
-					   hitlistpool_trace(__FILE__,__LINE__));
-#else
-	  Path_free(&newpath,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-#endif
-	  newpath = (T) NULL;
-	}
-
-#if 0
-      } else if (Splice_accept_p(donor1_prob,acceptor2_prob,splice_distance,
-				 adj_donor_support,adj_acceptor_support,innerp) == false) {
-	/* Splice_resolve should have called Splice_accept_p */
-	debug13(printf("attach_unknown_qstart is not adding a bad splice (%f..%f)\n",
-		       donor1_prob,acceptor2_prob));
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-	newpath = (T) NULL;
-#endif
-
-      } else if (nindels == 0) {
-	/* Splice only */
-	debug13(printf("Splice_resolve (qstart, sense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5  /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	
-	/* For qstart, push j first, then push i */
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else if (splice_qpos < indel_pos) {
-	/* Push indel (based on left) then splice.  splice is distal, indel is medial */
-	debug13(printf("splice_qpos %d < indel_pos %d\n",splice_qpos,indel_pos));
-
-	middle_univdiagonal = univdiagonal - nindels; /* nindels = univdiagonal - middle_univdiagonal */
-	splice_distance = middle_univdiagonal - low_univdiagonal;
-
-	debug13(printf("Splice_resolve (qstart, sense): %d indels at %d, mismatches %d, then splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       nindels,indel_pos,nmismatches_indel,
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,indel_pos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5    /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-
-	/* Indel first */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = low_left + splice_distance + indel_pos; -- qstart; add splice_distance if indel first */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	/* Splice second */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* For qstart, push j first, then push i */
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else {
-	/* Push splice then indel (based on low_univdiagonal).  indel is distal, splice is medial */
-	debug13(printf("splice_qpos %d >= indel_pos %d\n",splice_qpos,indel_pos));
-
-	middle_univdiagonal = low_univdiagonal + nindels; /* nindels = middle_univdiagonal - low_univdiagonal */
-	splice_distance = univdiagonal - middle_univdiagonal;
-
-	debug13(printf("Splice_resolve (qstart, sense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f, then %d indels at %d, nmismatches %d\n",
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob,
-		       nindels,indel_pos,nmismatches_indel));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Splice first */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel second */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = low_left + indel_pos; -- qstart; do not add splice_distance if indel second */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-      }
-
-      debug13(printf("(1) AFTER call to Splice_resolve\n"));
-      debug13(Path_print(newpath));
-      
     } else {
-      /* (C2) Antisense */
-      /* low_left = low_univdiagonal - querylength; -- Computed above */
-      /* left = univdiagonal - querylength; -- Computed above */
-
-      debug13(printf("BEFORE call to Splice_resolve, %d..%d\n",low_qstart,qend));
-      debug13(Path_print(path));
-
       newpath = Path_copy_5(path,/*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
 			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool);
 
-      splice_distance = univdiagonal - low_univdiagonal;
-      if ((splice_qpos = Splice_resolve(&type,&typei,&typej,&trimpos5,&trimpos3,
-					&middle_univdiagonal,&splice_qpos_i,&splice_qpos_j,&nindels,&indel_pos,
-					&nmismatches_i,&nmismatches_middle,&nmismatches_j,&nmismatches_indel,
-					&ref_nmismatches_i,&ref_nmismatches_middle,&ref_nmismatches_j,
-					&ref_nmismatches_indel,&donor1_prob,&acceptor1_prob,&donor2_prob,&acceptor2_prob,
-					/*univdiagonal_i*/low_univdiagonal,/*univdiagonal_j*/univdiagonal,
-					stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
-					localdb_nmismatches_allowed,/*pos5*/low_qstart,/*pos3*/qend,querylength,
-					indelinfo,spliceinfo,knownsplicing,intlistpool,/*sense_forward_p*/false,
-					genestrand,/*trim5p*/true,/*trim3p*/false,innerp,
-					/*allow_indels_p*/true)) < 0) {
-	debug13(printf("(7) attach_unknown_qstart is modifying path %p\n",newpath));
-
-	if (middle_univdiagonal != 0) {
-	  debug13(printf("Splice_resolve (qstart, antisense): found a middle exon %u at splice_qpos %d and %d\n",
-			 middle_univdiagonal,splice_qpos_i,splice_qpos_j));
-	  splice_distance_j = univdiagonal - middle_univdiagonal;
-	  splice_distance_i = middle_univdiagonal - low_univdiagonal;
+      newpath->univdiagonals = Univcoordlist_append(new_univdiagonals,newpath->univdiagonals);
+      newpath->nmismatches = Intlistpool_pop(newpath->nmismatches,intlistpool,&ignore
+					     intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlist_append(new_nmismatches,newpath->nmismatches);
+      newpath->ref_nmismatches = Intlistpool_pop(newpath->ref_nmismatches,intlistpool,&ignore
+						 intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlist_append(new_ref_nmismatches,newpath->ref_nmismatches);
+      newpath->endpoints = Intlistpool_pop(newpath->endpoints,intlistpool,&ignore
+					   intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlist_append(new_endpoints,newpath->endpoints);
+      newpath->junctions = List_append(new_junctions,newpath->junctions);
 	
-	  debug13(printf("(8) attach_unknown_qstart is modifying path %p\n",newpath));
-	  Intlist_head_set(newpath->endpoints,splice_qpos_j);
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_i
-						intlistpool_trace(__FILE__,__LINE__));
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5  /* was low_qstart */
-						intlistpool_trace(__FILE__,__LINE__));
-	
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_j,SENSE_ANTI,
-									  donor2_prob,acceptor2_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_i,SENSE_ANTI,
-									  donor1_prob,acceptor1_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	
-	  /* For qstart, push j first, then push i */
-	  Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	  Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						      intlistpool_trace(__FILE__,__LINE__));
-	
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	
-	  debug13(Path_print(newpath));
-
-	} else {
-	  debug13(printf("Splice_resolve (qstart, antisense): fails\n"));
-#if 0
-	  /* Put in a temporary junction, to be fixed later if it is worth it */
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-						intlistpool_trace(__FILE__,__LINE__));
-#ifdef ALLOCATE_UNSOLVED_JUNCTION
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) Junction_new_unsolved(pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-#else
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) JUNCTION_UNSOLVED
-					     listpool_trace(__FILE__,__LINE__));
-#endif
-
-	  Intlist_head_set(newpath->nmismatches,-1);
-	  Intlist_head_set(newpath->ref_nmismatches,-1);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,-1
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,-1
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  debug13(printf("attach_unknown_qstart is returning a path %p with an unsolved junction\n",newpath));
-#endif
-
-	  /* Already in qstart direction */
-#if 0
-	  *unextended_paths = Hitlist_push(*unextended_paths,hitlistpool,(void *) newpath
-					   hitlistpool_trace(__FILE__,__LINE__));
-#else
-	  Path_free(&newpath,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-#endif
-	  newpath = (T) NULL;
-	}
-
-#if 0
-      } else if (Splice_accept_p(donor1_prob,acceptor2_prob,splice_distance,
-				 adj_donor_support,adj_acceptor_support,innerp) == false) {
-	/* Splice_resolve should have called Splice_accept_p */
-	debug13(printf("attach_unknown_qstart is not adding a bad splice (%f..%f)\n",
-		       donor1_prob,acceptor2_prob));
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-	newpath = (T) NULL;
-#endif
-
-      } else if (nindels == 0) {
-	/* Splice only */
-	debug13(printf("Splice_resolve (qstart, antisense): splice_qpos in range %d..%d is at %d with distance %u, nmismatches %d+%d, and probs %f and %f\n",
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	
-	/* For qstart, push j first, then push i */
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else if (splice_qpos < indel_pos) {
-	/* Push indel (based on left) then splice.  splice is distal, indel is medial */
-	debug13(printf("splice_qpos %d < indel_pos %d\n",splice_qpos,indel_pos));
-
-	middle_univdiagonal = univdiagonal - nindels; /* nindels = univdiagonal - middle_univdiagonal */
-	splice_distance = middle_univdiagonal - low_univdiagonal;
-
-	debug13(printf("Splice_resolve (qstart, sense): %d indels at %d, nmismatches %d, then splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       nindels,indel_pos,nmismatches_indel,
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,indel_pos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-
-	/* Indel first */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = low_left + splice_distance + indel_pos; -- qstart; add splice_distance if indel first */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	/* Splice second */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* For qstart, push j first, then push i */
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else {
-	/* Push splice then indel (based on low_univdiagonal).  indel is distal, splice is medial */
-	debug13(printf("splice_qpos %d >= indel_pos %d\n",splice_qpos,indel_pos));
-
-	middle_univdiagonal = low_univdiagonal + nindels; /* nindels = middle_univdiagonal - low_univdiagonal */
-	splice_distance = univdiagonal - middle_univdiagonal;
-
-	debug13(printf("Splice_resolve (qstart, sense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f, then %d indels at %d, nmismatches %d\n",
-		       low_qstart,qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob,
-		       nindels,indel_pos,nmismatches_indel));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos5   /* was low_qstart */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Splice first */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel second */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = low_left + indel_pos; -- qstart; do not add splice_distance if indel second */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	Intlist_head_set(newpath->nmismatches,nmismatches_j);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_j);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_i
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_i
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-      }
-
-      debug13(printf("(2) AFTER call to Splice_resolve\n"));
-      debug13(Path_print(newpath));      
+      debug13(printf("AFTER call to Splice_resolve_qstart\n"));
+      debug13(Path_print(newpath));
     }
   }
 
@@ -1285,6 +841,8 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 			 int *distal_support, Univdiag_T *distal_univdiags, double *distal_probs, int npartners,
 
 			 Stage1_T stage1, Knownsplicing_T knownsplicing, Compress_T query_compress, char *queryptr,
+
+			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			 unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 			 bool plusp, int querylength, bool innerp,
@@ -1293,6 +851,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 			 Listpool_T listpool, Hitlistpool_T hitlistpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 			 Vectorpool_T vectorpool, int found_sensedir) {
   List_T newpaths;
+  Altsplice_T qstart_alts;
   T newpath, nextpath;
   Univcoord_T distal_univdiagonal;
   int best_endpoint, distal_trimpos;
@@ -1312,11 +871,14 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
   } else {
     n_good_partners = 0;
     for (i = 0; i < npartners; i++) {
-      assert(distal_univdiags[i]->univdiagonal < univdiagonal);
-      if (Splice_accept_p(medial_prob,distal_probs[i],univdiagonal - distal_univdiags[i]->univdiagonal,
-			  medial_support,medial_nmismatches,
+      if (distal_univdiags[i]->univdiagonal < univdiagonal &&
+	  Splice_accept_p(splice_qpos,querylength,distal_probs[i],medial_prob,
+			  /*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			  /*univdiagonal_j*/univdiagonal,
 			  distal_support[i],distal_univdiags[i]->nmismatches,
-			  innerp,/*strictp*/false) == true) {
+			  medial_support,medial_nmismatches,
+			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+			  innerp) == true) {
 	n_good_partners += 1;
 	goodi = i;
       }
@@ -1361,6 +923,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 						path->chroffset,path->chrhigh,querylength,
 						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						stage1,query_compress,queryptr,
+						streamspace_max_alloc,streamspace_alloc,
 						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -1377,9 +940,12 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 
   } else if (innerp == false &&
 	     (distal_univdiagonal =
-	      Altsplice_qstart_best(&distal_trimpos,/*medial_univdiagonal*/univdiagonal,
+	      Altsplice_qstart_best(&distal_trimpos,splice_qpos,querylength,
+				    /*medial_univdiagonal*/univdiagonal,
 				    medial_prob,medial_support,medial_nmismatches,distal_support,
-				    distal_univdiags,distal_probs,npartners,innerp)) > 0) {
+				    distal_univdiags,distal_probs,npartners,
+				    plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+				    innerp)) > 0) {
     debug13(printf("Found a best outer splice\n"));
 
     if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/distal_univdiagonal,
@@ -1387,6 +953,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 					 path->chroffset,path->chrhigh,querylength,
 					 stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 					 stage1,query_compress,queryptr,
+					 streamspace_max_alloc,streamspace_alloc,
 					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 					 localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 					 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -1400,6 +967,17 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 			  hitlistpool_trace(__FILE__,__LINE__));
     }
 
+  } else if ((qstart_alts =
+	      Altsplice_qstart_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,querylength,
+				   /*medial_univdiagonal*/univdiagonal,medial_nmismatches,
+				   medial_prob,medial_support,distal_splice_positions,
+				   distal_support,distal_univdiags,distal_probs,
+				   /*order_medial_qpos*/NULL,npartners,
+				   plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,innerp,
+				   pathpool,vectorpool,/*sort_bydistal_p*/false)) == NULL) {
+    /* Multiple partners do not work */
+    return (List_T) NULL;
+    
   } else {
     /* Multiple partners extend to the start, so create an alt substring */
     /* Altsplice_qstart_new needs to filter for good partners */
@@ -1409,12 +987,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 
     debug13(printf("Combining qstart alts for path:\n"));
     /* No need to sort because we are using a common splice qpos */
-    newpath->qstart_alts = Altsplice_qstart_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,
-						/*medial_univdiagonal*/univdiagonal,medial_nmismatches,
-						medial_prob,medial_support,distal_splice_positions,
-						distal_support,distal_univdiags,distal_probs,
-						/*order_medial_qpos*/NULL,npartners,innerp,
-						pathpool,vectorpool,/*sort_bydistal_p*/false);
+    newpath->qstart_alts = qstart_alts;
 
     Intlist_head_set(newpath->endpoints,best_endpoint);
     Intlist_head_set(newpath->nmismatches,-1);
@@ -1442,6 +1015,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 						 path->chroffset,path->chrhigh,querylength,
 						 stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						 stage1,query_compress,queryptr,
+						 streamspace_max_alloc,streamspace_alloc,
 						 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						 localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 						 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -1487,6 +1061,7 @@ attach_indel_qend_simple (int adj, T path, int indel_pos,
 			  Genomebits_T genomebits, Genomebits_T genomebits_alt,
 			  Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh, bool find_splices_p,
 
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			  unsigned short *localdb_alloc, 
 
@@ -1511,7 +1086,7 @@ attach_indel_qend_simple (int adj, T path, int indel_pos,
   debug13(printf("Calling Spliceends_qend_trim with indel_pos %d\n",indel_pos));
   splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 				  &found_sensedir,&splicetype3,&ambig_prob_3,
-				  stage1,knownsplicing,try_sensedir,
+				  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 				  distal_univdiagonal,querylength,
 				  /*pos5*/indel_pos,exon_origin,chrnum,chroffset,chrhigh,
 				  plusp,genestrand,mismatch_positions_alloc,
@@ -1731,7 +1306,7 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(1) Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       qstart,high_qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
 
 	debug13(Path_print(newpath));
@@ -1767,7 +1342,7 @@ attach_splice_qend (T path, int splice_qpos, int trimpos, int nmismatches_to_tri
 #if 0
   splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 				  &found_sensedir,&splicetype3,&ambig_prob_3,
-				  stage1,knownsplicing,try_sensedir,
+				  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 				  distal_univdiagonal,querylength,
 				  /*pos5*/splice_qpos,exon_origin,chrnum,chroffset,chrhigh,
 				  plusp,genestrand,mismatch_positions_alloc,
@@ -1893,6 +1468,7 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 		     Univcoord_T chroffset, Univcoord_T chrhigh, int querylength,
 		     Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 		     Stage1_T stage1, Compress_T query_compress, char *queryptr,
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 		     unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 		     bool plusp, int genestrand, bool innerp,
@@ -1903,6 +1479,11 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   Univcoord_T univdiagonal, left;
   int qstart, ninserts;
 
+  Univcoordlist_T new_univdiagonals;
+  Intlist_T new_nmismatches, new_ref_nmismatches, new_endpoints;
+  List_T new_junctions;
+  int ignore;
+
   int type, typei, typej;
   int nindels, indel_pos, splice_qpos, splice_qpos_i, splice_qpos_j, trimpos5, trimpos3;
   Univcoord_T middle_univdiagonal;
@@ -1912,6 +1493,8 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   int nmismatches_i, nmismatches_j, nmismatches_indel,
     ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel,
     nmismatches, ref_nmismatches, nmismatches_middle, ref_nmismatches_middle;
+  int cont_trimpos, cont_nmismatches, cont_ref_nmismatches;
+
 #ifdef DEBUG13
   int qend;
 #endif
@@ -1949,6 +1532,11 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   printf("Entering attach_unknown_qend with try_sensedir %d, univdiagonal %u %d..%d and high_univdiagonal %u (diff %d)\n",
 	 try_sensedir,univdiagonal - chroffset,qstart,qend,high_univdiagonal - chroffset,high_univdiagonal - univdiagonal);
 #endif
+
+  /* Compute continuation along univdiagonal for baseline */
+  cont_trimpos = Genomebits_trim_qend(&cont_nmismatches,query_compress,genomebits,
+				      univdiagonal,querylength,
+				      /*pos5*/qstart,/*pos3*/querylength,plusp,genestrand);
 
   if (qstart >= high_qend) {
     debug13(printf("Does not add to end of path: qstart %d >= high_qend %d\n",qstart,high_qend));
@@ -2114,505 +1702,39 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
     /* Previously filled spliceinfo with knownsplicing information on donors and antiacceptors for segmenti, now done in Splice_resolve_sense */
     /* Previously filled spliceinfo with knownsplicing information on acceptors and antidonors for segmentj, now done in Splice_resolve_sense */
 
-    if (try_sensedir == SENSE_FORWARD) {
-      /* (C1) Sense */
-      /* left = univdiagonal - querylength; -- Computed above */
-      /* high_left = high_univdiagonal - querylength; -- Combined above */
+    debug13(printf("BEFORE call to Splice_resolve_qend, %d..%d\n",qstart,high_qend));
+    debug13(Path_print(path));
 
-      debug13(printf("BEFORE call to Splice_resolve, %d..%d\n",qstart,high_qend));
-      debug13(Path_print(path));
+    if (Splice_resolve_qend(&new_univdiagonals,&new_nmismatches,&new_ref_nmismatches,&new_endpoints,&new_junctions,
+			    /*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/high_univdiagonal,
+			    stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
+			    streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			    localdb_nmismatches_allowed,
+			    /*pos5*/qstart,/*pos3*/high_qend,querylength,cont_trimpos,cont_nmismatches,
+			    indelinfo,spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
+			    /*sensedir*/try_sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,innerp,
+			    /*allow_indels_p*/true,/*find_middle_p*/true) == 0) {
+      debug13(printf("Splice_resolve_qend: fails\n"));
+      newpath = (T) NULL;
 
-      newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
-			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool);
-
-      splice_distance = high_univdiagonal - univdiagonal;
-      if ((splice_qpos = Splice_resolve(&type,&typei,&typej,&trimpos5,&trimpos3,
-					&middle_univdiagonal,&splice_qpos_i,&splice_qpos_j,&nindels,&indel_pos,
-					&nmismatches_i,&nmismatches_middle,&nmismatches_j,&nmismatches_indel,
-					&ref_nmismatches_i,&ref_nmismatches_middle,&ref_nmismatches_j,
-					&ref_nmismatches_indel,&donor1_prob,&acceptor1_prob,&donor2_prob,&acceptor2_prob,
-					/*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/high_univdiagonal,
-					stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
-					localdb_nmismatches_allowed,/*pos5*/qstart,/*pos3*/high_qend,querylength,
-					indelinfo,spliceinfo,knownsplicing,intlistpool,/*sense_forward_p*/true,
-					genestrand,/*trim5p*/false,/*trim3p*/true,innerp,
-					/*allow_indels_p*/true)) < 0) {
-	debug13(printf("(5) attach_unknown_qend is modifying path %p\n",newpath));
-
-	if (middle_univdiagonal != 0) {
-	  debug13(printf("Splice_resolve (qend, sense): found a middle exon %u at splice qpos %d and %d\n",
-			 middle_univdiagonal,splice_qpos_i,splice_qpos_j));
-	  splice_distance_j = high_univdiagonal - middle_univdiagonal;
-	  splice_distance_i = middle_univdiagonal - univdiagonal;
-	
-	  debug13(printf("(6) attach_unknown_qend is modifying path %p\n",newpath));
-	  Intlist_head_set(newpath->endpoints,splice_qpos_i);
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_j
-						intlistpool_trace(__FILE__,__LINE__));
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-						intlistpool_trace(__FILE__,__LINE__));
-	  
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_i,SENSE_FORWARD,
-									  donor1_prob,acceptor1_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_j,SENSE_FORWARD,
-									  donor2_prob,acceptor2_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	
-	  /* For qend, push i first, then push j */
-	  Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	  Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						      intlistpool_trace(__FILE__,__LINE__));
-	
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-
-	  debug13(Path_print(newpath));
-
-	} else {
-	  debug13(printf("Splice_resolve (qend, sense): fails\n"));
-
-#if 0
-	  /* Put in a temporary junction, to be fixed later if it is worth it */
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-						intlistpool_trace(__FILE__,__LINE__));
-#ifdef ALLOCATE_UNSOLVED_JUNCTION
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) Junction_new_unsolved(pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-#else
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) JUNCTION_UNSOLVED
-					     listpool_trace(__FILE__,__LINE__));
-#endif
-
-	  Intlist_head_set(newpath->nmismatches,-1);
-	  Intlist_head_set(newpath->ref_nmismatches,-1);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,-1
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,-1
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  debug13(printf("attach_unknown_qend is returning a path %p with an unsolved junction\n",newpath));
-#endif
-
-#if 0
-	  /* Put into qstart direction */
-	  *unextended_paths = Hitlist_push(*unextended_paths,hitlistpool,
-					 (void *) Path_reverse(newpath,/*expect_fwd_p*/true)
-					 hitlistpool_trace(__FILE__,__LINE__));
-#else
-	  Path_free(&newpath,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-#endif
-	  newpath = (T) NULL;
-	}
-
-#if 0
-      } else if (Splice_accept_p(donor1_prob,acceptor2_prob,splice_distance,
-				 adj_donor_support,adj_acceptor_support,innerp) == false) {
-	/* Splice_resolve should have called Splice_accept_p */
-	debug13(printf("attach_unknown_qend is not adding a long-distance bad splice (%f..%f) on outer side\n",
-		       donor1_prob,acceptor2_prob));
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-	newpath = (T) NULL;
-#endif
-
-      } else if (nindels == 0) {
-	/* Splice only */
-	debug13(printf("Splice_resolve (qend, sense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-	
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	
-	/* For qend, push i first, then push j */
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else if (indel_pos < splice_qpos) {
-	/* Push indel (based on left) then splice.  indel is medial, splice is distal. */
-	debug13(printf("indel_pos %d < splice_qpos %d\n",indel_pos,splice_qpos));
-
-	middle_univdiagonal = univdiagonal + nindels; /* nindels = middle_univdiagonal - univdiagonal */
-	splice_distance = high_univdiagonal - middle_univdiagonal;
-
-	debug13(printf("Splice_resolve (qend, sense): %d indels at %d, nmismatches %d, then splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       nindels,indel_pos,nmismatches_indel,
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,indel_pos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel first */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = left + indel_pos; -- qend; do not add splice_distance if indel first */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	/* Splice second */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* For qend, push i first, then push j */
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else {
-	/* Push splice then indel (based on high_univdiagonal).  splice is medial, indel is distal. */
-	debug13(printf("indel_pos %d >= splice_qpos %d\n",indel_pos,splice_qpos));
-
-	middle_univdiagonal = high_univdiagonal - nindels; /* nindels = high_univdiagonal - middle_univdiagonal */
-	splice_distance = middle_univdiagonal - univdiagonal;
-
-	debug13(printf("Splice_resolve (qend, sense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f, then %d indels at %d\n",
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob,
-		       nindels,indel_pos));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Splice first */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_FORWARD,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel second */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = left + splice_distance + indel_pos; -- qend; add splice_distance if indel second */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-      }
-
-      debug13(printf("(3) AFTER call to Splice_resolve\n"));
-      debug13(Path_print(newpath));
-      
     } else {
-      /* (C2) Antisense */
-      /* left = univdiagonal - querylength; -- Computed above */
-      /* high_left = high_univdiagonal - querylength; -- Computed above */
-      
-      /* Previously did not fill spliceinfo with knownsplicing info, now done in Splice_resolve_antisense */
-      
-      debug13(printf("BEFORE call to Splice_resolve, %d..%d\n",qstart,high_qend));
-      debug13(Path_print(path));
-
       newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
 			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool);
-      debug13(Path_print(newpath));
 
-      splice_distance = high_univdiagonal - univdiagonal;
-      if ((splice_qpos = Splice_resolve(&type,&typei,&typej,&trimpos5,&trimpos3,
-					&middle_univdiagonal,&splice_qpos_i,&splice_qpos_j,&nindels,&indel_pos,
-					&nmismatches_i,&nmismatches_middle,&nmismatches_j,&nmismatches_indel,
-					&ref_nmismatches_i,&ref_nmismatches_middle,&ref_nmismatches_j,
-					&ref_nmismatches_indel,&donor1_prob,&acceptor1_prob,&donor2_prob,&acceptor2_prob,
-					/*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/high_univdiagonal,
-					stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
-					localdb_nmismatches_allowed,/*pos5*/qstart,/*pos3*/high_qend,querylength,
-					indelinfo,spliceinfo,knownsplicing,intlistpool,/*sense_forward_p*/false,
-					genestrand,/*trim5p*/false,/*trim3p*/true,innerp,
-					/*allow_indels_p*/true)) < 0) {
-	debug13(printf("(7) attach_unknown_qend is modifying path %p\n",newpath));
-
-	if (middle_univdiagonal != 0) {
-	  debug13(printf("Splice_resolve (qend, antisense): found a middle exon %u at splice qpos %d and %d\n",
-			 middle_univdiagonal,splice_qpos_i,splice_qpos_j));
-	  splice_distance_j = high_univdiagonal - middle_univdiagonal;
-	  splice_distance_i = middle_univdiagonal - univdiagonal;
+      newpath->univdiagonals = Univcoordlist_append(new_univdiagonals,newpath->univdiagonals);
+      newpath->nmismatches = Intlistpool_pop(newpath->nmismatches,intlistpool,&ignore
+					     intlistpool_trace(__FILE__,__LINE__));
+      newpath->nmismatches = Intlist_append(new_nmismatches,newpath->nmismatches);
+      newpath->ref_nmismatches = Intlistpool_pop(newpath->ref_nmismatches,intlistpool,&ignore
+						 intlistpool_trace(__FILE__,__LINE__));
+      newpath->ref_nmismatches = Intlist_append(new_ref_nmismatches,newpath->ref_nmismatches);
+      newpath->endpoints = Intlistpool_pop(newpath->endpoints,intlistpool,&ignore
+					   intlistpool_trace(__FILE__,__LINE__));
+      newpath->endpoints = Intlist_append(new_endpoints,newpath->endpoints);
+      newpath->junctions = List_append(new_junctions,newpath->junctions);
 	
-	  debug13(printf("(8) attach_unknown_qend is modifying path %p\n",newpath));
-	  Intlist_head_set(newpath->endpoints,splice_qpos_i);
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos_j
-						intlistpool_trace(__FILE__,__LINE__));
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-						intlistpool_trace(__FILE__,__LINE__));
-	
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_i,SENSE_ANTI,
-									  donor1_prob,acceptor1_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_splice(splice_distance_j,SENSE_ANTI,
-									  donor2_prob,acceptor2_prob,
-									  pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	
-	  /* For qend, push i first, then push j */
-	  Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	  Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_middle
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_middle
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						      intlistpool_trace(__FILE__,__LINE__));
-	
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	
-	  debug13(Path_print(newpath));
-
-	} else {
-	  debug13(printf("Splice_resolve (qend, antisense): fails\n"));
-
-#if 0
-	  /* Put in a temporary junction, to be fixed later if it is worth it */
-	  newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-						intlistpool_trace(__FILE__,__LINE__));
-#ifdef ALLOCATE_UNSOLVED_JUNCTION
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) Junction_new_unsolved(pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-#else
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,(void *) JUNCTION_UNSOLVED
-					     listpool_trace(__FILE__,__LINE__));
-#endif
-	
-	  Intlist_head_set(newpath->nmismatches,-1);
-	  Intlist_head_set(newpath->ref_nmismatches,-1);
-	  newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,-1
-						  intlistpool_trace(__FILE__,__LINE__));
-	  newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,-1
-						      intlistpool_trace(__FILE__,__LINE__));
-	  newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							  univcoordlistpool_trace(__FILE__,__LINE__));
-	  debug13(printf("attach_unknown_qend is returning a path %p with an unsolved junction\n",newpath));
-#endif
-#if 0
-	  /* Put into qstart direction */
-	  *unextended_paths = Hitlist_push(*unextended_paths,hitlistpool,
-					 (void *) Path_reverse(newpath,/*expect_fwd_p*/true)
-					 hitlistpool_trace(__FILE__,__LINE__));
-#else
-	  Path_free(&newpath,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-#endif
-	  newpath = (T) NULL;
-	}
-
-#if 0
-      } else if (Splice_accept_p(donor1_prob,acceptor2_prob,splice_distance,
-				 adj_donor_support,adj_acceptor_support,innerp) == false) {
-	/* Splice_resolve should have called Splice_accept_p */
-	debug13(printf("attach_unknown_qend is not adding a bad splice (%f..%f)\n",
-		       donor1_prob,acceptor2_prob));
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-	newpath = (T) NULL;
-#endif
-
-      } else if (nindels == 0) {
-	/* Splice only */
-	debug13(printf("Splice_resolve (qend, antisense): splice_qpos in range %d..%d is at %d with distance %u, nmismatches %d+%d, and probs %f and %f\n",
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3   /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	
-	/* For qend, push i first, then push j */
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else if (indel_pos < splice_qpos) {
-	/* Push indel (based on left) then splice.  indel is medial, splice is distal. */
-	debug13(printf("indel_pos %d < splice_qpos %d\n",indel_pos,splice_qpos));
-
-	middle_univdiagonal = univdiagonal + nindels; /* nindels = middle_univdiagonal - univdiagonal */
-	splice_distance = high_univdiagonal - middle_univdiagonal;
-
-	debug13(printf("Splice_resolve (qend, antisense): %d indels at %d then splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f\n",
-		       nindels,indel_pos,
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob));
-
-	Intlist_head_set(newpath->endpoints,indel_pos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,splice_qpos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3    /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel first */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = left + indel_pos; -- qend; do not add splice_distance if indel first */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	/* Splice second */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* For qend, push i first, then push j */
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-
-      } else {
-	/* Push splice then indel (based on high_univdiagonal).  splice is medial, indel is distal. */
-	debug13(printf("indel_pos %d >= splice_qpos %d\n",indel_pos,splice_qpos));
-
-	middle_univdiagonal = high_univdiagonal - nindels; /* nindels = high_univdiagonal - middle_univdiagonal */
-	splice_distance = middle_univdiagonal - univdiagonal;
-
-	debug13(printf("Splice_resolve (qend, antisense): splice_qpos in range %d..%d is %d with distance %u, mismatches %d+%d, and probs %f and %f, then %d indels at %d\n",
-		       qstart,high_qend,splice_qpos,splice_distance,nmismatches_i,nmismatches_j,donor1_prob,acceptor2_prob,
-		       nindels,indel_pos));
-
-	Intlist_head_set(newpath->endpoints,splice_qpos);
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,indel_pos
-					      intlistpool_trace(__FILE__,__LINE__));
-	newpath->endpoints = Intlistpool_push(newpath->endpoints,intlistpool,trimpos3    /* was high_qend */
-					      intlistpool_trace(__FILE__,__LINE__));
-	  
-	/* Splice first */
-	newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					   (void *) Junction_new_splice(splice_distance,SENSE_ANTI,
-									donor1_prob,acceptor2_prob,pathpool)
-					   listpool_trace(__FILE__,__LINE__));
-	  
-	/* Indel second */
-	if (nindels < 0) {
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_insertion(-nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	} else {
-	  /* deletionpos = left + splice_distance + indel_pos; -- qend; add splice_distance if indel second */
-	  newpath->junctions = Listpool_push(newpath->junctions,listpool,
-					     (void *) Junction_new_deletion(nindels,pathpool)
-					     listpool_trace(__FILE__,__LINE__));
-	}
-	  
-	Intlist_head_set(newpath->nmismatches,nmismatches_i);
-	Intlist_head_set(newpath->ref_nmismatches,ref_nmismatches_i);
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_indel
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,nmismatches_indel
-						    intlistpool_trace(__FILE__,__LINE__));
-	newpath->nmismatches = Intlistpool_push(newpath->nmismatches,intlistpool,nmismatches_j
-						intlistpool_trace(__FILE__,__LINE__));
-	newpath->ref_nmismatches = Intlistpool_push(newpath->ref_nmismatches,intlistpool,ref_nmismatches_j
-						    intlistpool_trace(__FILE__,__LINE__));
-	  
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,middle_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
-							univcoordlistpool_trace(__FILE__,__LINE__));
-      } 
-      debug13(printf("(4) AFTER call to Splice_resolve\n"));
+      debug13(printf("AFTER call to Splice_resolve_qend\n"));
       debug13(Path_print(newpath));
     }
   }
@@ -2634,6 +1756,8 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 		       int *distal_support, Univdiag_T *distal_univdiags, double *distal_probs, int npartners,
 
 		       Stage1_T stage1, Knownsplicing_T knownsplicing, Compress_T query_compress, char *queryptr,
+
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 		       unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 		       bool plusp, int querylength, bool innerp,
@@ -2642,6 +1766,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 		       Listpool_T listpool, Hitlistpool_T hitlistpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		       Vectorpool_T vectorpool, int found_sensedir) {
   List_T newpaths;
+  Altsplice_T qend_alts;
   T newpath, nextpath;
   Univcoord_T distal_univdiagonal;
   int best_endpoint, distal_trimpos;
@@ -2660,11 +1785,14 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
   } else {
     n_good_partners = 0;
     for (i = 0; i < npartners; i++) {
-      assert(univdiagonal < distal_univdiags[i]->univdiagonal);
-      if (Splice_accept_p(medial_prob,distal_probs[i],distal_univdiags[i]->univdiagonal - univdiagonal,
+      if (univdiagonal < distal_univdiags[i]->univdiagonal &&
+	  Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			  /*univdiagonal_i*/univdiagonal,
+			  /*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
 			  medial_support,medial_nmismatches,
 			  distal_support[i],distal_univdiags[i]->nmismatches,
-			  innerp,/*strictp*/false) == true) {
+			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+			  innerp) == true) {
 	n_good_partners += 1;
 	goodi = i;
       }
@@ -2709,6 +1837,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 					      path->chroffset,path->chrhigh,querylength,
 					      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 					      stage1,query_compress,queryptr,
+					      streamspace_max_alloc,streamspace_alloc,
 					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 					      localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 					      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -2725,15 +1854,19 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 
   } else if (innerp == false &&
 	     (distal_univdiagonal =
-	      Altsplice_qend_best(&distal_trimpos,/*medial_univdiagonal*/univdiagonal,
+	      Altsplice_qend_best(&distal_trimpos,splice_qpos,querylength,
+				  /*medial_univdiagonal*/univdiagonal,
 				  medial_prob,medial_support,medial_nmismatches,distal_support,
-				  distal_univdiags,distal_probs,npartners,innerp)) > 0) {
+				  distal_univdiags,distal_probs,npartners,
+				  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+				  innerp)) > 0) {
     debug13(printf("Found a best outer splice\n"));
 
     if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/distal_univdiagonal,/*high_qend*/distal_trimpos,
 				       path->chroffset,path->chrhigh,querylength,
 				       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 				       stage1,query_compress,queryptr,
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 				       localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 				       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -2747,6 +1880,17 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 			  hitlistpool_trace(__FILE__,__LINE__));
     }
 
+  } else if ((qend_alts =
+	      Altsplice_qend_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,querylength,
+				 /*medial_univdiagonal*/univdiagonal,medial_nmismatches,
+				 medial_prob,medial_support,distal_splice_positions,
+				 distal_support,distal_univdiags,distal_probs,
+				 /*order_medial_qpos*/NULL,npartners,
+				 plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,innerp,
+				 pathpool,vectorpool,/*sort_bydistal_p*/false)) == NULL) {
+    /* Multiple partners do not work */
+    return (List_T) NULL;
+    
   } else {
     /* Multiple partners extend to the start, so create an alt substring */
     /* Altsplice_qend_new needs to filter for good partners */
@@ -2756,12 +1900,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 
     debug13(printf("Combining qend alts for path:\n"));
     /* No need to sort because we are using a common splice qpos */
-    newpath->qend_alts = Altsplice_qend_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,
-					    /*medial_univdiagonal*/univdiagonal,medial_nmismatches,
-					    medial_prob,medial_support,distal_splice_positions,
-					    distal_support,distal_univdiags,distal_probs,
-					    /*order_medial_qpos*/NULL,npartners,innerp,
-					    pathpool,vectorpool,/*sort_bydistal_p*/false);
+    newpath->qend_alts = qend_alts;
     Intlist_head_set(newpath->endpoints,best_endpoint);
     Intlist_head_set(newpath->nmismatches,-1);
     Intlist_head_set(newpath->ref_nmismatches,-1);
@@ -2788,6 +1927,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 					       path->chroffset,path->chrhigh,querylength,
 					       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 					       stage1,query_compress,queryptr,
+					       streamspace_max_alloc,streamspace_alloc,
 					       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 					       localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 					       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -2912,6 +2052,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 			 int *mismatch_positions_alloc, Stage1_T stage1,
 			 Knownsplicing_T knownsplicing, Spliceendsgen_T spliceendsgen,
 
+			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			 unsigned short *localdb_alloc, 
 
@@ -3331,7 +2472,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 	  debug13(printf("Calling Spliceends_qend_trim with pos5 %d\n",pos5 + ninserts));
 	  splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 					  &found_sensedir,&splicetype3,&ambig_prob_3,
-					  stage1,knownsplicing,sensedir,
+					  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,sensedir,
 					  Univcoordlist_head(univdiagonals),querylength,
 					  pos5 + ninserts,
 					  exon_origin,chrnum,chroffset,chrhigh,
@@ -3400,7 +2541,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 	  exon_origin = compute_exon_origin(endpoints,junctions);
 	  debug13(printf("Calling Spliceends_qstart_trim with pos3 %d\n",pos3));
 	  splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,&found_sensedir,&splicetype5,&ambig_prob_5,
-					    stage1,knownsplicing,sensedir,
+					    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,sensedir,
 					    Univcoordlist_head(univdiagonals),querylength,pos3,
 					    exon_origin,chrnum,chroffset,chrhigh,
 					    plusp,genestrand,mismatch_positions_alloc,
@@ -3551,6 +2692,7 @@ check_for_ascending_qstart (int prev_qstart, Univcoord_T prev_univdiagonal, List
 static void
 compute_qstart_local (List_T *qstart_paths,
 		      int depth, Path_T path, char *queryptr, int querylength,
+		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
 		      Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
 		      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress, 
@@ -3561,6 +2703,7 @@ compute_qstart_local (List_T *qstart_paths,
 		      Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
 		      bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p, bool salvagep) {
   List_T newpaths = NULL, p;
+  /* int orig_qstart; */
   T splice_path, end_path, newpath, parent;
   Univcoord_T indel_univdiagonal, univdiagonal;
   int qstart, pos3, exon_origin, indel_pos, trimpos, adj;
@@ -3628,6 +2771,7 @@ compute_qstart_local (List_T *qstart_paths,
 
   } else {
     /* Attempt to extend */
+    /* orig_qstart = Path_qstart(path); */
 
     /* pos3 is the end of the current segment.  qstart is the
        approximate start of the current segment.  pos5 (0) to qstart
@@ -3637,7 +2781,7 @@ compute_qstart_local (List_T *qstart_paths,
     /* left = univdiagonal - (Univcoord_T) querylength; */
     
     exon_origin = Path_exon_origin(path);
-    debug13(printf("(X) Calling Spliceends_trimmed_qstarts with univdiagonal %u, pos3 %d, exon_origin %d\n",
+    debug13(printf("(SPLICE) Calling Spliceends_trimmed_qstarts with univdiagonal %u, pos3 %d, exon_origin %d\n",
 		   univdiagonal,pos3,exon_origin));
     nspliceends = Spliceends_trimmed_qstarts(&spliceends,&nosplice_trimpos,&medial_splice_trimpos_0,
 					     &nosplice_nmismatches,&medial_splice_nmismatches_0,
@@ -3647,7 +2791,8 @@ compute_qstart_local (List_T *qstart_paths,
 					     chrnum,chroffset,chrhigh,plusp,genestrand,
 					     localdb_nmismatches_allowed,innerp,salvagep,
 					     mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-					     localdb_alloc,stage1,knownsplicing,univdiagpool,vectorpool,spliceendsgen,
+					     localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+					     knownsplicing,univdiagpool,vectorpool,spliceendsgen,
 					     query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
     /* path->spliceends_qstart = pos3; */
     debug13(printf("Spliceends_trimmed_qstarts returning %d spliceends, nosplice %d (%d nmismatches), medial splice %d (%d nmismatches)\n",
@@ -3696,6 +2841,7 @@ compute_qstart_local (List_T *qstart_paths,
 						       &(spliceends->distal_univdiags[i]),&(spliceends->distal_probs[i]),
 						       /*npartners*/(j - i),
 						       stage1,knownsplicing,query_compress,queryptr,
+						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						       localdb,localdb_nmismatches_allowed,plusp,querylength,innerp,
 						       intlistpool,univcoordlistpool,listpool,
@@ -3722,7 +2868,7 @@ compute_qstart_local (List_T *qstart_paths,
       
 #ifdef DEBUG13
       if (nosplice_trimpos != 0) {
-	printf("(X) Calling Genomebits_indel_solve_low and Spliceends_indel_qstart with %d..%d\n",0,nosplice_trimpos);
+	printf("(INDEL) Calling Genomebits_indel_solve_low and Spliceends_indel_qstart with %d..%d\n",0,nosplice_trimpos);
       }
 #endif
       
@@ -3737,6 +2883,7 @@ compute_qstart_local (List_T *qstart_paths,
 						       plusp,genestrand,mismatch_positions_alloc,
 						       stage1,knownsplicing,spliceendsgen,query_compress,queryptr,
 						       genomebits,genomebits_alt,chrnum,chroffset,chrhigh,find_splices_p,
+						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						       intlistpool,univcoordlistpool,listpool,
 						       pathpool,univdiagpool,vectorpool)) != NULL) {
@@ -3760,7 +2907,8 @@ compute_qstart_local (List_T *qstart_paths,
 		  Spliceends_indel_qstart(nosplice_trimpos,univdiagonal,querylength,chroffset,chrhigh,
 					  plusp,genestrand,localdb_nmismatches_allowed,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					  stage1,univdiagpool,query_compress,queryptr)) != 0 &&
+					  stage1,streamspace_max_alloc,streamspace_alloc,
+					  univdiagpool,query_compress,queryptr)) != 0 &&
 		 (newpath = attach_indel_qstart(path,/*low_diagonal*/indel_univdiagonal,/*low_qstart*/0,
 						chroffset,chrhigh,querylength,stage1->indelinfo,
 						query_compress,plusp,genestrand,
@@ -3944,15 +3092,25 @@ compute_qstart_local (List_T *qstart_paths,
       /* Extensions were added, so recurse */
       for (p = newpaths; p != NULL; p = List_next(p)) {
 	parent = (T) List_head(p);
-	compute_qstart_local(&(*qstart_paths),depth+1,parent,queryptr,querylength,
-			     mismatch_positions_alloc,novel_univdiags_alloc,
-			     novel_diagonals_alloc,localdb_alloc,
-			     stage1,knownsplicing,knownindels,
-			     query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			     univcoordlistpool,listpool,pathpool,transcriptpool,
-			     univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			     localdb_nmismatches_allowed,plusp,genestrand,
-			     sensedir,innerp,find_splices_p,salvagep);
+#if 0
+	if (Path_qstart(parent) >= orig_qstart) {
+	  debug13(printf("New path has qstart %d >= orig_qstart %d, so not recursing\n",
+			 Path_qstart(parent),orig_qstart));
+	} else {
+#endif
+	  compute_qstart_local(&(*qstart_paths),depth+1,parent,queryptr,querylength,
+			       streamspace_max_alloc,streamspace_alloc,
+			       mismatch_positions_alloc,novel_univdiags_alloc,
+			       novel_diagonals_alloc,localdb_alloc,
+			       stage1,knownsplicing,knownindels,
+			       query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			       univcoordlistpool,listpool,pathpool,transcriptpool,
+			       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			       localdb_nmismatches_allowed,plusp,genestrand,
+			       sensedir,innerp,find_splices_p,salvagep);
+#if 0
+	}
+#endif
 	Path_free(&parent,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
       }
@@ -3970,6 +3128,7 @@ compute_qstart_local (List_T *qstart_paths,
 /* unextended_paths are all fwd.  complete_paths are all rev */
 static void
 compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int querylength,
+		    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
 		    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
 		    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress, 
@@ -3980,6 +3139,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 		    Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
 		    bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p, bool salvagep) {
   List_T newpaths = NULL, p;
+  /* int orig_qend; */
   T splice_path, end_path, newpath, parent;
   Univcoord_T indel_univdiagonal, univdiagonal;
   int qend, pos5, exon_origin, indel_pos, trimpos, adj;
@@ -4046,6 +3206,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 			       hitlistpool_trace(__FILE__,__LINE__));
   } else {
     /* Attempt to extend */
+    /* orig_qend = Path_qend(path); */
 
     /* pos5 is the start of the current segment.  qend is the
        approximate end of the current segment.  qend to pos3
@@ -4058,7 +3219,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
     /* left = univdiagonal - (Univcoord_T) querylength; */
 
     exon_origin = Path_exon_origin(path);
-    debug13(printf("(X) Calling Spliceends_trimmed_qends with univdiagonal %u, pos5 %d, exon_origin %d\n",
+    debug13(printf("(SPLICE) Calling Spliceends_trimmed_qends with univdiagonal %u, pos5 %d, exon_origin %d\n",
 		   univdiagonal,pos5,exon_origin));
     nspliceends = Spliceends_trimmed_qends(&spliceends,&nosplice_trimpos,&medial_splice_trimpos_0,
 					   &nosplice_nmismatches,&medial_splice_nmismatches_0,
@@ -4067,7 +3228,8 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 					   /*qstart*/pos5,/*qend:querylength,*/exon_origin,chrnum,chroffset,chrhigh,
 					   plusp,genestrand,localdb_nmismatches_allowed,innerp,salvagep,
 					   mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-					   localdb_alloc,stage1,knownsplicing,univdiagpool,vectorpool,spliceendsgen,
+					   localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+					   knownsplicing,univdiagpool,vectorpool,spliceendsgen,
 					   query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
     /* path->spliceends_qend = pos5; */
     debug13(printf("Spliceends_trimmed_qends returning %d spliceends, nosplice %d (%d nmismatches), medial_splice %d (%d nmismatches)\n",
@@ -4117,6 +3279,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 						     &(spliceends->distal_univdiags[i]),&(spliceends->distal_probs[i]),
 						     /*npartners*/(j - i),
 						     stage1,knownsplicing,query_compress,queryptr,
+						     streamspace_max_alloc,streamspace_alloc,
 						     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						     localdb,localdb_nmismatches_allowed,plusp,querylength,innerp,
 						     intlistpool,univcoordlistpool,listpool,
@@ -4143,7 +3306,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
       
 #ifdef DEBUG13
       if (nosplice_trimpos != querylength) {
-	printf("(X) Calling Genomebits_indel_solve_high and Spliceends_indel_qend with %d..%d\n",nosplice_trimpos,querylength);
+	printf("(INDEL) Calling Genomebits_indel_solve_high and Spliceends_indel_qend with %d..%d\n",nosplice_trimpos,querylength);
       }
 #endif
   
@@ -4158,6 +3321,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 						     plusp,genestrand,mismatch_positions_alloc,
 						     stage1,knownsplicing,spliceendsgen,query_compress,queryptr,
 						     genomebits,genomebits_alt,chrnum,chroffset,chrhigh,find_splices_p,
+						     streamspace_max_alloc,streamspace_alloc,
 						     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						     intlistpool,univcoordlistpool,listpool,
 						     pathpool,univdiagpool,vectorpool)) != NULL) {
@@ -4181,7 +3345,8 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 		  Spliceends_indel_qend(nosplice_trimpos,univdiagonal,querylength,chroffset,chrhigh,
 					plusp,genestrand,localdb_nmismatches_allowed,
 					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					stage1,univdiagpool,query_compress,queryptr)) != 0 &&
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					univdiagpool,query_compress,queryptr)) != 0 &&
 		 (newpath = attach_indel_qend(path,/*high_diagonal*/indel_univdiagonal,/*high_qend*/querylength,
 					      chrhigh,querylength,stage1->indelinfo,
 					      query_compress,plusp,genestrand,
@@ -4376,15 +3541,25 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
       /* Extensions were added, so recurse */
       for (p = newpaths; p != NULL; p = List_next(p)) {
 	parent = (T) List_head(p);
-	compute_qend_local(&(*qend_paths),depth+1,parent,queryptr,querylength,
-			   mismatch_positions_alloc,novel_univdiags_alloc,
-			   novel_diagonals_alloc,localdb_alloc,
-			   stage1,knownsplicing,knownindels,
-			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			   univcoordlistpool,listpool,pathpool,transcriptpool,
-			   univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			   localdb_nmismatches_allowed,plusp,genestrand,
-			   sensedir,innerp,find_splices_p,salvagep);
+#if 0
+	if (Path_qend(parent) <= orig_qend) {
+	  debug13(printf("New path has qend %d <= orig_qend %d, so not recursing\n",
+			 Path_qend(parent),orig_qend));
+	} else {
+#endif
+	  compute_qend_local(&(*qend_paths),depth+1,parent,queryptr,querylength,
+			     streamspace_max_alloc,streamspace_alloc,
+			     mismatch_positions_alloc,novel_univdiags_alloc,
+			     novel_diagonals_alloc,localdb_alloc,
+			     stage1,knownsplicing,knownindels,
+			     query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			     univcoordlistpool,listpool,pathpool,transcriptpool,
+			     univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			     localdb_nmismatches_allowed,plusp,genestrand,
+			     sensedir,innerp,find_splices_p,salvagep);
+#if 0
+	}
+#endif
 	Path_free(&parent,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
       }
@@ -4471,15 +3646,18 @@ Path_solve_from_diagonals (int *found_score,
 			   List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
 			   List_T *sense_paths, List_T *antisense_paths,
 
-			   Univcoord_T middle_diagonal_univdiagonal, Auxinfo_T auxinfo,
+			   Univcoord_T middle_univdiagonal, Auxinfo_T auxinfo,
 
 			   Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			   int localdb_nmismatches_allowed,
 
 			   Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
-			   bool plusp, int genestrand, int localdb_nmismatches_allowed,
+			   bool plusp, int genestrand,
 			   bool paired_end_p, bool first_read_p,
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
@@ -4506,8 +3684,8 @@ Path_solve_from_diagonals (int *found_score,
 
 
   debug13(printf("Entered Path_solve_from_diagonals from method %s, find_splices_p %d, first_read_p %d, with middle_diagonal %u (#%d %u) %d..%d, %d qstart diagonals, and %d qend diagonals.  middle_nmismatches: %d\n",
-		 Method_string(method),find_splices_p,first_read_p,middle_diagonal_univdiagonal,
-		 chrnum,middle_diagonal_univdiagonal - chroffset,middle_diagonal_qstart,middle_diagonal_qend,
+		 Method_string(method),find_splices_p,first_read_p,middle_univdiagonal,
+		 chrnum,middle_univdiagonal - chroffset,middle_diagonal_qstart,middle_diagonal_qend,
 		 List_length(qstart_univdiags),List_length(qend_univdiags),middle_nmismatches));
 
 #ifdef DEBUG13
@@ -4520,15 +3698,14 @@ Path_solve_from_diagonals (int *found_score,
   for (p = qstart_univdiags; p != NULL; p = List_next(p)) {
     printf("qstart diagonal %u %u %d..%d\n",
 	   ((Univdiag_T) List_head(p))->univdiagonal,
-	   middle_diagonal_univdiagonal - ((Univdiag_T) List_head(p))->univdiagonal,
+	   middle_univdiagonal - ((Univdiag_T) List_head(p))->univdiagonal,
 	   ((Univdiag_T) List_head(p))->qstart,
 	   ((Univdiag_T) List_head(p))->qend);
-	   
   }
   for (p = qend_univdiags; p != NULL; p = List_next(p)) {
     printf("qend diagonal %u %u %d..%d\n",
 	   ((Univdiag_T) List_head(p))->univdiagonal,
-	   ((Univdiag_T) List_head(p))->univdiagonal - middle_diagonal_univdiagonal,
+	   ((Univdiag_T) List_head(p))->univdiagonal - middle_univdiagonal,
 	   ((Univdiag_T) List_head(p))->qstart,
 	   ((Univdiag_T) List_head(p))->qend);
   }
@@ -4536,11 +3713,13 @@ Path_solve_from_diagonals (int *found_score,
 
 
 #if 0
-  check_for_descending_qend(middle_diagonal_qend,middle_diagonal_univdiagonal,qstart_diagonals);
-  check_for_ascending_qstart(middle_diagonal_qstart,middle_diagonal_univdiagonal,qend_diagonals);
+  check_for_descending_qend(middle_diagonal_qend,middle_univdiagonal,qstart_diagonals);
+  check_for_ascending_qstart(middle_diagonal_qstart,middle_univdiagonal,qend_diagonals);
 #endif
 
-  if (paired_end_p == false) {
+  if (middle_univdiagonal < (Univcoord_T) querylength) {
+    return;
+  } else if (paired_end_p == false) {
     qstart_innerp = qend_innerp = false;
   } else if (first_read_p == plusp) {
     qstart_innerp = false;
@@ -4552,7 +3731,7 @@ Path_solve_from_diagonals (int *found_score,
 
 
   /* Qstart */
-  path = Path_new_for_qstart_extension(middle_diagonal_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
+  path = Path_new_for_qstart_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
 				       middle_nmismatches,plusp,first_read_p,genestrand,
 				       /*sensedir*/SENSE_FORWARD,querylength,
 				       method,chrnum,chroffset,chrhigh,
@@ -4563,7 +3742,7 @@ Path_solve_from_diagonals (int *found_score,
   for (p = qstart_univdiags; p != NULL; p = List_next(p)) {
     univdiag = (Univdiag_T) List_head(p);
     debug13(printf("Processing qstart univdiag %u %u %d..%d\n",
-		   univdiag->univdiagonal,middle_diagonal_univdiagonal - univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
+		   univdiag->univdiagonal,middle_univdiagonal - univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
     /* Previously checked for a large gap between middle_diagonal_qstart and univdiag->qend */
 
     if (univdiag->univdiagonal < chroffset + querylength) {
@@ -4574,12 +3753,14 @@ Path_solve_from_diagonals (int *found_score,
 						chroffset,chrhigh,querylength,
 						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						stage1,query_compress,queryptr,
+						streamspace_max_alloc,streamspace_alloc,
 						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
 						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 						vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD)) != NULL) {
 
       compute_qstart_local(&qstart_sense_paths,/*depth*/0,newpath,queryptr,querylength,
+			   streamspace_max_alloc,streamspace_alloc,
 			   mismatch_positions_alloc,novel_univdiags_alloc,
 			   novel_diagonals_alloc,localdb_alloc,
 			   stage1,knownsplicing,knownindels,
@@ -4598,6 +3779,7 @@ Path_solve_from_diagonals (int *found_score,
     /* Always try without a qstart_univdiag, in case the given univdiag is bad */
     debug13(printf("Processing without a qstart sense univdiag\n"));
     compute_qstart_local(&qstart_sense_paths,/*depth*/0,path,queryptr,querylength,
+			 streamspace_max_alloc,streamspace_alloc,
 			 mismatch_positions_alloc,novel_univdiags_alloc,
 			 novel_diagonals_alloc,localdb_alloc,
 			 stage1,knownsplicing,knownindels,
@@ -4611,7 +3793,7 @@ Path_solve_from_diagonals (int *found_score,
 	    listpool,pathpool,transcriptpool,hitlistpool);
 
   if (splicingp == true) {
-    path = Path_new_for_qstart_extension(middle_diagonal_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
+    path = Path_new_for_qstart_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
 					 middle_nmismatches,plusp,first_read_p,genestrand,
 					 /*sensedir*/SENSE_ANTI,querylength,
 					 method,chrnum,chroffset,chrhigh,
@@ -4621,7 +3803,7 @@ Path_solve_from_diagonals (int *found_score,
     for (p = qstart_univdiags; p != NULL; p = List_next(p)) {
       univdiag = (Univdiag_T) List_head(p);
       debug13(printf("Processing qstart univdiag %u %u %d..%d\n",
-		     univdiag->univdiagonal,middle_diagonal_univdiagonal - univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
+		     univdiag->univdiagonal,middle_univdiagonal - univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
       /* Previously checked for a large gap between middle_diagonal_qstart and univdiag->qend */
 
       if (univdiag->univdiagonal < chroffset + querylength) {
@@ -4632,11 +3814,13 @@ Path_solve_from_diagonals (int *found_score,
 						  chroffset,chrhigh,querylength,
 						  stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						  stage1,query_compress,queryptr,
+						  streamspace_max_alloc,streamspace_alloc,
 						  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						  localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
 						  intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 						  vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI)) != NULL) {
 	compute_qstart_local(&qstart_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
+			     streamspace_max_alloc,streamspace_alloc,
 			     mismatch_positions_alloc,novel_univdiags_alloc,
 			     novel_diagonals_alloc,localdb_alloc,
 			     stage1,knownsplicing,knownindels,
@@ -4654,6 +3838,7 @@ Path_solve_from_diagonals (int *found_score,
       /* Always try without a qstart_univdiag, in case the given univdiag is bad */
       debug13(printf("Processing without a qstart antisense univdiag\n"));
       compute_qstart_local(&qstart_antisense_paths,/*depth*/0,path,queryptr,querylength,
+			   streamspace_max_alloc,streamspace_alloc,
 			   mismatch_positions_alloc,novel_univdiags_alloc,
 			   novel_diagonals_alloc,localdb_alloc,
 			   stage1,knownsplicing,knownindels,
@@ -4669,7 +3854,7 @@ Path_solve_from_diagonals (int *found_score,
 
 
   /* Qend */
-  path = Path_new_for_qend_extension(middle_diagonal_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
+  path = Path_new_for_qend_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
 				     middle_nmismatches,plusp,first_read_p,genestrand,
 				     /*sensedir*/SENSE_FORWARD,querylength,
 				     method,chrnum,chroffset,chrhigh,
@@ -4680,7 +3865,7 @@ Path_solve_from_diagonals (int *found_score,
   for (p = qend_univdiags; p != NULL; p = List_next(p)) {
     univdiag = (Univdiag_T) List_head(p);
     debug13(printf("Processing qend univdiag %u %u %d..%d\n",
-		 univdiag->univdiagonal,univdiag->univdiagonal - middle_diagonal_univdiagonal,univdiag->qstart,univdiag->qend));
+		 univdiag->univdiagonal,univdiag->univdiagonal - middle_univdiagonal,univdiag->qstart,univdiag->qend));
     /* Previously checked for a large gap between middle_diagonal_qend and univdiag->qstart */
 
     if (univdiag->univdiagonal >= chrhigh) {
@@ -4694,12 +3879,14 @@ Path_solve_from_diagonals (int *found_score,
 					      chroffset,chrhigh,querylength,
 					      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 					      stage1,query_compress,queryptr,
+					      streamspace_max_alloc,streamspace_alloc,
 					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 					      localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
 					      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 					      vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD)) != NULL) {
 
       compute_qend_local(&qend_sense_paths,/*depth*/0,newpath,queryptr,querylength,
+			 streamspace_max_alloc,streamspace_alloc,
 			 mismatch_positions_alloc,novel_univdiags_alloc,
 			 novel_diagonals_alloc,localdb_alloc,
 			 stage1,knownsplicing,knownindels,
@@ -4718,6 +3905,7 @@ Path_solve_from_diagonals (int *found_score,
     /* Always try without a qend_univdiag, in case the given univdiag is bad */
     debug13(printf("Processing without a qend sense univdiag\n"));
     compute_qend_local(&qend_sense_paths,/*depth*/0,path,queryptr,querylength,
+		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
 		       stage1,knownsplicing,knownindels,
@@ -4731,7 +3919,7 @@ Path_solve_from_diagonals (int *found_score,
 	    listpool,pathpool,transcriptpool,hitlistpool);
 
   if (splicingp == true) {
-    path = Path_new_for_qend_extension(middle_diagonal_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
+    path = Path_new_for_qend_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
 				       middle_nmismatches,plusp,first_read_p,genestrand,
 				       /*sensedir*/SENSE_ANTI,querylength,
 				       method,chrnum,chroffset,chrhigh,
@@ -4741,7 +3929,7 @@ Path_solve_from_diagonals (int *found_score,
     for (p = qend_univdiags; p != NULL; p = List_next(p)) {
       univdiag = (Univdiag_T) List_head(p);
       debug13(printf("Processing qend univdiag %u %u %d..%d\n",
-		   univdiag->univdiagonal,univdiag->univdiagonal - middle_diagonal_univdiagonal,univdiag->qstart,univdiag->qend));
+		   univdiag->univdiagonal,univdiag->univdiagonal - middle_univdiagonal,univdiag->qstart,univdiag->qend));
       /* Previously checked for a large gap between middle_diagonal_qend and univdiag->qstart */
 
       if (univdiag->univdiagonal >= chrhigh) {
@@ -4755,11 +3943,13 @@ Path_solve_from_diagonals (int *found_score,
 						chroffset,chrhigh,querylength,
 						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						stage1,query_compress,queryptr,
+						streamspace_max_alloc,streamspace_alloc,
 						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
 						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 						vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI)) != NULL) {
 	compute_qend_local(&qend_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
+			   streamspace_max_alloc,streamspace_alloc,
 			   mismatch_positions_alloc,novel_univdiags_alloc,
 			   novel_diagonals_alloc,localdb_alloc,
 			   stage1,knownsplicing,knownindels,
@@ -4777,6 +3967,7 @@ Path_solve_from_diagonals (int *found_score,
       /* Always try without a qend_univdiag, in case the univdiag is bad */
       debug13(printf("Processing without a qend antisense univdiag\n"));
       compute_qend_local(&qend_antisense_paths,/*depth*/0,path,queryptr,querylength,
+			 streamspace_max_alloc,streamspace_alloc,
 			 mismatch_positions_alloc,novel_univdiags_alloc,
 			 novel_diagonals_alloc,localdb_alloc,
 			 stage1,knownsplicing,knownindels,
@@ -4823,12 +4014,13 @@ Path_solve_from_diagonals (int *found_score,
 #endif
 
   if (qstart_sense_paths != NULL && qend_sense_paths != NULL) {
-    combined_sense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_diagonal_univdiagonal,
+    combined_sense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_univdiagonal,
 						   qstart_sense_paths,qend_sense_paths,
 						   query_compress,query_compress_fwd,query_compress_rev,
 						   queryptr,querylength,plusp,first_read_p,genestrand,
 						   /*sensedir*/SENSE_FORWARD,chrnum,chroffset,chrhigh,
 						   mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
+						   streamspace_max_alloc,streamspace_alloc,
 						   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						   intlistpool,univcoordlistpool,listpool,pathpool,
 						   univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
@@ -4851,12 +4043,13 @@ Path_solve_from_diagonals (int *found_score,
 
 
   if (qstart_antisense_paths != NULL && qend_antisense_paths != NULL) {
-    combined_antisense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_diagonal_univdiagonal,
+    combined_antisense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_univdiagonal,
 						       qstart_antisense_paths,qend_antisense_paths,
 						       query_compress,query_compress_fwd,query_compress_rev,
 						       queryptr,querylength,plusp,first_read_p,genestrand,
 						       /*sensedir*/SENSE_ANTI,chrnum,chroffset,chrhigh,
 						       mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
+						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 						       intlistpool,univcoordlistpool,listpool,pathpool,
 						       univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
@@ -5153,9 +4346,11 @@ Path_solve_from_univdiagonal (int *found_score,
 			      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			      bool plusp, int querylength, int *mismatch_positions_alloc,
 			      
+			      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			      int localdb_nmismatches_allowed,
+
+			      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			      bool paired_end_p, bool first_read_p,
 
 			      Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
@@ -5251,12 +4446,14 @@ Path_solve_from_univdiagonal (int *found_score,
 			      /*middle_univdiagonal*/univdiagonal,auxinfo,
 			      
 			      queryseq,queryptr,querylength,
-			      mismatch_positions_alloc,novel_univdiags_alloc,
-			      novel_diagonals_alloc,localdb_alloc,
+			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_nmismatches_allowed,
+
 			      stage1,knownsplicing,knownindels,
 			      query_compress,query_compress_fwd,query_compress_rev,
 			      chrnum,chroffset,chrhigh,plusp,/*genestrand*/0,
-			      localdb_nmismatches_allowed,paired_end_p,first_read_p,
+			      paired_end_p,first_read_p,
 			      intlistpool,uintlistpool,univcoordlistpool,
 			      listpool,pathpool,transcriptpool,
 			      univdiagpool,vectorpool,hitlistpool,spliceendsgen,method,
@@ -5309,7 +4506,7 @@ remap_paths (int *found_score, List_T paths,
   Hitlistpool_free_list(&paths,hitlistpool
 			hitlistpool_trace(__FILE__,__LINE__));
 
-  assert(result_paths != NULL);
+  /* assert(result_paths != NULL); -- incorrect assumption */
   return result_paths;
 }
 #endif
@@ -5321,11 +4518,13 @@ remap_paths (int *found_score, List_T paths,
 List_T
 Path_extend (int *found_score, List_T *global_unextended_paths,
 	     T original_path, Shortread_T queryseq, char *queryptr, int querylength,
-	     int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-	     Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	     int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	     int localdb_nmismatches_allowed, 
+
 	     Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 	     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-	     int genestrand, int localdb_nmismatches_allowed, bool paired_end_p, bool lowp,
+	     int genestrand, bool paired_end_p, bool lowp,
 	     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 	     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
@@ -5367,6 +4566,7 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
   /* Extend qstart with salvagep being true */
   /* qstart_paths should be fwd */
   compute_qstart_local(&qstart_paths,/*depth*/0,original_path,queryptr,querylength,
+		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
 		       stage1,knownsplicing,knownindels,
@@ -5380,6 +4580,7 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
   for (p = qstart_paths; p != NULL; p = List_next(p)) {
     path = Path_reverse((Path_T) List_head(p),/*expect_fwd_p*/false);
     compute_qend_local(&qend_paths,/*depth*/0,path,queryptr,querylength,
+		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
 		       stage1,knownsplicing,knownindels,
@@ -5448,19 +4649,26 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
 /* innerp is true by definition (resolve means to determine inner splices) */
 void
 Path_qstart_resolve (int *found_score, T path,
-		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
-		     char *queryptr, int querylength,
+		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal, char *queryptr, int querylength,
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     int localdb_nmismatches_allowed,
+		     
 		     Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
 		     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		     int genestrand, int localdb_nmismatches_allowed,
+		     int genestrand, 
 		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool) {
 
-  Univcoord_T new_univdiagonal = 0, indel_univdiagonal;
+  Univcoord_T new_univdiagonal, indel_univdiagonal;
   int nosplice_trimpos, qend;
   int supporti, supportj;
+
+  Univcoordlist_T univdiagonals;
+  Intlist_T nmismatches, ref_nmismatches, endpoints;
+  List_T junctions;
+  int ignore;
 
   Univcoord_T *new_univdiagonals, nearest_univdiagonal, univdiagonal_i,
     univdiagonal, middle_univdiagonal;
@@ -5471,8 +4679,9 @@ Path_qstart_resolve (int *found_score, T path,
   int *medial_nmismatches, *medial_qpositions;
   double *medial_probs, *distal_probs;
   int *medial_support, *distal_support;
-  int n_good_partners, npartners, ndiagonals, goodi, i, j;
+  int n_medial_partners, npartners, ndiagonals, goodi, i, j;
   bool sense_forward_p, multiple_splice_qpos_p;
+  Junction_T junction;
 
   Chrpos_T splice_distance;
   int type;
@@ -5492,6 +4701,8 @@ Path_qstart_resolve (int *found_score, T path,
   Path_expect_fwd(path);
 
   univdiagonal = Univcoordlist_head(path->univdiagonals);
+  debug3(printf("Original univdiagonal: %u\n",univdiagonal));
+
   if (high_univdiagonal > univdiagonal) {
     debug3(printf("Changing high_univdiagonal to be %u\n",univdiagonal));
     high_univdiagonal = univdiagonal;
@@ -5515,33 +4726,49 @@ Path_qstart_resolve (int *found_score, T path,
     qstart = Intlist_head(path->endpoints);
     pos3 = Intlist_second_value(path->endpoints);
 
+#if 0
+    /* This can lead to poor results */
     /* Compute continuation to 0 for baseline */
     cont_trimpos = 0;
     cont_nmismatches =
       Genomebits_count_mismatches_substring(&cont_ref_nmismatches,genomebits,genomebits_alt,
 					    query_compress,univdiagonal,querylength,
 					    /*pos5*/0,pos3,path->plusp,genestrand);
+#else
+    cont_trimpos = Genomebits_trim_qstart(&cont_nmismatches,query_compress,genomebits,
+					  univdiagonal,querylength,
+					  /*pos5*/0,pos3,path->plusp,genestrand);
+#endif
 
     new_univdiagonals =
       Spliceends_qstart_resolve(&ndiagonals,&resolve_nmismatches,/*pos3*/qstart,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress,queryptr,path->plusp,genestrand,
 				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				stage1,localdb_nmismatches_allowed);
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				localdb_nmismatches_allowed);
     
     if (ndiagonals == 0) {
       debug3(printf("Spliceends_qstart_resolve returns nothing\n"));
       local_trimpos = Genomebits_trim_qstart(&local_nmismatches,query_compress,genomebits,
 					     univdiagonal,querylength,
 					     /*pos5*/0,pos3,path->plusp,genestrand);
-      debug3(printf("Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
-      Intlist_head_set(path->endpoints,local_trimpos);
-      Intlist_head_set(path->nmismatches,local_nmismatches);
-      Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+      debug3(printf("(1) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+      if (local_trimpos >= pos3) {
+	debug3(printf("Need to trim exon completely\n"));
+	Path_trim_qstart_n(/*noutside*/local_trimpos - Intlist_head(path->endpoints),path,
+			   query_compress_fwd,query_compress_rev,
+			   intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 
-      path->splice5p = false;
-      path->splicetype5 = NO_SPLICE;
-      path->ambig_prob_5 = 0.0;
+      } else {
+	Intlist_head_set(path->endpoints,local_trimpos);
+	Intlist_head_set(path->nmismatches,local_nmismatches);
+	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+
+	path->splice5p = false;
+	path->splicetype5 = NO_SPLICE;
+	path->ambig_prob_5 = 0.0;
+      }
 
     } else if ((nearest_univdiagonal = new_univdiagonals[0]) == univdiagonal) {
       /* Continuation of univdiagonal */
@@ -5549,15 +4776,29 @@ Path_qstart_resolve (int *found_score, T path,
       local_trimpos = Genomebits_trim_qstart(&local_nmismatches,query_compress,genomebits,
 					     nearest_univdiagonal,querylength,
 					     /*pos5*/0,pos3,path->plusp,genestrand);
-      Intlist_head_set(path->endpoints,local_trimpos);
-      if (Intlist_head(path->nmismatches) >= 0) {
-	Intlist_head_incr(path->nmismatches,local_nmismatches);
-	Intlist_head_incr(path->ref_nmismatches,local_nmismatches);
-      }
+      debug3(printf("(2) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+      if (local_trimpos >= pos3) {
+	debug3(printf("Need to trim exon completely\n"));
+	Path_trim_qstart_n(/*noutside*/local_trimpos - Intlist_head(path->endpoints),path,
+			   query_compress_fwd,query_compress_rev,
+			   intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 
-      path->splice5p = false;
-      path->splicetype5 = NO_SPLICE;
-      path->ambig_prob_5 = 0.0;
+      } else {
+	Intlist_head_set(path->endpoints,local_trimpos);
+#if 0
+	if (Intlist_head(path->nmismatches) >= 0) {
+	  Intlist_head_incr(path->nmismatches,local_nmismatches);
+	  Intlist_head_incr(path->ref_nmismatches,local_nmismatches);
+	}
+#else
+	Intlist_head_set(path->nmismatches,local_nmismatches);
+	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+#endif
+
+	path->splice5p = false;
+	path->splicetype5 = NO_SPLICE;
+	path->ambig_prob_5 = 0.0;
+      }
 
     } else if (nearest_univdiagonal > univdiagonal) {
       /* Insertion.  Skip */
@@ -5616,7 +4857,10 @@ Path_qstart_resolve (int *found_score, T path,
       /* Unable to try splicing */
 
     } else if (ndiagonals == 1) {
-      /* Does not allow for middle univdiagonal */
+
+#if 0
+      new_univdiagonal = 0;
+      /* Splice_nomiddle call type 1 */
       if ((splice_qpos = Splice_nomiddle(&type,&trimpos5,&trimpos3,&supporti,&supportj,
 					 &nindels,&indel_pos,&nmismatches_i,&nmismatches_j,&nmismatches_indel,
 					 &ref_nmismatches_i,&ref_nmismatches_j,&ref_nmismatches_indel,
@@ -5627,19 +4871,26 @@ Path_qstart_resolve (int *found_score, T path,
 					 intlistpool,/*sense_forward_p*/(path->sensedir == SENSE_FORWARD) ? true : false,
 					 genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
 					 /*allow_indels_p*/true)) < 0) {
-
 	debug3(printf("Single splice finds no solution\n"));
 	local_trimpos = Genomebits_trim_qstart(&local_nmismatches,query_compress,
 					       /*bits*/genomebits,univdiagonal,querylength,
 					       /*pos5*/0,pos3,path->plusp,genestrand);
-	debug3(printf("Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
-	Intlist_head_set(path->endpoints,local_trimpos);
-	Intlist_head_set(path->nmismatches,local_nmismatches);
-	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	debug3(printf("(3) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos >= pos3) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qstart_n(/*noutside*/local_trimpos - Intlist_head(path->endpoints),path,
+			     query_compress_fwd,query_compress_rev,
+			     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+
+	} else {
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
 	
-	path->splice5p = false;
-	path->splicetype5 = NO_SPLICE;
-	path->ambig_prob_5 = 0.0;
+	  path->splice5p = false;
+	  path->splicetype5 = NO_SPLICE;
+	  path->ambig_prob_5 = 0.0;
+	}
 
       } else if ((pos3 - trimpos5) - nmismatches_i - nmismatches_j <= (pos3 - cont_trimpos) - cont_nmismatches) {
 	debug3(printf("Deletion or short intron yields fewer matches than continuation: (%d - %d) - %d - %d vs (%d - %d) - %d\n",
@@ -5783,6 +5034,68 @@ Path_qstart_resolve (int *found_score, T path,
 						     univcoordlistpool_trace(__FILE__,__LINE__));
       }
 
+#else
+      if (Splice_resolve_qstart(&univdiagonals,&nmismatches,&ref_nmismatches,&endpoints,&junctions,
+				/*univdiagonal_i*/nearest_univdiagonal,/*univdiagonal_j*/univdiagonal,
+				stage1,query_compress,queryptr,
+				path->plusp,Path_chroffset(path),Path_chrhigh(path),
+				streamspace_max_alloc,streamspace_alloc,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				localdb_nmismatches_allowed,
+				/*pos5*/0,pos3,querylength,cont_trimpos,cont_nmismatches,
+				indelinfo,stage1->spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
+				path->sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
+				/*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+
+
+	debug3(printf("Single splice finds no solution\n"));
+	local_trimpos = Genomebits_trim_qstart(&local_nmismatches,query_compress,
+					       /*bits*/genomebits,univdiagonal,querylength,
+					       /*pos5*/0,pos3,path->plusp,genestrand);
+	debug3(printf("(3) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos >= pos3) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qstart_n(/*noutside*/local_trimpos - Intlist_head(path->endpoints),path,
+			     query_compress_fwd,query_compress_rev,
+			     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+
+	} else {
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	
+	  path->splice5p = false;
+	  path->splicetype5 = NO_SPLICE;
+	  path->ambig_prob_5 = 0.0;
+	}
+
+#if 0
+      } else if ((pos3 - trimpos5) - nmismatches_i - nmismatches_j <= (pos3 - cont_trimpos) - cont_nmismatches) {
+	debug3(printf("Single splice yields fewer matches than continuation: (%d - %d) - %d - %d vs (%d - %d) - %d\n",
+		      pos3,trimpos5,nmismatches_i,nmismatches_j,pos3,cont_trimpos,cont_nmismatches));
+#endif
+	
+      } else {
+	/* No need to copy path */
+	debug3(printf("Adding results from Splice_resolve_qstart\n"));
+
+	path->univdiagonals = Univcoordlist_append(univdiagonals,path->univdiagonals);
+	path->nmismatches = Intlistpool_pop(path->nmismatches,intlistpool,&ignore
+					       intlistpool_trace(__FILE__,__LINE__));
+	path->nmismatches = Intlist_append(nmismatches,path->nmismatches);
+	path->ref_nmismatches = Intlistpool_pop(path->ref_nmismatches,intlistpool,&ignore
+						   intlistpool_trace(__FILE__,__LINE__));
+	path->ref_nmismatches = Intlist_append(ref_nmismatches,path->ref_nmismatches);
+	path->endpoints = Intlistpool_pop(path->endpoints,intlistpool,&ignore
+					     intlistpool_trace(__FILE__,__LINE__));
+	path->endpoints = Intlist_append(endpoints,path->endpoints);
+	path->junctions = List_append(junctions,path->junctions);
+	
+	debug3(printf("AFTER call to Splice_resolve_qstart\n"));
+	debug3(Path_print(path));
+      }
+#endif
+
     } else {
       /* Multiple splices */
       debug3(printf("(1) Multiple diagonals: %d\n",ndiagonals));
@@ -5803,9 +5116,11 @@ Path_qstart_resolve (int *found_score, T path,
 
       multiple_splice_qpos_p = false;
       for (i = 0; i < ndiagonals; i++) {
-	/* Does not allow for middle univdiagonal */
 	univdiagonal_i = new_univdiagonals[i];
+
+#if 0
 	debug3(printf("Calling Splice_nomiddle with %u and %u\n",univdiagonal_i,univdiagonal));
+	/* Splice_nomiddle call type 2 */
 	if ((splice_qpos = Splice_nomiddle(&type,&trimpos5,&trimpos3,&supporti,&supportj,
 					   &nindels,&indel_pos,&nmismatches_i,&nmismatches_j,&nmismatches_indel,
 					   &ref_nmismatches_i,&ref_nmismatches_j,&ref_nmismatches_indel,
@@ -5816,13 +5131,7 @@ Path_qstart_resolve (int *found_score, T path,
 					   stage1->indelinfo,stage1->spliceinfo,knownsplicing,intlistpool,
 					   sense_forward_p,genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
 					   /*allow_indels_p*/false)) < 0) {
-
-	  /* TODO: Consider allowing indels.  Altsplice would need to store indel info */
 	  /* Skip */
-
-	} else if ((pos3 - trimpos5) - nmismatches_i - nmismatches_j <= (pos3 - cont_trimpos) - cont_nmismatches) {
-	  debug3(printf("(1) Multiple splices have fewer matches than continuation: (%d - %d) - %d - %d vs (%d - %d) - %d\n",
-			pos3,trimpos5,nmismatches_i,nmismatches_j,pos3,cont_trimpos,cont_nmismatches));
 
 	} else if (npartners == 0) {
 	  medial_qpos = medial_qpositions[0] = splice_qpos;
@@ -5870,55 +5179,121 @@ Path_qstart_resolve (int *found_score, T path,
 	  }
 	  npartners++;
 	}
-
 	debug3(printf("%u %u => %d, %f, %f\n",univdiagonal_i,univdiagonal - univdiagonal_i,
 		      splice_qpos,donor_prob,acceptor_prob));
       }
 
-      n_good_partners = 0;
-      for (i = 0; i < npartners; i++) {
-	assert(distal_univdiags[i]->univdiagonal < univdiagonal);
-	/* Need to use distal_support when a distal indel is found by Spliceends */
-	if (Splice_accept_p(medial_probs[i],distal_probs[i],univdiagonal - distal_univdiags[i]->univdiagonal,
-			    medial_support[i],medial_nmismatches[i],distal_support[i],
-			    /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			    distal_univdiags[i]->nmismatches,/*innerp*/true,/*strictp*/true) == true) {
-	  n_good_partners += 1;
-	  goodi = i;
+#else
+	/* allow_indels_p is false because Altsplice_T cannot handle indels */
+	debug3(printf("Calling Splice_result_qstart with %u and %u\n",univdiagonal_i,univdiagonal));
+	if (Splice_resolve_qstart(&univdiagonals,&nmismatches,&ref_nmismatches,&endpoints,&junctions,
+				  univdiagonal_i,/*univdiagonal_j*/univdiagonal,
+				  stage1,query_compress,queryptr,
+				  path->plusp,Path_chroffset(path),Path_chrhigh(path),
+				  
+				  streamspace_max_alloc,streamspace_alloc,
+				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				  localdb_nmismatches_allowed,
+
+				  /*pos5*/0,pos3,querylength,cont_trimpos,cont_nmismatches,
+				  stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+				  univcoordlistpool,intlistpool,listpool,pathpool,
+				  path->sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
+				  /*allow_indels_p*/false,/*find_middle_p*/false) == 0) {
+	  /* Skip */
+
+	} else {
+	  splice_qpos = Intlist_second_value(endpoints);
+	  if (npartners == 0) {
+	    /* Do not set multiple_splice_qpos_p */
+	    medial_qpos = splice_qpos;
+	  } else if (splice_qpos != medial_qpos) {
+	    multiple_splice_qpos_p = true;
+	  }
+
+	  debug3(printf("endpoints %s => supporti %d, supportj %d\n",
+			Intlist_to_string(endpoints),Intlist_second_value(endpoints) - Intlist_head(endpoints),
+			pos3 - Intlist_second_value(endpoints)));
+
+	  medial_qpositions[npartners] = splice_qpos;
+	  medial_support[npartners] = /*supportj*/ pos3 - Intlist_second_value(endpoints);
+	  medial_nmismatches[npartners] = /*nmismatches_j*/ Intlist_second_value(nmismatches);
+	  distal_positions[npartners] = univdiagonal_i - querylength + splice_qpos;
+
+	  distal_support[npartners] = /*supporti*/ Intlist_second_value(endpoints) - Intlist_head(endpoints);
+	  distal_univdiags[npartners]->univdiagonal = univdiagonal_i;
+	  distal_univdiags[npartners]->qstart = /*trimpos5*/ Intlist_head(endpoints);
+	  distal_univdiags[npartners]->qend = splice_qpos;
+	  distal_univdiags[npartners]->nmismatches = /*nmismatches_i*/ Intlist_head(nmismatches);
+
+	  junction = (Junction_T) List_head(junctions);
+	  /* good_outer_accept_p = junction->outer_accept_p; -- Used if npartners == 1 */
+	  /* assert(Junction_type(junction) == SPLICE_JUNCTION); -- Could have been converted to a deletion */
+	  debug3(Junction_print(junction));
+
+	  if (path->plusp == sense_forward_p) {
+	    medial_probs[npartners] = junction->acceptor_prob;
+	    distal_probs[npartners] = junction->donor_prob;
+	  } else {
+	    medial_probs[npartners] = junction->donor_prob;
+	    distal_probs[npartners] = junction->acceptor_prob;
+	  }
+
+	  Intlistpool_free_list(&endpoints,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
+				      univcoordlistpool_trace(__FILE__,__LINE__));
+	  Intlistpool_free_list(&nmismatches,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Intlistpool_free_list(&ref_nmismatches,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Junction_list_gc(&junctions,listpool,pathpool);
+
+	  debug3(printf("%u %u => %d, %f, %f\n",univdiagonal_i,univdiagonal - univdiagonal_i,
+			splice_qpos,junction->donor_prob,junction->acceptor_prob));
+	  npartners++;
 	}
       }
-      debug13(printf("%d partners are good\n",n_good_partners));
+#endif
 
-      if (n_good_partners == 0) {
+      if (npartners == 0) {
 	debug3(printf("(1) Multiple splices find no good solution\n"));
 	local_trimpos = Genomebits_trim_qstart(&local_nmismatches,query_compress,
 					       /*bits*/genomebits,univdiagonal,querylength,
 					       /*pos5*/0,pos3,path->plusp,genestrand);
-	debug3(printf("Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
-	Intlist_head_set(path->endpoints,local_trimpos);
-	Intlist_head_set(path->nmismatches,local_nmismatches);
-	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	debug3(printf("(4) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos >= pos3) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qstart_n(/*noutside*/local_trimpos - Intlist_head(path->endpoints),path,
+			     query_compress_fwd,query_compress_rev,
+			     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 
-	path->splice5p = false;
-	path->splicetype5 = NO_SPLICE;
-	path->ambig_prob_5 = 0.0;
+	} else {
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
 
-      } else if (n_good_partners == 1) {
+	  path->splice5p = false;
+	  path->splicetype5 = NO_SPLICE;
+	  path->ambig_prob_5 = 0.0;
+	}
+
+      } else if (npartners == 1) {
 	/* Single valid splice */
 	debug3(printf("(1) Multiple splices yield one valid solution\n"));
 
-	Intlist_head_set(path->endpoints,medial_qpositions[goodi]);
-	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[goodi]->qstart /* was 0 */
+	Intlist_head_set(path->endpoints,medial_qpositions[0]);
+	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[0]->qstart /* was 0 */
 					   intlistpool_trace(__FILE__,__LINE__));
       
-	univdiagonal_i = distal_positions[goodi] - medial_qpositions[goodi] + querylength;  /* univdiagonal; */
+	univdiagonal_i = distal_positions[0] - medial_qpositions[0] + querylength;  /* univdiagonal; */
 	splice_distance = univdiagonal - univdiagonal_i;
 	if (path->plusp == sense_forward_p) {
-	  donor_prob = distal_probs[goodi];
-	  acceptor_prob = medial_probs[goodi];
+	  donor_prob = distal_probs[0];
+	  acceptor_prob = medial_probs[0];
 	} else {
-	  donor_prob = medial_probs[goodi];
-	  acceptor_prob = distal_probs[goodi];
+	  donor_prob = medial_probs[0];
+	  acceptor_prob = distal_probs[0];
 	}
 	path->junctions = Listpool_push(path->junctions,listpool,
 					(void *) Junction_new_splice(splice_distance,path->sensedir,
@@ -5926,14 +5301,14 @@ Path_qstart_resolve (int *found_score, T path,
 					listpool_trace(__FILE__,__LINE__));
       
 	/* For qstart, push j first, then push i */
-	Intlist_head_set(path->nmismatches,medial_nmismatches[goodi]);
-	Intlist_head_set(path->ref_nmismatches,medial_nmismatches[goodi]);
-	path->nmismatches = Intlistpool_push(path->nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
+	Intlist_head_set(path->nmismatches,medial_nmismatches[0]);
+	Intlist_head_set(path->ref_nmismatches,medial_nmismatches[0]);
+	path->nmismatches = Intlistpool_push(path->nmismatches,intlistpool,distal_univdiags[0]->nmismatches
 					     intlistpool_trace(__FILE__,__LINE__));
-	path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
+	path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[0]->nmismatches
 						 intlistpool_trace(__FILE__,__LINE__));
       
-	debug13(printf("Pushing univdiagonal %u\n",univdiagonal_i));
+	debug3(printf("Pushing univdiagonal %u\n",univdiagonal_i));
 	path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,univdiagonal_i
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	new_univdiagonal = univdiagonal_i;
@@ -5942,19 +5317,23 @@ Path_qstart_resolve (int *found_score, T path,
 	path->splicetype5 = NO_SPLICE;
 	path->ambig_prob_5 = 0.0;
 	
-      } else if (multiple_splice_qpos_p == false) {
-	debug3(printf("(1) %d good partners => altsplice\n",n_good_partners));
+      } else if (multiple_splice_qpos_p == false &&
+		 (path->qstart_alts =
+		  Altsplice_qstart_new(&best_endpoint,/*boundedp*/false,
+				       medial_qpos,/*anchor_qpos*/pos3,querylength,
+				       /*medial_univdiagonal*/univdiagonal,medial_nmismatches[0],
+				       medial_probs[0],medial_support[0],distal_positions,
+				       distal_support,distal_univdiags,distal_probs,
+				       /*order_medial_qpos*/NULL,npartners,
+				       path->plusp,/*sense_forward_p*/path->sensedir == SENSE_FORWARD,
+				       /*innerp*/true,pathpool,vectorpool,/*sort_bydistal_p*/false)) != NULL) {
+
+	debug3(printf("(1) %d partners with same medial qpos => altsplice\n",npartners));
 	
 	path->splice5p = false;
 	path->splicetype5 = NO_SPLICE;
 	path->ambig_prob_5 = 0.0;
 	
-	path->qstart_alts = Altsplice_qstart_new(&best_endpoint,/*boundedp*/false,medial_qpos,/*anchor_qpos*/pos3,
-						 /*medial_univdiagonal*/univdiagonal,medial_nmismatches[0],
-						 medial_probs[0],medial_support[0],distal_positions,
-						 distal_support,distal_univdiags,distal_probs,
-						 /*order_medial_qpos*/NULL,npartners,/*innerp*/true,
-						 pathpool,vectorpool,/*sort_bydistal_p*/false);
 	Intlist_head_set(path->endpoints,best_endpoint);
 	Intlist_head_set(path->nmismatches,-1);
 	Intlist_head_set(path->ref_nmismatches,-1);
@@ -5968,29 +5347,39 @@ Path_qstart_resolve (int *found_score, T path,
 	    medial_qpos = medial_qpositions[i];
 	  }
 	}
+	debug3(printf("best medial qpos is %d with prob %f\n",medial_qpos,best_prob));
 
-	n_good_partners = 0;
+	n_medial_partners = 0;
 	for (i = 0; i < npartners; i++) {
-	  assert(distal_univdiags[i]->univdiagonal < univdiagonal);
+#if 0
 	  /* Need to use distal_support when a distal indel is found by Spliceends */
-	  if (Splice_accept_p(medial_probs[i],distal_probs[i],univdiagonal - distal_univdiags[i]->univdiagonal,
-			      medial_support[i],medial_nmismatches[i],distal_support[i],
-			      /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			      distal_univdiags[i]->nmismatches,/*innerp*/true,/*strictp*/true) == true) {
+	  if (distal_univdiags[i]->univdiagonal < univdiagonal &&
+	      Splice_accept_p(splice_qpos,querylength,distal_probs[i],medial_probs[i],
+			      /*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			      /*univdiagonal_j*/univdiagonal,
+			      distal_support[i],distal_univdiags[i]->nmismatches,
+			      medial_support[i],medial_nmismatches[i],
+			      path->plusp,sense_forward_p,/*innerp*/true) == true) {
 	    /* Skip */
 	  } else if (medial_qpositions[i] == medial_qpos) {
 	    n_good_partners += 1;
 	    goodi = i;
 	  }
+#else
+	  if (medial_qpositions[i] == medial_qpos) {
+	    n_medial_partners += 1;
+	    goodi = i;		/* Used in case n_medial_partners == 1 */
+	  }
+#endif
 	}
 
-	debug3(printf("Determined that medial_qpos %d is best, with %d good partners\n",
-		      medial_qpos,n_good_partners));
+	debug3(printf("Determined that medial_qpos %d is best, with %d partners\n",
+		      medial_qpos,n_medial_partners));
 	
-	if (n_good_partners == 0) {
+	if (n_medial_partners == 0) {
 	  /* All good distal probs are paired with a low medial prob.  Leave path as is. */
 
-	} else if (n_good_partners == 1) {
+	} else if (n_medial_partners == 1) {
 	  Intlist_head_set(path->endpoints,medial_qpositions[goodi]);
 	  path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[goodi]->qstart /* was 0 */
 					     intlistpool_trace(__FILE__,__LINE__));
@@ -6017,7 +5406,7 @@ Path_qstart_resolve (int *found_score, T path,
 	  path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
 						   intlistpool_trace(__FILE__,__LINE__));
 	  
-	  debug13(printf("Pushing univdiagonal %u\n",univdiagonal_i));
+	  debug3(printf("Pushing univdiagonal %u\n",univdiagonal_i));
 	  path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,univdiagonal_i
 						       univcoordlistpool_trace(__FILE__,__LINE__));
 	  new_univdiagonal = univdiagonal_i;
@@ -6028,28 +5417,39 @@ Path_qstart_resolve (int *found_score, T path,
 	  
 	} else {
 	  order = Sedgesort_order_int(medial_qpositions,npartners);
+
 	  i = 0;
 	  while (i < npartners && medial_qpositions[order[i]] < medial_qpos) {
 	    i++;
 	  }
 	  j = i + 1;
-	  while (j < npartners && medial_qpositions[order[i]] == medial_qpos) {
+	  while (j < npartners && medial_qpositions[order[j]] == medial_qpos) {
 	    j++;
 	  }
+	  assert(j - i == n_medial_partners);
 	  
 	  path->splice5p = false;
 	  path->splicetype5 = NO_SPLICE;
 	  path->ambig_prob_5 = 0.0;
 	
-	  path->qstart_alts = Altsplice_qstart_new(&best_endpoint,/*boundedp*/false,medial_qpos,/*anchor_qpos*/pos3,
-						   /*medial_univdiagonal*/univdiagonal,medial_nmismatches[goodi],
-						   medial_probs[goodi],medial_support[goodi],
-						   distal_positions,distal_support,distal_univdiags,distal_probs,
-						   /*order_medial_qpos*/&(order[i]),/*npartners*/j - i,/*innerp*/true,
-						   pathpool,vectorpool,/*sort_bydistal_p*/false);
-	  Intlist_head_set(path->endpoints,best_endpoint);
-	  Intlist_head_set(path->nmismatches,-1);
-	  Intlist_head_set(path->ref_nmismatches,-1);
+	  if ((path->qstart_alts =
+	       Altsplice_qstart_new(&best_endpoint,/*boundedp*/false,
+				    medial_qpos,/*anchor_qpos*/pos3,querylength,
+				    /*medial_univdiagonal*/univdiagonal,medial_nmismatches[goodi],
+				    medial_probs[goodi],medial_support[goodi],
+				    distal_positions,distal_support,distal_univdiags,distal_probs,
+				    /*order_medial_qpos*/&(order[i]),/*npartners*/n_medial_partners,
+				    path->plusp,/*sense_forward_p*/path->sensedir == SENSE_FORWARD,
+				    /*innerp*/true,pathpool,vectorpool,/*sort_bydistal_p*/false)) == NULL) {
+	    Intlist_head_set(path->endpoints,medial_qpos);
+	    Intlist_head_set(path->nmismatches,medial_nmismatches[goodi]);
+	    Intlist_head_set(path->ref_nmismatches,medial_nmismatches[goodi]);
+
+	  } else {
+	    Intlist_head_set(path->endpoints,best_endpoint);
+	    Intlist_head_set(path->nmismatches,-1);
+	    Intlist_head_set(path->ref_nmismatches,-1);
+	  }
 
 	  FREE(order);
 	}
@@ -6057,16 +5457,20 @@ Path_qstart_resolve (int *found_score, T path,
 
       /* Vectorpool_free_univcoordvector(distal_positions,vectorpool); */
       /* Vectorpool_free_doublevector(distal_probs,vectorpool); */
-      FREE(distal_univdiags[0]);
-      FREE(distal_univdiags);
+      Univdiag_free_array(&distal_univdiags);
     }
   }
+  debug3(Path_print(path));
 
 
   /* If we have added a new univdiagonal (splice), see if there is an indel beyond that */
   /* Code taken from attach_indel_qstart */
 
-  if (new_univdiagonal == 0) {
+  /* Note: new_univdiagonal is not defined with Splice_resolve_qstart */
+  new_univdiagonal = Univcoordlist_head(path->univdiagonals);
+  debug3(printf("Comparing new_univdiagonal %u with univdiagonal %u\n",new_univdiagonal,univdiagonal));
+
+  if (new_univdiagonal == univdiagonal) { /* Previously checked for new_univdiagonal == 0 */
     /* Skip */
   } else if ((nosplice_trimpos = Intlist_head(path->endpoints)) == 0) {
     /* Skip */
@@ -6074,7 +5478,8 @@ Path_qstart_resolve (int *found_score, T path,
 	      Spliceends_indel_qstart(nosplice_trimpos,/*univdiagonal*/new_univdiagonal,
 				      querylength,path->chroffset,path->chrhigh,path->plusp,genestrand,
 				      localdb_nmismatches_allowed,novel_univdiags_alloc,novel_diagonals_alloc,
-				      localdb_alloc,stage1,univdiagpool,query_compress,queryptr)) == 0) {
+				      localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+				      univdiagpool,query_compress,queryptr)) == 0) {
     /* Skip */
 
   } else if (indel_univdiagonal > new_univdiagonal) {
@@ -6171,15 +5576,23 @@ Path_qstart_resolve (int *found_score, T path,
       
 	path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,indel_univdiagonal
 						     univcoordlistpool_trace(__FILE__,__LINE__));
-	debug3(printf("Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug3(printf("(3) Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		      /*low_qstart*/0,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
   }
 
 
+#if 0
   path->nmatches = -1;
   Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+#else
+  path->nmatches = -1;		/* Calls Path_eval_nmatches */
+  Path_trim_chrbounds(&(*found_score),path,query_compress_fwd,query_compress_rev,
+  		      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+		    
+#endif
+
   debug3(printf("Result of Path_qstart_resolve: ")); debug3(Path_print(path));
 
   return;
@@ -6192,17 +5605,24 @@ void
 Path_qend_resolve (int *found_score, T path,
 		   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		   char *queryptr, int querylength,
+		   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		   int localdb_nmismatches_allowed,
+		   
 		   Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
-		   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		   int genestrand, int localdb_nmismatches_allowed,
+		   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev, int genestrand,
 		   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		   Univdiagpool_T univdiagpool, Vectorpool_T vectorpool) {
 
-  Univcoord_T new_univdiagonal = 0, indel_univdiagonal;
+  Univcoord_T new_univdiagonal, indel_univdiagonal;
   int nosplice_trimpos, qstart;
   int supporti, supportj;
+
+  Univcoordlist_T univdiagonals;
+  Intlist_T nmismatches, ref_nmismatches, endpoints;
+  List_T junctions;
+  int ignore;
 
   Univcoord_T *new_univdiagonals, nearest_univdiagonal, univdiagonal_j,
     univdiagonal, middle_univdiagonal;
@@ -6213,8 +5633,9 @@ Path_qend_resolve (int *found_score, T path,
   int *medial_nmismatches, *medial_qpositions;
   double *medial_probs, *distal_probs;
   int *medial_support, *distal_support;
-  int n_good_partners, npartners, ndiagonals, goodi, i, j;
+  int n_medial_partners, npartners, ndiagonals, goodi, i, j;
   bool sense_forward_p, multiple_splice_qpos_p;
+  Junction_T junction;
 
   Chrpos_T splice_distance;
   int type;
@@ -6226,6 +5647,8 @@ Path_qend_resolve (int *found_score, T path,
   int ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel;
   double best_prob, donor_prob, acceptor_prob;
 
+  int ninserts;			/* Needed for Path_qend_resolve but not Path_qstart_resolve */
+
 
   debug3(printf("Entered Path_qend_resolve, sensedir %d, univdiagonal %u..%u and path\n",
 		path->sensedir,low_univdiagonal,high_univdiagonal));
@@ -6234,6 +5657,8 @@ Path_qend_resolve (int *found_score, T path,
   Path_expect_fwd(path);
 
   univdiagonal = Univcoordlist_last_value(path->univdiagonals);
+  debug3(printf("Original univdiagonal: %u\n",univdiagonal));
+
   if (low_univdiagonal < univdiagonal) {
     debug3(printf("Changing low_univdiagonal to be %u\n",univdiagonal));
     low_univdiagonal = univdiagonal;
@@ -6260,36 +5685,51 @@ Path_qend_resolve (int *found_score, T path,
       pos5 += Junction_ninserts((Junction_T) List_last_value(path->junctions,NULL));
     }
 
+#if 0
+    /* This can lead to poor results */
     /* Compute continuation to querylength for baseline */
     cont_trimpos = querylength;
     cont_nmismatches =
       Genomebits_count_mismatches_substring(&cont_ref_nmismatches,genomebits,genomebits_alt,
 					    query_compress,univdiagonal,querylength,
 					    pos5,/*pos3*/querylength,path->plusp,genestrand);
+#else
+    cont_trimpos = Genomebits_trim_qend(&cont_nmismatches,query_compress,genomebits,
+					univdiagonal,querylength,
+					pos5,/*pos3*/querylength,path->plusp,genestrand);
+#endif
 
     new_univdiagonals =
       Spliceends_qend_resolve(&ndiagonals,&resolve_nmismatches,/*pos5*/qend,querylength,
 			      low_univdiagonal,high_univdiagonal,
 			      query_compress,queryptr,path->plusp,genestrand,
 			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-			      stage1,localdb_nmismatches_allowed);
+			      stage1,streamspace_max_alloc,streamspace_alloc,
+			      localdb_nmismatches_allowed);
 
     if (ndiagonals == 0) {
       debug3(printf("Spliceends_qend_resolve returns nothing\n"));
       local_trimpos = Genomebits_trim_qend(&local_nmismatches,query_compress,genomebits,
 					   univdiagonal,querylength,
 					   pos5,/*pos3*/querylength,path->plusp,genestrand);
-      debug3(printf("Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
-
-      Path_reverse(path,/*expect_fwd_p*/false);
-      Intlist_head_set(path->endpoints,local_trimpos);
-      Intlist_head_set(path->nmismatches,local_nmismatches);
-      Intlist_head_set(path->ref_nmismatches,local_nmismatches);
-      Path_reverse(path,/*expect_fwd_p*/true);
+      debug3(printf("(5) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+      if (local_trimpos <= pos5) {
+	debug3(printf("Need to trim exon completely\n"));
+	Path_trim_qend_n(/*noutside*/Intlist_last_value(path->endpoints) - local_trimpos,path,
+			 query_compress_fwd,query_compress_rev,
+			 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+	
+      } else {
+	Path_reverse(path,/*expect_fwd_p*/false);
+	Intlist_head_set(path->endpoints,local_trimpos);
+	Intlist_head_set(path->nmismatches,local_nmismatches);
+	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	Path_reverse(path,/*expect_fwd_p*/true);
       
-      path->splice3p = false;
-      path->splicetype3 = NO_SPLICE;
-      path->ambig_prob_3 = 0.0;
+	path->splice3p = false;
+	path->splicetype3 = NO_SPLICE;
+	path->ambig_prob_3 = 0.0;
+      }
 
     } else if ((nearest_univdiagonal = new_univdiagonals[0]) == univdiagonal) {
       /* Continuation of univdiagonal */
@@ -6298,17 +5738,31 @@ Path_qend_resolve (int *found_score, T path,
 					   nearest_univdiagonal,querylength,
 					   pos5,/*pos3*/querylength,path->plusp,genestrand);
 
-      Path_reverse(path,/*expect_fwd_p*/false);
-      Intlist_head_set(path->endpoints,local_trimpos);
-      if (Intlist_head(path->nmismatches) >= 0) {
-	Intlist_head_incr(path->nmismatches,local_nmismatches);
-	Intlist_head_incr(path->ref_nmismatches,local_nmismatches);
+      debug3(printf("(6) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+      if (local_trimpos <= pos5) {
+	debug3(printf("Need to trim exon completely\n"));
+	Path_trim_qend_n(/*noutside*/Intlist_last_value(path->endpoints) - local_trimpos,path,
+			 query_compress_fwd,query_compress_rev,
+			 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+
+      } else {
+	Path_reverse(path,/*expect_fwd_p*/false);
+	Intlist_head_set(path->endpoints,local_trimpos);
+#if 0
+	if (Intlist_head(path->nmismatches) >= 0) {
+	  Intlist_head_incr(path->nmismatches,local_nmismatches);
+	  Intlist_head_incr(path->ref_nmismatches,local_nmismatches);
+	}
+#else
+	Intlist_head_set(path->nmismatches,local_nmismatches);
+	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+#endif
+	Path_reverse(path,/*expect_fwd_p*/true);
+	
+	path->splice3p = false;
+	path->splicetype3 = NO_SPLICE;
+	path->ambig_prob_3 = 0.0;
       }
-      Path_reverse(path,/*expect_fwd_p*/true);
-      
-      path->splice3p = false;
-      path->splicetype3 = NO_SPLICE;
-      path->ambig_prob_3 = 0.0;
       
     } else if (univdiagonal > nearest_univdiagonal) {
       /* Insertion.  Skip */
@@ -6370,7 +5824,10 @@ Path_qend_resolve (int *found_score, T path,
       /* Unable to try splicing */
 
     } else if (ndiagonals == 1) {
-      /* Does not allow for middle univdiagonal */
+
+#if 0
+      new_univdiagonal = 0;
+      /* Splice_nomiddle call type 1 */
       if ((splice_qpos = Splice_nomiddle(&type,&trimpos5,&trimpos3,&supporti,&supportj,
 					 &nindels,&indel_pos,&nmismatches_i,&nmismatches_j,&nmismatches_indel,
 					 &ref_nmismatches_i,&ref_nmismatches_j,&ref_nmismatches_indel,
@@ -6382,20 +5839,29 @@ Path_qend_resolve (int *found_score, T path,
 					 /*sense_forward_p*/(path->sensedir == SENSE_FORWARD) ? true : false,
 					 genestrand,/*trim5p*/false,/*trim3p*/true,/*innerp*/true,
 					 /*allow_indels_p*/true)) < 0) {
-	
+
 	debug3(printf("Single splice finds no solution\n"));
 	local_trimpos = Genomebits_trim_qend(&local_nmismatches,query_compress,
 					     /*bits*/genomebits,univdiagonal,querylength,
 					     pos5,/*pos3*/querylength,path->plusp,genestrand);
-	Path_reverse(path,/*expect_fwd_p*/false);
-	Intlist_head_set(path->endpoints,local_trimpos);
-	Intlist_head_set(path->nmismatches,local_nmismatches);
-	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
-	Path_reverse(path,/*expect_fwd_p*/true);
+	debug3(printf("(7) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos <= pos5) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qend_n(/*noutside*/Intlist_last_value(path->endpoints) - local_trimpos,path,
+			   query_compress_fwd,query_compress_rev,
+			   intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+
+	} else {
+	  Path_reverse(path,/*expect_fwd_p*/false);
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	  Path_reverse(path,/*expect_fwd_p*/true);
 	
-	path->splice3p = false;
-	path->splicetype3 = NO_SPLICE;
-	path->ambig_prob_3 = 0.0;
+	  path->splice3p = false;
+	  path->splicetype3 = NO_SPLICE;
+	  path->ambig_prob_3 = 0.0;
+	}
 	
       } else if (trimpos3 - nmismatches_i - nmismatches_j <= cont_trimpos - cont_nmismatches) {
 	debug3(printf("Single splice yields fewer matches than continuation: %d - %d - %d  vs %d - %d\n",
@@ -6544,6 +6010,73 @@ Path_qend_resolve (int *found_score, T path,
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	Path_reverse(path,/*expect_fwd_p*/true);
       }
+
+#else
+	
+      if (Splice_resolve_qend(&univdiagonals,&nmismatches,&ref_nmismatches,&endpoints,&junctions,
+			      /*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/nearest_univdiagonal,
+			      stage1,query_compress,queryptr,
+			      path->plusp,Path_chroffset(path),Path_chrhigh(path),
+			      streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			      localdb_nmismatches_allowed,
+			      pos5,/*pos3*/querylength,querylength,cont_trimpos,cont_nmismatches,
+			      indelinfo,stage1->spliceinfo,knownsplicing,univcoordlistpool,
+			      intlistpool,listpool,pathpool,
+			      path->sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,/*innerp*/true,
+			      /*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+
+	debug3(printf("Single splice finds no solution\n"));
+	local_trimpos = Genomebits_trim_qend(&local_nmismatches,query_compress,
+					     /*bits*/genomebits,univdiagonal,querylength,
+					     pos5,/*pos3*/querylength,path->plusp,genestrand);
+	debug3(printf("(7) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos <= pos5) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qend_n(/*noutside*/Intlist_last_value(path->endpoints) - local_trimpos,path,
+			   query_compress_fwd,query_compress_rev,
+			   intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+
+	} else {
+	  Path_reverse(path,/*expect_fwd_p*/false);
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	  Path_reverse(path,/*expect_fwd_p*/true);
+	
+	  path->splice3p = false;
+	  path->splicetype3 = NO_SPLICE;
+	  path->ambig_prob_3 = 0.0;
+	}
+	
+#if 0
+      } else if (trimpos3 - nmismatches_i - nmismatches_j <= cont_trimpos - cont_nmismatches) {
+	debug3(printf("Single splice yields fewer matches than continuation: %d - %d - %d  vs %d - %d\n",
+		      trimpos3,nmismatches_i,nmismatches_j,cont_trimpos,cont_nmismatches));
+#endif
+
+      } else {
+	/* No need to copy path */
+	debug3(printf("Adding results from Splice_resolve_qend\n"));
+
+	Path_reverse(path,/*expect_fwd_p*/false);
+	path->univdiagonals = Univcoordlist_append(univdiagonals,path->univdiagonals);
+	path->nmismatches = Intlistpool_pop(path->nmismatches,intlistpool,&ignore
+					       intlistpool_trace(__FILE__,__LINE__));
+	path->nmismatches = Intlist_append(nmismatches,path->nmismatches);
+	path->ref_nmismatches = Intlistpool_pop(path->ref_nmismatches,intlistpool,&ignore
+						   intlistpool_trace(__FILE__,__LINE__));
+	path->ref_nmismatches = Intlist_append(ref_nmismatches,path->ref_nmismatches);
+	path->endpoints = Intlistpool_pop(path->endpoints,intlistpool,&ignore
+					     intlistpool_trace(__FILE__,__LINE__));
+	path->endpoints = Intlist_append(endpoints,path->endpoints);
+	path->junctions = List_append(junctions,path->junctions);
+	Path_reverse(path,/*expect_fwd_p*/true);
+	
+	debug3(printf("AFTER call to Splice_resolve_qend\n"));
+	debug3(Path_print(path));
+      }
+#endif
       
     } else {
       /* Multiple splices */
@@ -6565,9 +6098,11 @@ Path_qend_resolve (int *found_score, T path,
 
       multiple_splice_qpos_p = false;
       for (i = 0; i < ndiagonals; i++) {
-	/* Does not allow for middle univdiagonal */
 	univdiagonal_j = new_univdiagonals[i];
-	debug3(printf("Calling Splice_resolve with %u and %u\n",univdiagonal,univdiagonal_j));
+
+#if 0
+	debug3(printf("Calling Splice_nomiddle with %u and %u\n",univdiagonal,univdiagonal_j));
+	/* Splice_nomiddle call type 2 */
 	if ((splice_qpos = Splice_nomiddle(&type,&trimpos5,&trimpos3,&supporti,&supportj,
 					   &nindels,&indel_pos,&nmismatches_i,&nmismatches_j,&nmismatches_indel,
 					   &ref_nmismatches_i,&ref_nmismatches_j,&ref_nmismatches_indel,
@@ -6578,19 +6113,14 @@ Path_qend_resolve (int *found_score, T path,
 					   stage1->indelinfo,stage1->spliceinfo,knownsplicing,intlistpool,
 					   sense_forward_p,genestrand,/*trimp5*/false,/*trim3p*/true,/*innerp*/true,
 					   /*allow_indels_p*/false)) < 0) {
-	  /* TODO: Consider allowing indels.  Altsplice would need to store indel info */
 	  /* Skip */
-	  
-	} else if (trimpos3 - nmismatches_i - nmismatches_j <= cont_trimpos - cont_nmismatches) {
-	  debug3(printf("(2) Multiple splices yield fewer matches than continuation: %d - %d - %d  vs %d - %d\n",
-			trimpos3,nmismatches_i,nmismatches_j,cont_trimpos,cont_nmismatches));
 
 	} else if (npartners == 0) {
 	  medial_qpos = medial_qpositions[0] = splice_qpos;
 	  medial_support[0] = supporti;
 	  medial_nmismatches[0] = nmismatches_i;
 	  distal_positions[0] = univdiagonal_j - querylength + splice_qpos;
-
+	  
 	  distal_support[0] = supportj;
 	  distal_univdiags[0]->univdiagonal = univdiagonal_j;
 	  distal_univdiags[0]->qstart = splice_qpos;
@@ -6631,57 +6161,121 @@ Path_qend_resolve (int *found_score, T path,
 	  }
 	  npartners++;
 	}
-
-	debug3(printf("%u %u => %d, %f, %f\n",univdiagonal_j,univdiagonal_j - univdiagonal,
-		      splice_qpos,donor_prob,acceptor_prob));
-      }
 	
-      n_good_partners = 0;
-      for (i = 0; i < npartners; i++) {
-	assert(univdiagonal < distal_univdiags[i]->univdiagonal);
-	/* Need to use distal_support when a distal indel is found by Spliceends */
-	if (Splice_accept_p(medial_probs[i],distal_probs[i],distal_univdiags[i]->univdiagonal - univdiagonal,
-			    medial_support[i],medial_nmismatches[i],distal_support[i],
-			    /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			    distal_univdiags[i]->nmismatches,/*innerp*/true,/*strictp*/true) == true) {
-	  n_good_partners += 1;
-	  goodi = i;
-	}
-      }
-      debug13(printf("%d partners are good\n",n_good_partners));
+#else
+	/* allow_indels_p is false because Altsplice_T cannot handle indels */
+	debug3(printf("Calling Splice_resolve_qend with %u and %u\n",univdiagonal,univdiagonal_j));
+	if (Splice_resolve_qend(&univdiagonals,&nmismatches,&ref_nmismatches,&endpoints,&junctions,
+				/*univdiagonal_i*/univdiagonal,univdiagonal_j,
+				stage1,query_compress,queryptr,
+				path->plusp,Path_chroffset(path),Path_chrhigh(path),
 
-      if (n_good_partners == 0) {
+				streamspace_max_alloc,streamspace_alloc,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				localdb_nmismatches_allowed,
+
+				pos5,/*pos3*/querylength,querylength,cont_trimpos,cont_nmismatches,
+				stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+				univcoordlistpool,intlistpool,listpool,pathpool,
+				path->sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,/*innerp*/true,
+				/*allow_indels_p*/false,/*find_middle_p*/false) == 0) {
+	  /* Skip */
+
+	} else {
+	  splice_qpos = Intlist_second_value(endpoints);
+	  if (npartners == 0) {
+	    /* Do not set multiple_splice_qpos_p */
+	    medial_qpos = splice_qpos;
+	  } else if (splice_qpos != medial_qpos) {
+	    multiple_splice_qpos_p = true;
+	  }
+
+	  debug3(printf("endpoints %s => supporti %d, supportj %d\n",
+			Intlist_to_string(endpoints),Intlist_second_value(endpoints) - pos5,
+			Intlist_head(endpoints) - Intlist_second_value(endpoints)));
+
+	  medial_qpositions[npartners] = splice_qpos;
+	  medial_support[npartners] = /*supporti*/ Intlist_second_value(endpoints) - pos5;
+	  medial_nmismatches[npartners] = /*nmismatches_i*/ Intlist_second_value(nmismatches);
+	  distal_positions[npartners] = univdiagonal_j - querylength + splice_qpos;
+
+	  distal_support[npartners] = /*supportj*/ Intlist_head(endpoints) - Intlist_second_value(endpoints);
+	  distal_univdiags[npartners]->univdiagonal = univdiagonal_j;
+	  distal_univdiags[npartners]->qstart = splice_qpos;
+	  distal_univdiags[npartners]->qend = /*trimpos3*/ Intlist_head(endpoints);
+	  distal_univdiags[npartners]->nmismatches = /*nmismatches_j*/ Intlist_head(nmismatches);
+
+	  junction = (Junction_T) List_head(junctions);
+	  /* good_outer_accept_p = junction->outer_accept_p; -- Used if npartners == 1 */
+	  /* assert(Junction_type(junction) == SPLICE_JUNCTION); -- Could have been converted to a deletion */
+	  debug3(Junction_print(junction));
+
+	  if (path->plusp == sense_forward_p) {
+	    medial_probs[npartners] = junction->donor_prob;
+	    distal_probs[npartners] = junction->acceptor_prob;
+	  } else {
+	    medial_probs[npartners] = junction->acceptor_prob;
+	    distal_probs[npartners] = junction->donor_prob;
+	  }
+
+	  Intlistpool_free_list(&endpoints,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
+				      univcoordlistpool_trace(__FILE__,__LINE__));
+	  Intlistpool_free_list(&nmismatches,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Intlistpool_free_list(&ref_nmismatches,intlistpool
+				intlistpool_trace(__FILE__,__LINE__));
+	  Junction_list_gc(&junctions,listpool,pathpool);
+
+	  debug3(printf("%u %u => %d, %f, %f\n",univdiagonal_j,univdiagonal_j - univdiagonal,
+			splice_qpos,junction->donor_prob,junction->acceptor_prob));
+	  npartners++;
+	}
+#endif
+      }
+
+      if (npartners == 0) {
 	debug3(printf("(2) Multiple splices find no solution\n"));
 	local_trimpos = Genomebits_trim_qend(&local_nmismatches,query_compress,
 					     /*bits*/genomebits,univdiagonal,querylength,
 					     pos5,/*pos3*/querylength,path->plusp,genestrand);
-	Path_reverse(path,/*expect_fwd_p*/false);
-	Intlist_head_set(path->endpoints,local_trimpos);
-	Intlist_head_set(path->nmismatches,local_nmismatches);
-	Intlist_head_set(path->ref_nmismatches,local_nmismatches);
-	Path_reverse(path,/*expect_fwd_p*/true);
-	
-	path->splice3p = false;
-	path->splicetype3 = NO_SPLICE;
-	path->ambig_prob_3 = 0.0;
+	debug3(printf("(8) Have local trimpos %d with %d nmismatches\n",local_trimpos,local_nmismatches));
+	if (local_trimpos <= pos5) {
+	  debug3(printf("Need to trim exon completely\n"));
+	  Path_trim_qend_n(/*noutside*/Intlist_last_value(path->endpoints) - local_trimpos,path,
+			   query_compress_fwd,query_compress_rev,
+			   intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 
-      } else if (n_good_partners == 1) {
+	} else {
+	  Path_reverse(path,/*expect_fwd_p*/false);
+	  Intlist_head_set(path->endpoints,local_trimpos);
+	  Intlist_head_set(path->nmismatches,local_nmismatches);
+	  Intlist_head_set(path->ref_nmismatches,local_nmismatches);
+	  Path_reverse(path,/*expect_fwd_p*/true);
+	
+	  path->splice3p = false;
+	  path->splicetype3 = NO_SPLICE;
+	  path->ambig_prob_3 = 0.0;
+	}
+
+      } else if (npartners == 1) {
 	/* Single valid splice */
 	debug3(printf("(2) Multiple splices yield one valid solution\n"));
 
 	Path_reverse(path,/*expect_fwd_p*/false);
-	Intlist_head_set(path->endpoints,medial_qpositions[goodi]);
-	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[goodi]->qend /* was querylength */
+	Intlist_head_set(path->endpoints,medial_qpositions[0]);
+	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[0]->qend /* was querylength */
 					   intlistpool_trace(__FILE__,__LINE__));
 
-	univdiagonal_j = distal_positions[goodi] - medial_qpositions[goodi] + querylength; /* univdiagonal */
+	univdiagonal_j = distal_positions[0] - medial_qpositions[0] + querylength; /* univdiagonal */
 	splice_distance = univdiagonal_j - univdiagonal;
 	if (path->plusp == sense_forward_p) { /* was sense_forward_p == true */
-	  donor_prob = medial_probs[goodi];
-	  acceptor_prob = distal_probs[goodi];
+	  donor_prob = medial_probs[0];
+	  acceptor_prob = distal_probs[0];
 	} else {
-	  donor_prob = distal_probs[goodi];
-	  acceptor_prob = medial_probs[goodi];
+	  donor_prob = distal_probs[0];
+	  acceptor_prob = medial_probs[0];
 	}
 	path->junctions = Listpool_push(path->junctions,listpool,
 					(void *) Junction_new_splice(splice_distance,path->sensedir,
@@ -6689,14 +6283,14 @@ Path_qend_resolve (int *found_score, T path,
 					listpool_trace(__FILE__,__LINE__));
 	
 	/* For qend, push i first, then push j */
-	Intlist_head_set(path->nmismatches,medial_nmismatches[goodi]);
-	Intlist_head_set(path->ref_nmismatches,medial_nmismatches[goodi]);
-	path->nmismatches = Intlistpool_push(path->nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
+	Intlist_head_set(path->nmismatches,medial_nmismatches[0]);
+	Intlist_head_set(path->ref_nmismatches,medial_nmismatches[0]);
+	path->nmismatches = Intlistpool_push(path->nmismatches,intlistpool,distal_univdiags[0]->nmismatches
 					     intlistpool_trace(__FILE__,__LINE__));
-	path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
+	path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[0]->nmismatches
 						 intlistpool_trace(__FILE__,__LINE__));
 	
-	debug13(printf("Pushing univdiagonal %u\n",univdiagonal_j));
+	debug3(printf("Pushing univdiagonal %u\n",univdiagonal_j));
 	path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,univdiagonal_j
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	new_univdiagonal = univdiagonal_j;
@@ -6706,20 +6300,22 @@ Path_qend_resolve (int *found_score, T path,
 	path->splicetype3 = NO_SPLICE;
 	path->ambig_prob_3 = 0.0;
 
-      } else if (multiple_splice_qpos_p == false) {
-	debug3(printf("(2) %d good partners => altsplice\n",n_good_partners));
+      } else if (multiple_splice_qpos_p == false &&
+		 (path->qend_alts =
+		  Altsplice_qend_new(&best_endpoint,/*boundedp*/false,
+				     medial_qpos,/*anchor_qpos*/pos5,querylength,
+				     /*medial_univdiagonal*/univdiagonal,medial_nmismatches[0],
+				     medial_probs[0],medial_support[0],distal_positions,
+				     distal_support,distal_univdiags,distal_probs,
+				     /*order_medial_qpos*/NULL,npartners,
+				     path->plusp,/*sense_forward_p*/path->sensedir == SENSE_FORWARD,
+				     /*innerp*/true,pathpool,vectorpool,/*sort_bydistal_p*/false)) != NULL) {
+	debug3(printf("(2) %d partners with same medial qpos => altsplice\n",npartners));
 	Path_reverse(path,/*expect_fwd_p*/false);
 
 	path->splice3p = false;
 	path->splicetype3 = NO_SPLICE;
 	path->ambig_prob_3 = 0.0;
-
-	path->qend_alts = Altsplice_qend_new(&best_endpoint,/*boundedp*/false,medial_qpos,/*anchor_qpos*/pos5,
-					     /*medial_univdiagonal*/univdiagonal,medial_nmismatches[0],
-					     medial_probs[0],medial_support[0],distal_positions,
-					     distal_support,distal_univdiags,distal_probs,
-					     /*order_medial_qpos*/NULL,npartners,/*innerp*/true,
-					     pathpool,vectorpool,/*sort_bydistal_p*/false);
 
 	Intlist_head_set(path->endpoints,best_endpoint);
 	Intlist_head_set(path->nmismatches,-1);
@@ -6736,29 +6332,39 @@ Path_qend_resolve (int *found_score, T path,
 	    medial_qpos = medial_qpositions[i];
 	  }
 	}
+	debug3(printf("best medial qpos is %d with prob %f\n",medial_qpos,best_prob));
 
-	n_good_partners = 0;
+	n_medial_partners = 0;
 	for (i = 0; i < npartners; i++) {
-	  assert(univdiagonal < distal_univdiags[i]->univdiagonal);
+#if 0
 	  /* Need to use distal_support when a distal indel is found by Spliceends */
-	  if (Splice_accept_p(medial_probs[i],distal_probs[i],distal_univdiags[i]->univdiagonal - univdiagonal,
-			      medial_support[i],medial_nmismatches[i],distal_support[i],
-			      /* distal_univdiags[i]->qend - distal_univdiags[i]->qstart, */
-			      distal_univdiags[i]->nmismatches,/*innerp*/true,/*strictp*/true) == true) {
+	  if (univdiagonal < distal_univdiags[i]->univdiagonal &&
+	      Splice_accept_p(splice_qpos,querylength,medial_probs[i],distal_probs[i],
+			      /*univdiagonal_i*/univdiagonal,
+			      /*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
+			      medial_support[i],medial_nmismatches[i],
+			      distal_support[i],distal_univdiags[i]->nmismatches,
+			      path->plusp,sense_forward_p,/*innerp*/true) == true) {
 	    /* Skip */
 	  } else if (medial_qpositions[i] == medial_qpos) {
 	    n_good_partners += 1;
 	    goodi = i;
 	  }
+#else
+	  if (medial_qpositions[i] == medial_qpos) {
+	    n_medial_partners += 1;
+	    goodi = i;		/* Used in case n_medial_partners == 1 */
+	  }
+#endif
 	}
 
-	debug3(printf("Determined that medial_qpos %d is best, with %d good partners\n",
-		      medial_qpos,n_good_partners));
+	debug3(printf("Determined that medial_qpos %d is best, with %d partners\n",
+		      medial_qpos,n_medial_partners));
 	
-	if (n_good_partners == 0) {
+	if (n_medial_partners == 0) {
 	  /* All good distal probs are paired with a low medial prob.  Leave path as is. */
 
-	} else if (n_good_partners == 1) {
+	} else if (n_medial_partners == 1) {
 	  Path_reverse(path,/*expect_fwd_p*/false);
 	  Intlist_head_set(path->endpoints,medial_qpositions[goodi]);
 	  path->endpoints = Intlistpool_push(path->endpoints,intlistpool,distal_univdiags[goodi]->qend /* was querylength */
@@ -6786,7 +6392,7 @@ Path_qend_resolve (int *found_score, T path,
 	  path->ref_nmismatches = Intlistpool_push(path->ref_nmismatches,intlistpool,distal_univdiags[goodi]->nmismatches
 						   intlistpool_trace(__FILE__,__LINE__));
 	
-	  debug13(printf("Pushing univdiagonal %u\n",univdiagonal_j));
+	  debug3(printf("Pushing univdiagonal %u\n",univdiagonal_j));
 	  path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,univdiagonal_j
 						       univcoordlistpool_trace(__FILE__,__LINE__));
 	  new_univdiagonal = univdiagonal_j;
@@ -6798,14 +6404,16 @@ Path_qend_resolve (int *found_score, T path,
 
 	} else {
 	  order = Sedgesort_order_int(medial_qpositions,npartners);
+
 	  i = 0;
 	  while (i < npartners && medial_qpositions[order[i]] < medial_qpos) {
 	    i++;
 	  }
 	  j = i + 1;
-	  while (j < npartners && medial_qpositions[order[i]] == medial_qpos) {
+	  while (j < npartners && medial_qpositions[order[j]] == medial_qpos) {
 	    j++;
 	  }
+	  assert(j - i == n_medial_partners);
 
 	  Path_reverse(path,/*expect_fwd_p*/false);
 
@@ -6813,16 +6421,24 @@ Path_qend_resolve (int *found_score, T path,
 	  path->splicetype3 = NO_SPLICE;
 	  path->ambig_prob_3 = 0.0;
 
-	  path->qend_alts = Altsplice_qend_new(&best_endpoint,/*boundedp*/false,medial_qpos,/*anchor_qpos*/pos5,
-					       /*medial_univdiagonal*/univdiagonal,medial_nmismatches[goodi],
-					       medial_probs[goodi],medial_support[goodi],
-					       distal_positions,distal_support,distal_univdiags,distal_probs,
-					       /*order_medial_qpos*/&(order[i]),/*npartners*/j - i,/*innerp*/true,
-					       pathpool,vectorpool,/*sort_bydistal_p*/false);
-	  
-	  Intlist_head_set(path->endpoints,best_endpoint);
-	  Intlist_head_set(path->nmismatches,-1);
-	  Intlist_head_set(path->ref_nmismatches,-1);
+	  if ((path->qend_alts =
+	       Altsplice_qend_new(&best_endpoint,/*boundedp*/false,
+				  medial_qpos,/*anchor_qpos*/pos5,querylength,
+				  /*medial_univdiagonal*/univdiagonal,medial_nmismatches[goodi],
+				  medial_probs[goodi],medial_support[goodi],
+				  distal_positions,distal_support,distal_univdiags,distal_probs,
+				  /*order_medial_qpos*/&(order[i]),/*npartners*/n_medial_partners,
+				  path->plusp,/*sense_forward_p*/path->sensedir == SENSE_FORWARD,
+				  /*innerp*/true,pathpool,vectorpool,/*sort_bydistal_p*/false)) == NULL) {
+	    Intlist_head_set(path->endpoints,medial_qpos);
+	    Intlist_head_set(path->nmismatches,medial_nmismatches[goodi]);
+	    Intlist_head_set(path->ref_nmismatches,medial_nmismatches[goodi]);
+
+	  } else {
+	    Intlist_head_set(path->endpoints,best_endpoint);
+	    Intlist_head_set(path->nmismatches,-1);
+	    Intlist_head_set(path->ref_nmismatches,-1);
+	  }
 	  
 	  Path_reverse(path,/*expect_fwd_p*/true);
 	  FREE(order);
@@ -6831,29 +6447,41 @@ Path_qend_resolve (int *found_score, T path,
 
       /* Vectorpool_free_univcoordvector(distal_positions,vectorpool); */
       /* Vectorpool_free_doublevector(distal_probs,vectorpool); */
-      FREE(distal_univdiags[0]);
-      FREE(distal_univdiags);
+      Univdiag_free_array(&distal_univdiags);
     }
   }
+  debug3(Path_print(path));
+
 
   /* If we have added a new univdiagonal (splice), see if there is an indel beyond that */
   /* Code taken from attach_indel_qend */
 
-  if (new_univdiagonal == 0) {
-    /* Skip */
+  /* Note: new_univdiagonal is not defined with Splice_resolve_qend */
+  new_univdiagonal = Univcoordlist_last_value(path->univdiagonals);
+  debug3(printf("Comparing new_univdiagonal %u with univdiagonal %u\n",new_univdiagonal,univdiagonal));
+
+  if (new_univdiagonal == univdiagonal) { /* Previously checked for new_univdiagonal == 0 */
+    /* Skip: No extension */
   } else if ((nosplice_trimpos = Intlist_last_value(path->endpoints)) == querylength) {
     /* Skip */
   } else if ((indel_univdiagonal =
 	      Spliceends_indel_qend(nosplice_trimpos,/*univdiagonal*/new_univdiagonal,
 				    querylength,path->chroffset,path->chrhigh,path->plusp,genestrand,
 				    localdb_nmismatches_allowed,novel_univdiags_alloc,novel_diagonals_alloc,
-				    localdb_alloc,stage1,univdiagpool,query_compress,queryptr)) == 0) {
+				    localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+				    univdiagpool,query_compress,queryptr)) == 0) {
     /* Skip */
 
   } else if (indel_univdiagonal < new_univdiagonal) {
     /* Insertion */
     nindels = new_univdiagonal - indel_univdiagonal;
-    qstart = Intlist_penultimate_value(path->endpoints);
+    if (path->junctions == NULL) {
+      ninserts = 0;
+    } else {
+      ninserts = Junction_ninserts((Junction_T) List_last_value(path->junctions,NULL));
+    }
+    qstart = Intlist_penultimate_value(path->endpoints) + ninserts;
+
     if ((indel_pos = Indel_resolve_middle_insertion(&nmismatches_i,&nmismatches_j,
 						    &ref_nmismatches_i,&ref_nmismatches_j,
 						    /*univdiagonal_i*/new_univdiagonal,/*indels*/+nindels,path->chrhigh,
@@ -6903,7 +6531,13 @@ Path_qend_resolve (int *found_score, T path,
   } else if (indel_univdiagonal <= new_univdiagonal + max_deletionlen) {
     /* Deletion (or short intron) */
     nindels = indel_univdiagonal - new_univdiagonal;
-    qstart = Intlist_penultimate_value(path->endpoints);
+    if (path->junctions == NULL) {
+      ninserts = 0;
+    } else {
+      ninserts = Junction_ninserts((Junction_T) List_last_value(path->junctions,NULL));
+    }
+    qstart = Intlist_penultimate_value(path->endpoints) + ninserts;
+
     if ((indel_pos = Indel_resolve_middle_deletion(&nmismatches_i,&nmismatches_j,
 						   &ref_nmismatches_i,&ref_nmismatches_j,
 						   /*univdiagonal_i*/new_univdiagonal,/*indels*/-nindels,path->chrhigh,
@@ -6949,14 +6583,21 @@ Path_qend_resolve (int *found_score, T path,
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	Path_reverse(path,/*expect_fwd_p*/true);
 
-	debug3(printf("Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug3(printf("(4) Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		      qstart,/*high_qend*/querylength,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
   }
 
+#if 0
   path->nmatches = -1;
   Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+#else
+  path->nmatches = -1;		/* Calls Path_eval_nmatches */
+  Path_trim_chrbounds(&(*found_score),path,query_compress_fwd,query_compress_rev,
+		      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
+#endif
+
   debug3(printf("Result of Path_qend_resolve: ")); debug3(Path_print(path));
 
   return;
@@ -6966,11 +6607,19 @@ Path_qend_resolve (int *found_score, T path,
 /* Solves unsolved junctions */
 /* Called by Trpath_convert procedures */
 /* Set innerp to be true (looser criteria), because we are allowing for introns specified by known transcripts */
+
+#if 0
+/* Uses Splice_nomiddle */
 T
 Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 		      Compress_T query_compress,
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		      Shortread_T queryseq, int querylength,
+		      Shortread_T queryseq, char *queryptr, int querylength,
+
+		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		      Stage1_T stage1, Knownsplicing_T knownsplicing,
 		      Uintlistpool_T uintlistpool, Intlistpool_T intlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -6988,19 +6637,19 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
     segmenti_left, segmentj_left;
   Chrpos_T splice_distance;
 
-  Junction_T junction;
-  List_T j, jnext;	/* junctions */
-  Intlist_T q, qmid, qnext; /* endpoints */
-  Intlist_T r, s, rnext, snext; /* ref_nmismatches, nmismatches */
-  Univcoordlist_T p, pnext;	/* univdiagonals */
-
-#if 0
-  /* If we need to make a copy */
-  List_T junctions;
-  Intlist_T endpoints;
-  Intlist_T nmismatches, ref_nmismatches;
+  int ignore;
   Univcoordlist_T univdiagonals;
-#endif
+  Intlist_T nmismatches, ref_nmismatches, endpoints;
+  List_T junctions;
+
+  Junction_T junction;
+  List_T j;
+  Intlist_T q, r, s;
+
+  List_T jnext;	/* junctions */
+  Intlist_T qmid, qnext; /* endpoints */
+  Intlist_T rnext, snext; /* ref_nmismatches, nmismatches */
+  Univcoordlist_T p, pnext;	/* univdiagonals */
 
   bool all_solved_p = true;
   bool sense_forward_p = (this->sensedir == SENSE_FORWARD) ? true : false;
@@ -7143,6 +6792,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 	  r = Intlist_next(r);
 	}
 
+	/* Splice_nomiddle call type 3 */
       } else if ((splice_qpos = Splice_nomiddle(&type,&trimpos5,&trimpos3,&supporti,&supportj,&nindels,&indel_qpos,
 						&nmismatches_i,&nmismatches_j,&nmismatches_indel,
 						&ref_nmismatches_i,&ref_nmismatches_j,
@@ -7450,10 +7100,417 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 }
 
 
+#else
+
+
+/* Solves unsolved junctions */
+/* Called by Trpath_convert procedures */
+/* Set innerp to be true (looser criteria), because we are allowing for introns specified by known transcripts */
+
+/* Uses Splice_resolve_qstart */
+T
+Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
+		      Compress_T query_compress,
+		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
+		      Shortread_T queryseq, char *queryptr, int querylength,
+
+		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
+		      Stage1_T stage1, Knownsplicing_T knownsplicing,
+		      Uintlistpool_T uintlistpool, Intlistpool_T intlistpool,
+		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
+		      Pathpool_T pathpool, Transcriptpool_T transcriptpool) {
+  
+  int nmismatches_i, nmismatches_j, nmismatches_indel,
+    ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel;
+  int nindels;
+  double donor_prob, acceptor_prob;
+
+  int type;
+  int trimpos5, trimpos3, supporti, supportj;
+  int splice_qpos, indel_qpos, prev_ninserts, qstart, qend;
+  Univcoord_T univdiagonal_i, univdiagonal_j, univdiagonal_k,
+    segmenti_left, segmentj_left;
+  Chrpos_T splice_distance;
+
+  int ignore;
+  Univcoordlist_T univdiagonals;
+  Intlist_T nmismatches, ref_nmismatches, endpoints;
+  List_T junctions;
+
+  Junction_T junction;
+  List_T j;
+  Intlist_T q, r, s;
+
+  Junction_T splice_junction, indel_junction;
+  List_T exit_list, first_list, last_list, *jprev;	/* junctions */
+  Intlist_T entry_intlist, exit_intlist, first_intlist, last_intlist,
+    *rprev, *sprev; /* endpoints, ref_nmismatches, nmismatches */
+  Univcoordlist_T exit_univcoordlist,
+    first_univcoordlist, last_univcoordlist, p, *pprev; /* univdiagonals */
+
+  bool all_solved_p = true;
+  bool sense_forward_p = (this->sensedir == SENSE_FORWARD) ? true : false;
+
+  List_T invalid_transcripts, t;
+  Transcript_T transcript;
+  bool validp;
+
+
+  debug14(printf("Entered Path_solve_junctions with path\n"));
+  debug14(Path_print(this));
+
+  prev_ninserts = 0;
+  jprev = &this->junctions;
+  pprev = &this->univdiagonals;
+  q = this->endpoints;
+  rprev = &this->ref_nmismatches;
+  sprev = &this->nmismatches;
+
+  while (*jprev != NULL) {
+#ifdef DEBUG14
+    printf("Endpoints: %s\n",Intlist_to_string(q));
+    printf("Univdiagonals: %s\n",Univcoordlist_to_string(*pprev));
+    printf("Mismatches: %s\n",Intlist_to_string(*sprev));
+    printf("Junctions: ");
+    Junction_print_list(*jprev);
+    printf("\n");
+#endif
+
+    assert(Univcoordlist_length(/*univdiagonals*/*pprev) == Intlist_length(/*endpoints*/q) - 1);
+    assert(Intlist_length(/*nmismatches*/*sprev) == Intlist_length(/*endpoints*/q) - 1);
+    assert(Intlist_length(/*ref_nmismatches*/*rprev) == Intlist_length(/*endpoints*/q) - 1);
+    assert(List_length(/*junctions*/*jprev) == Intlist_length(/*endpoints*/q) - 2);
+
+    junction = (Junction_T) List_head(*jprev);
+    debug14(Junction_print(junction));
+
+    if (
+#ifdef ALLOCATE_UNSOLVED_JUNCTION
+	Junction_type(junction) != UNSOLVED_JUNCTION
+#else
+	junction != JUNCTION_UNSOLVED
+#endif
+	) {
+
+      prev_ninserts = Junction_ninserts(junction);
+      jprev = &(*jprev)->rest;	/* j = List_next(j); */
+      pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+      q = Intlist_next(q);
+      rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+      sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+
+    } else {
+      debug14(printf("Solving unsolved junction\n"));
+
+      univdiagonal_i = Univcoordlist_head(*pprev);
+      univdiagonal_j = Univcoordlist_head(Univcoordlist_next(*pprev));
+      /* segmenti_left = univdiagonal_i - querylength; */
+      /* segmentj_left = univdiagonal_j - querylength; */
+
+      qstart = Intlist_head(q) + prev_ninserts;	/* The endpoint before the junction */
+      qend = Intlist_head(Intlist_next(Intlist_next(q))); /* The endpoint after the junction */
+
+      if (univdiagonal_i > univdiagonal_j + max_insertionlen) {
+	/* Impossible */
+
+      } else if (univdiagonal_i > univdiagonal_j) {
+	nindels = univdiagonal_i - univdiagonal_j;
+	if ((indel_qpos = Indel_resolve_middle_insertion(&nmismatches_i,&nmismatches_j,
+							&ref_nmismatches_i,&ref_nmismatches_j,
+							univdiagonal_i,/*indels*/+nindels,this->chrhigh,
+							/*mismatch_positions_left*/NULL,/*nmismatches_left*/0,
+							/*mismatch_positions_right*/NULL,/*nmismatches_right*/0,
+							/*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
+							/*pos5*/qstart,/*pos3*/qend,querylength,
+							 stage1->indelinfo,this->plusp,genestrand,
+							/*want_lowest_coordinate_p*/true)) <= 0) {
+	  debug14(printf("Insertion fails\n"));
+
+	} else {
+	  /* No need to change univdiagonals */
+	  pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+
+	  Intlist_head_set(q->rest,indel_qpos);
+	  q = Intlist_next(q);
+
+#ifdef ALLOCATE_UNSOLVED_JUNCTION
+	  junction = (Junction_T) List_head(j);
+	  Junction_free(&junction,pathpool);
+#endif
+	  List_head_set(*jprev,(void *) Junction_new_insertion(nindels,pathpool));
+	  prev_ninserts = nindels;
+	  jprev = &(*jprev)->rest; /* j = List_next(j); */
+
+	  Intlist_head_set(*sprev,nmismatches_i);
+	  Intlist_head_set((*sprev)->rest,nmismatches_j);
+	  sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+
+	  Intlist_head_set(*rprev,ref_nmismatches_i);
+	  Intlist_head_set((*rprev)->rest,ref_nmismatches_j);
+	  rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	}
+
+      } else if (univdiagonal_i + max_deletionlen >= univdiagonal_j) {
+	/* Deletion (or short intron */
+	nindels = univdiagonal_j - univdiagonal_i;
+	if ((indel_qpos = Indel_resolve_middle_deletion(&nmismatches_i,&nmismatches_j,
+							&ref_nmismatches_i,&ref_nmismatches_j,
+							univdiagonal_i,/*indels*/-nindels,this->chrhigh,
+							/*mismatch_positions_left*/NULL,/*nmismatches_left*/0,
+							/*mismatch_positions_right*/NULL,/*nmismatches_right*/0,
+							/*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
+							/*pos5*/qstart,/*pos3*/qend,querylength,
+							stage1->indelinfo,this->plusp,genestrand,
+							/*want_lowest_coordinate_p*/true)) <= 0) {
+	  debug14(printf("Deletion or short intron fails\n"));
+
+	} else {
+	  /* No need to change univdiagonals */
+	  pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+
+	  Intlist_head_set(q->rest,indel_qpos);
+	  q = Intlist_next(q);
+
+#ifdef ALLOCATE_UNSOLVED_JUNCTION
+	  junction = (Junction_T) List_head(j);
+	  Junction_free(&junction,pathpool);
+#endif
+	  /* deletionpos = (univdiagonal_i - querylength) + indel_qpos; */
+	  List_head_set(*jprev,(void *) Junction_new_deletion(nindels,pathpool));
+	  prev_ninserts = 0;
+	  jprev = &(*jprev)->rest; /* j = List_next(j); */
+
+	  Intlist_head_set(*sprev,nmismatches_i);
+	  Intlist_head_set((*sprev)->rest,nmismatches_j);
+	  sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+
+	  Intlist_head_set(*rprev,ref_nmismatches_i);
+	  Intlist_head_set((*rprev)->rest,ref_nmismatches_j);
+	  rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	}
+
+      } else if (Splice_resolve_qstart(&univdiagonals,&nmismatches,&ref_nmismatches,&endpoints,&junctions,
+				       univdiagonal_i,univdiagonal_j,
+				       stage1,query_compress,queryptr,
+				       this->plusp,Path_chroffset(this),Path_chrhigh(this),
+
+				       streamspace_max_alloc,streamspace_alloc,
+				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				       localdb_nmismatches_allowed,
+
+				       /*pos5*/qstart,/*pos3*/qend,querylength,
+				       /*cont_trimpos*/-1,/*cont_nmismatches*/-1,
+				       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+				       univcoordlistpool,intlistpool,listpool,pathpool,
+				       this->sensedir,genestrand,/*trim5p*/false,/*trim3p*/false,
+				       /*innerp*/true,/*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+	all_solved_p = false;
+
+	/* prev_ninserts = 0; -- Doesn't matter */
+	jprev = &(*jprev)->rest; /* j = List_next(j); */
+	pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+	q = Intlist_next(q);
+	rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+
+      } else {
+	debug14(printf("Before fill:\n"));
+	debug14(Path_print(this));
+	debug14(printf("\n"));
+
+#ifdef DEBUG14
+	printf("Splice_resolve_qstart returns\n");
+	printf("Univdiagonals: %s\n",Univcoordlist_to_string(univdiagonals));
+	printf("Endpoints: %s\n",Intlist_to_string(endpoints));
+	printf("Mismatches: %s\n",Intlist_to_string(nmismatches));
+	Junction_print_list(junctions);
+	printf("\n");
+#endif
+
+	/* Junctions: Needs to be (nsegments - 1).  Splice_resolve
+	   provides (n_new_segments).  Replace unsolved junction with
+	   the new ones */
+	/* entry_list is a pointer, and handled below */
+	exit_list = List_next(*jprev); /* Skips unsolved junction */
+
+	debug14(printf("exit list is "));
+	debug14(Junction_print_list(exit_list));
+	debug14(printf("\n"));
+#ifdef ALLOCATE_UNSOLVED_JUNCTION
+	junction = (Junction_T) List_head(*jprev);
+	Junction_free(&junction,pathpool);
+#endif
+
+	first_list = junctions;
+	last_list = List_last_elt(junctions,NULL);
+	prev_ninserts = Junction_ninserts((Junction_T) List_head(last_list));
+
+	*jprev = first_list; /* Beginning of insert */
+	last_list->rest = exit_list; /* End of insert */
+	jprev = &last_list->rest;
+
+
+	/* Univdiagonals: Needs to be (nsegments).  Splice_resolve
+	   provides (n_new_segments).  Insert new univdiagonals after
+	   skipping the first */
+	exit_univcoordlist = Univcoordlist_next(*pprev);
+	debug14(printf("exit univcoordlist is %s\n",Univcoordlist_to_string(exit_univcoordlist)));
+	
+	first_univcoordlist = univdiagonals;
+	last_univcoordlist = Univcoordlist_last_elt(univdiagonals);
+	debug14(printf("(1) last univcoordlist is %s\n",Univcoordlist_to_string(last_univcoordlist)));
+
+	*pprev = first_univcoordlist;			 /* Beginning of insert */
+	last_univcoordlist->rest = exit_univcoordlist; /* End of insert */
+	debug14(printf("(2) last univcoordlist is %s\n",Univcoordlist_to_string(last_univcoordlist)));
+	debug14(printf("(3) univdiagonals is %s\n",Univcoordlist_to_string(this->univdiagonals)));
+	pprev = &last_univcoordlist->rest;
+	
+
+	/* Endpoints: Needs to be (nsegments + 1).  Splice_resolve
+	   provides (n_new_segments + 1).  Skip the existing endpoint,
+	   and insert the new ones after skipping the first  */
+
+	entry_intlist = q;
+	exit_intlist = Intlist_next(Intlist_next(q)); /* Skip the existing endpoint */
+
+	first_intlist = Intlist_next(endpoints);
+	last_intlist = Intlist_last_elt(endpoints);
+	q = last_intlist;
+
+	entry_intlist->rest = first_intlist; /* Beginning of insert */
+	last_intlist->rest = exit_intlist; /* End of insert */
+	
+	/* Nmismatches and ref_nmismatches: Needs to be (nsegments).
+	   Splice_resolve provides (n_new_segments + 1).  Overwrite
+	   first and last values with the end values and insert the
+	   middle ones */
+
+	/* Number of nmismatches equals (nsegments + 1).  Overwriting first and last value for nmismatches. */
+	exit_intlist = Intlist_next(*sprev);
+	debug14(printf("exit intlist is %s\n",Intlist_to_string(exit_intlist)));
+
+	Intlist_head_set(*sprev,Intlist_head(nmismatches));
+	Intlist_head_set(exit_intlist,Intlist_last_value(nmismatches));
+
+	first_intlist = nmismatches;
+	last_intlist = Intlist_penultimate_elt(nmismatches);
+	debug14(printf("(1) last intlist is %s\n",Intlist_to_string(last_intlist)));
+
+	*sprev = first_intlist; /* Beginning of insert */
+	last_intlist->rest = exit_intlist; /* End of insert */
+	debug14(printf("(2) last intlist is %s\n",Intlist_to_string(last_intlist)));
+	debug14(printf("(3) intlist is %s\n",Intlist_to_string(this->nmismatches)));
+	sprev = &last_intlist->rest;
+
+
+	exit_intlist = Intlist_next(*rprev);
+	Intlist_head_set(*rprev,Intlist_head(ref_nmismatches));
+	Intlist_head_set(exit_intlist,Intlist_last_value(ref_nmismatches));
+
+	first_intlist = ref_nmismatches;
+	last_intlist = Intlist_penultimate_elt(ref_nmismatches);
+
+	*rprev = first_intlist; /* Beginning of insert */
+	last_intlist->rest = exit_intlist; /* End of insert */
+	rprev = &last_intlist->rest;
+	
+	debug14(printf("After fill:\n"));
+	debug14(Path_print(this));
+	debug14(printf("\n"));
+      }
+    }
+  }
+
+#ifdef DEBUG14
+  printf("Endpoints: %s\n",Intlist_to_string(q));
+  printf("Univdiagonals: %s\n",Univcoordlist_to_string(*pprev));
+  printf("Mismatches: %s\n",Intlist_to_string(*sprev));
+  printf("Junctions: ");
+  Junction_print_list(*jprev);
+  printf("\n");
+#endif
+
+  assert(Univcoordlist_length(/*univdiagonals*/*pprev) == Intlist_length(/*endpoints*/q) - 1);
+  assert(Intlist_length(/*nmismatches*/*sprev) == Intlist_length(/*endpoints*/q) - 1);
+  assert(Intlist_length(/*ref_nmismatches*/*rprev) == Intlist_length(/*endpoints*/q) - 1);
+  assert(List_length(/*junctions*/*jprev) == Intlist_length(/*endpoints*/q) - 2);
+
+
+#if 0
+  if (all_solved_p == false) {
+    debug14(printf("Not all junctions were solved\n"));
+  } else {
+    /* Need to make copies of endpoints, junctions, univdiagonals, nmismatches, and ref_nmismatches */
+    endpoints = Intlistpool_copy(this->endpoints,intlistpool);
+    junctions = Listpool_copy(this->junctions,listpool);
+  
+    if (endpoints_acceptable_p(endpoints,junctions) == false) {
+      debug14(printf("Endpoints were not acceptable\n"));
+    } else {
+      nmismatches = Intlistpool_copy(this->nmismatches,intlistpool);
+      ref_nmismatches = Intlistpool_copy(this->ref_nmismatches,intlistpool);
+      univdiagonals = Univcoordlistpool_copy(this->univdiagonals,univcoordlistpool);
+  
+#ifdef DEBUG14
+      printf("\nCombined ");
+      Path_print(this);
+#endif
+    }
+  }
+#endif
+	
+  if (all_solved_p == false) {
+    debug14(printf("Not all junctions were solved\n"));
+    /* Caller will free the path */
+    return (T) NULL;
+
+  } else {
+    /* assert(List_length(this->invalid_transcripts) == 1); */
+
+    invalid_transcripts = this->invalid_transcripts;
+    this->invalid_transcripts = (List_T) NULL;
+
+    validp = false;
+    for (t = invalid_transcripts; t != NULL; t = List_next(t)) {
+      transcript = (Transcript_T) List_head(t);
+      if (Transcript_remap_invalid(transcript,this,transcriptome,queryseq,
+				   uintlistpool,listpool,transcriptpool) == true) {
+	validp = true;
+      }
+    }
+    if (validp == true) {
+      this->transcriptome_method_p = true;
+    } else {
+      this->transcriptome_method_p = false;
+    }
+    Transcript_list_gc(&invalid_transcripts,listpool,transcriptpool);
+
+
+    debug14(printf("After Path_solve_junctions:\n"));
+    debug14(Path_print(this));
+    debug14(printf("\n"));
+
+    this->nmatches = -1;
+    Path_eval_nmatches(&(*found_score),this,query_compress_fwd,query_compress_rev);
+
+    debug14(printf("Exiting Path_solve_junctions with path\n"));
+    debug14(Path_print(this));
+
+    return this;
+  }
+}
+
+#endif
+
+
 void
 Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T chromosome_ef64_in,
 		  Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in, Univcoord_T genomelength_in,
-		  int index1part_in, Localdb_T localdb_in, int min_intronlength_in,
+		  int index1part_in, int min_intronlength_in,
 		  int max_insertionlen_in, int max_deletionlen_in,
 		  bool novelsplicingp, bool knownsplicingp) {
 
@@ -7468,7 +7525,7 @@ Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T c
 
   index1part = index1part_in;
 
-  localdb = localdb_in;
+  localdb = (Localdb_T) NULL;
 
   min_intronlength = min_intronlength_in;
 
@@ -7485,3 +7542,8 @@ Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T c
 }
 
 
+void
+Path_solve_localdb_setup (Localdb_T localdb_in) {
+  localdb = localdb_in;
+  return;
+}

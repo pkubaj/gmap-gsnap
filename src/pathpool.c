@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: cdc2135617406448003a1647023edeacf888c5f4 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -222,10 +221,14 @@ Pathpool_reset_memory (T this) {
   check_altsplice_memory(this);
 #endif
 
-  while (List_next(this->path_chunks) != NULL) {
-    this->path_chunks = List_pop_keep(this->path_chunks,(void **) &path_chunk);
-    FREE_KEEP(path_chunk);
+  /* Previously had List_next(this->path_chunks) != NULL, and so on */
+  while (this->path_chunks != NULL) {
+    this->path_chunks = List_pop(this->path_chunks,(void **) &path_chunk);
+    debug(printf("Freeing a chunk of path_cells.  Ptr for chunk %d is %p..%p\n",
+		 List_length(this->path_chunks),path_chunk,&(path_chunk[PATH_CHUNKSIZE])));
+    FREE(path_chunk);
   }
+
 #ifdef PATHPOOL_REUSE
   int celli;
   path_chunk = (struct Path_T *) List_head(this->path_chunks);
@@ -235,15 +238,19 @@ Pathpool_reset_memory (T this) {
     this->path_free_cells = List_push_keep(this->path_free_cells,(void *) &(path_chunk[celli]));
   }
 #else
-  this->path_cellptr = (struct Path_T *) List_head(this->path_chunks);
+  /* this->path_cellptr = (struct Path_T *) List_head(this->path_chunks); */
+  this->path_cellptr = (struct Path_T *) NULL;
   this->path_cellctr = 0;
 #endif
 
 
-  while (List_next(this->junction_chunks) != NULL) {
-    this->junction_chunks = List_pop_keep(this->junction_chunks,(void **) &junction_chunk);
-    FREE_KEEP(junction_chunk);
+  while (this->junction_chunks != NULL) {
+    this->junction_chunks = List_pop(this->junction_chunks,(void **) &junction_chunk);
+    debug(printf("Freeing a chunk of junction_cells.  Ptr for chunk %d is %p..%p\n",
+		 List_length(this->junction_chunks),junction_chunk,&(junction_chunk[JUNCTION_CHUNKSIZE])));
+    FREE(junction_chunk);
   }
+
 #ifdef PATHPOOL_REUSE
   junction_chunk = (struct Junction_T *) List_head(this->junction_chunks);
   List_free_keep(&this->junction_free_cells);
@@ -252,14 +259,17 @@ Pathpool_reset_memory (T this) {
     this->junction_free_cells = List_push_keep(this->junction_free_cells,(void *) &(junction_chunk[celli]));
   }
 #else
-  this->junction_cellptr = (struct Junction_T *) List_head(this->junction_chunks);
+  /* this->junction_cellptr = (struct Junction_T *) List_head(this->junction_chunks); */
+  this->junction_cellptr = (struct Junction_T *) NULL;
   this->junction_cellctr = 0;
 #endif  
   
 
-  while (List_next(this->altsplice_chunks) != NULL) {
-    this->altsplice_chunks = List_pop_keep(this->altsplice_chunks,(void **) &altsplice_chunk);
-    FREE_KEEP(altsplice_chunk);
+  while (this->altsplice_chunks != NULL) {
+    this->altsplice_chunks = List_pop(this->altsplice_chunks,(void **) &altsplice_chunk);
+    debug(printf("Freeing a chunk of altsplice_cells.  Ptr for chunk %d is %p..%p\n",
+		 List_length(this->altsplice_chunks),altsplice_chunk,&(altsplice_chunk[ALTSPLICE_CHUNKSIZE])));
+    FREE(altsplice_chunk);
   }
 #ifdef PATHPOOL_REUSE
   altsplice_chunk = (struct Altsplice_T *) List_head(this->altsplice_chunks);
@@ -269,16 +279,20 @@ Pathpool_reset_memory (T this) {
     this->altsplice_free_cells = List_push_keep(this->altsplice_free_cells,(void *) &(altsplice_chunk[celli]));
   }
 #else
-  this->altsplice_cellptr = (struct Altsplice_T *) List_head(this->altsplice_chunks);
+  /* this->altsplice_cellptr = (struct Altsplice_T *) List_head(this->altsplice_chunks); */
+  this->altsplice_cellptr = (struct Altsplice_T *) NULL;
   this->altsplice_cellctr = 0;
 #endif
 
 
-  while (List_next(this->string_chunks) != NULL) {
-    this->string_chunks = List_pop_keep(this->string_chunks,(void **) &string_chunk);
-    FREE_KEEP(string_chunk);
+  while (this->string_chunks != NULL) {
+    this->string_chunks = List_pop(this->string_chunks,(void **) &string_chunk);
+    debug(printf("Freeing a chunk of string_cells.  Ptr for chunk %d is %p..%p\n",
+		 List_length(this->string_chunks),string_chunk,&(string_chunk[STRING_CHUNKSIZE])));
+    FREE(string_chunk);
   }
-  this->string_cellptr = (char *) List_head(this->string_chunks);
+  /* this->string_cellptr = (char *) List_head(this->string_chunks); */
+  this->string_cellptr = (char *) NULL;
   this->string_chunksize = STRING_CHUNKSIZE;
   this->string_cellctr = 0;
 
@@ -293,32 +307,32 @@ Pathpool_free (T *old) {
   char *string_chunk;
 
   while ((*old)->path_chunks != NULL) {
-    (*old)->path_chunks = List_pop_keep((*old)->path_chunks,(void **) &path_chunk);
-    FREE_KEEP(path_chunk);
+    (*old)->path_chunks = List_pop((*old)->path_chunks,(void **) &path_chunk);
+    FREE(path_chunk);
   }
 #ifdef PATHPOOL_REUSE
   List_free_keep(&(*old)->path_free_cells);
 #endif
 
   while ((*old)->junction_chunks != NULL) {
-    (*old)->junction_chunks = List_pop_keep((*old)->junction_chunks,(void **) &junction_chunk);
-    FREE_KEEP(junction_chunk);
+    (*old)->junction_chunks = List_pop((*old)->junction_chunks,(void **) &junction_chunk);
+    FREE(junction_chunk);
   }
 #ifdef PATHPOOL_REUSE
   List_free_keep(&(*old)->junction_free_cells);
 #endif
 
   while ((*old)->altsplice_chunks != NULL) {
-    (*old)->altsplice_chunks = List_pop_keep((*old)->altsplice_chunks,(void **) &altsplice_chunk);
-    FREE_KEEP(altsplice_chunk);
+    (*old)->altsplice_chunks = List_pop((*old)->altsplice_chunks,(void **) &altsplice_chunk);
+    FREE(altsplice_chunk);
   }
 #ifdef PATHPOOL_REUSE
   List_free_keep(&(*old)->altsplice_free_cells);
 #endif  
 
   while ((*old)->string_chunks != NULL) {
-    (*old)->string_chunks = List_pop_keep((*old)->string_chunks,(void **) &string_chunk);
-    FREE_KEEP(string_chunk);
+    (*old)->string_chunks = List_pop((*old)->string_chunks,(void **) &string_chunk);
+    FREE(string_chunk);
   }
 
   FREE_KEEP(*old);
@@ -418,8 +432,8 @@ static struct Path_T *
 add_new_path_chunk (T this) {
   struct Path_T *chunk;
 
-  chunk = (struct Path_T *) MALLOC_KEEP(PATH_CHUNKSIZE*sizeof(struct Path_T));
-  this->path_chunks = List_push_keep(this->path_chunks,(void *) chunk);
+  chunk = (struct Path_T *) MALLOC(PATH_CHUNKSIZE*sizeof(struct Path_T));
+  this->path_chunks = List_push(this->path_chunks,(void *) chunk);
 #ifdef PATHPOOL_REUSE
   int celli;
   for (celli = PATH_CHUNKSIZE - 1; celli >= 0; celli--) {
@@ -427,8 +441,8 @@ add_new_path_chunk (T this) {
   }
 #endif
 
-  debug(printf("Adding a new chunk of path_cells.  Ptr for chunk %d is %p\n",
-	       List_length(this->path_chunks),chunk));
+  debug(printf("Adding a new chunk of path_cells.  Ptr for chunk %d is %p..%p\n",
+	       List_length(this->path_chunks),chunk,&(chunk[PATH_CHUNKSIZE])));
 
   return chunk;
 }
@@ -437,8 +451,8 @@ static struct Junction_T *
 add_new_junction_chunk (T this) {
   struct Junction_T *chunk;
 
-  chunk = (struct Junction_T *) MALLOC_KEEP(JUNCTION_CHUNKSIZE*sizeof(struct Junction_T));
-  this->junction_chunks = List_push_keep(this->junction_chunks,(void *) chunk);
+  chunk = (struct Junction_T *) MALLOC(JUNCTION_CHUNKSIZE*sizeof(struct Junction_T));
+  this->junction_chunks = List_push(this->junction_chunks,(void *) chunk);
 #ifdef PATHPOOL_REUSE
   int celli;
   for (celli = JUNCTION_CHUNKSIZE - 1; celli >= 0; celli--) {
@@ -446,8 +460,8 @@ add_new_junction_chunk (T this) {
   }
 #endif
 
-  debug(printf("Adding a new chunk of junction_cells.  Ptr for chunk %d is %p\n",
-	       List_length(this->junction_chunks),chunk));
+  debug(printf("Adding a new chunk of junction_cells.  Ptr for chunk %d is %p..%p\n",
+	       List_length(this->junction_chunks),chunk,&(chunk[JUNCTION_CHUNKSIZE])));
 
   return chunk;
 }
@@ -456,8 +470,8 @@ static struct Altsplice_T *
 add_new_altsplice_chunk (T this) {
   struct Altsplice_T *chunk;
 
-  chunk = (struct Altsplice_T *) MALLOC_KEEP(ALTSPLICE_CHUNKSIZE*sizeof(struct Altsplice_T));
-  this->altsplice_chunks = List_push_keep(this->altsplice_chunks,(void *) chunk);
+  chunk = (struct Altsplice_T *) MALLOC(ALTSPLICE_CHUNKSIZE*sizeof(struct Altsplice_T));
+  this->altsplice_chunks = List_push(this->altsplice_chunks,(void *) chunk);
 #ifdef PATHPOOL_REUSE
   int celli;
   for (celli = ALTSPLICE_CHUNKSIZE - 1; celli >= 0; celli--) {
@@ -465,30 +479,33 @@ add_new_altsplice_chunk (T this) {
   }
 #endif
 
-  debug(printf("Adding a new chunk of altsplice_cells.  Ptr for chunk %d is %p\n",
-	       List_length(this->altsplice_chunks),chunk));
+  debug(printf("Adding a new chunk of altsplice_cells.  Ptr for chunk %d is %p..%p\n",
+	       List_length(this->altsplice_chunks),chunk,&(chunk[ALTSPLICE_CHUNKSIZE])));
 
   return chunk;
 }
 
 
+#if 0
+/* Code is inlined below */
 static char *
 add_new_string_chunk (T this, int nchars) {
   char *chunk;
 
   if (nchars > STRING_CHUNKSIZE) {
-    chunk = (char *) MALLOC_KEEP(nchars*sizeof(char));
+    chunk = (char *) MALLOC(nchars*sizeof(char));
     this->string_chunksize = nchars;
   } else {
-    chunk = (char *) MALLOC_KEEP(STRING_CHUNKSIZE*sizeof(char));
+    chunk = (char *) MALLOC(STRING_CHUNKSIZE*sizeof(char));
     this->string_chunksize = STRING_CHUNKSIZE;
   }
-  this->string_chunks = List_push_keep(this->string_chunks,(void *) chunk);
-  debug(printf("Adding a new chunk of string_cells.  Ptr for chunk %d is %p\n",
-	       List_length(this->string_chunks),chunk));
+  this->string_chunks = List_push(this->string_chunks,(void *) chunk);
+  debug(printf("Adding a new chunk of string_cells.  Ptr for chunk %d is %p..%p\n",
+	       List_length(this->string_chunks),chunk,&(chunk[STRING_CHUNKSIZE])));
 
   return chunk;
 }
+#endif
 
 
 Path_T
@@ -505,7 +522,8 @@ Pathpool_new_path (T this
   }
   this->path_free_cells = List_pop_keep(this->path_free_cells,(void **) &new);
 #else
-  if (this->path_cellctr >= PATH_CHUNKSIZE) {
+  if (this->path_cellptr == (struct Path_T *) NULL ||
+      this->path_cellctr >= PATH_CHUNKSIZE) {
     this->path_cellptr = add_new_path_chunk(this);
     this->path_cellctr = 0;
   }
@@ -529,13 +547,16 @@ Pathpool_new_junction (T this
 		       ) {
   Junction_T new;
 
+  /* printf("Pathpool_new_junction: cellptr is %p, cellctr is %lu\n",this->junction_cellptr,this->junction_cellctr); */
+
 #ifdef PATHPOOL_REUSE
   if (this->junction_free_cells == (List_T) NULL) {
     add_new_junction_chunk(this);
   }
   this->junction_free_cells = List_pop_keep(this->junction_free_cells,(void **) &new);
 #else
-  if (this->junction_cellctr >= JUNCTION_CHUNKSIZE) {
+  if (this->junction_cellptr == (struct Junction_T *) NULL ||
+      this->junction_cellctr >= JUNCTION_CHUNKSIZE) {
     this->junction_cellptr = add_new_junction_chunk(this);
     this->junction_cellctr = 0;
   }
@@ -546,6 +567,8 @@ Pathpool_new_junction (T this
 #ifdef PATHPOOL_TRACE
   printf("Pathpool/junction: Allocated %p -- Pathpool_new_junction called by %s:%d\n",new,file,line);
 #endif
+
+  /* printf("Pathpool_new_junction: returning %p\n",new); */
 
   return new;
 }  
@@ -565,7 +588,8 @@ Pathpool_new_altsplice (T this
   }
   this->altsplice_free_cells = List_pop_keep(this->altsplice_free_cells,(void **) &new);
 #else
-  if (this->altsplice_cellctr >= ALTSPLICE_CHUNKSIZE) {
+  if (this->altsplice_cellptr == (struct Altsplice_T *) NULL ||
+      this->altsplice_cellctr >= ALTSPLICE_CHUNKSIZE) {
     this->altsplice_cellptr = add_new_altsplice_chunk(this);
     this->altsplice_cellctr = 0;
   }
@@ -585,49 +609,55 @@ char *
 Pathpool_new_string (T this, int nchars) {
   char *string;
 
-  if (this->string_cellctr + nchars > this->string_chunksize) {
+  if (this->string_cellptr == (char *) NULL ||
+      this->string_cellctr + nchars > this->string_chunksize) {
     /* this->string_cellptr = add_new_string_chunk(this,nchars); */
     /* inlined add_new_string_chunk */
-    if (nchars > STRING_CHUNKSIZE) {
-      this->string_cellptr = (char *) MALLOC_KEEP(nchars*sizeof(char));
+    if (nchars > this->string_chunksize) {
+      this->string_cellptr = (char *) MALLOC(nchars*sizeof(char));
       this->string_chunksize = nchars;
     } else {
-      this->string_cellptr = (char *) MALLOC_KEEP(STRING_CHUNKSIZE*sizeof(char));
-      this->string_chunksize = STRING_CHUNKSIZE;
+      this->string_cellptr = (char *) MALLOC(this->string_chunksize*sizeof(char));
     }
-    this->string_chunks = List_push_keep(this->string_chunks,(void *) this->string_cellptr);
+    this->string_chunks = List_push(this->string_chunks,(void *) this->string_cellptr);
     
     this->string_cellctr = 0;
   }
 
   this->string_cellctr += nchars;
+
   string = this->string_cellptr;
   this->string_cellptr += nchars;
-
   return string;
 }  
 
 
 
-/* Guarantees that a chunk is available */
+/* Previously started with an initial chunk */
 void
 Pathpool_init (T this) {
+
 #ifdef PATHPOOL_REUSE
   add_new_path_chunk(this);
   add_new_junction_chunk(this);
   add_new_altsplice_chunk(this);
+
 #else
-this->path_cellptr = add_new_path_chunk(this);
+  /* this->path_cellptr = add_new_path_chunk(this); */
+  this->path_cellptr = (struct Path_T *) NULL;
   this->path_cellctr = 0;
 
-  this->junction_cellptr = add_new_junction_chunk(this);
+  /* this->junction_cellptr = add_new_junction_chunk(this); */
+  this->junction_cellptr = (struct Junction_T *) NULL;
   this->junction_cellctr = 0;
 
-  this->altsplice_cellptr = add_new_altsplice_chunk(this);
+  /* this->altsplice_cellptr = add_new_altsplice_chunk(this); */
+  this->altsplice_cellptr = (struct Altsplice_T *) NULL;
   this->altsplice_cellctr = 0;
 #endif
 
-  this->string_cellptr = add_new_string_chunk(this,STRING_CHUNKSIZE);
+  /* this->string_cellptr = add_new_string_chunk(this,STRING_CHUNKSIZE); */
+  this->string_cellptr = (char *) NULL;
   this->string_cellctr = 0;
   this->string_chunksize = STRING_CHUNKSIZE;
 

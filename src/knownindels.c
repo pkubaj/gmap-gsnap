@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: knownsplicing.c 225459 2022-12-15 01:18:40Z twu $";
+static char rcsid[] = "$Id: 50bd81d84f2ac018aa09f150df015618c57ba05f $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

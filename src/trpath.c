@@ -1,4 +1,5 @@
-static char rcsid[] = "$Id: bca0ed5ea758bf30f802e36d3bb04dc048136821 $";
+#define DEBUG1 1
+static char rcsid[] = "$Id: 47a84688bf074011f3a79273392e984e9eb9575f $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -95,6 +96,9 @@ Trpath_create (Intlist_T endpoints, Uintlist_T trdiagonals, Intlist_T nmismatche
 void
 Trpath_free (T *old, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 	     Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool) {
+
+  debug0(printf("Freeing trpath %p\n",*old));
+
   Intlistpool_free_list(&(*old)->endpoints,intlistpool
 			intlistpool_trace(__FILE__,__LINE__));
   Uintlistpool_free_list(&(*old)->trdiagonals,uintlistpool
@@ -104,6 +108,7 @@ Trpath_free (T *old, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
   Junction_list_gc(&(*old)->junctions,listpool,pathpool);
   Trpathpool_free_trpath(&(*old),trpathpool
 			 trpathpool_trace(__FILE__,__LINE__));
+
   return;
 }
 
@@ -121,6 +126,7 @@ Trpath_gc (List_T *list, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
   }
   Hitlistpool_free_list(&(*list),hitlistpool
 			hitlistpool_trace(__FILE__,__LINE__)); /* allocated by Hitlistpool_push */
+
   return;
 }
 
@@ -149,6 +155,9 @@ Trpath_new_for_tstart_extension (Trcoord_T trdiagonal, int tstart, int tend, int
 				 Trpathpool_T trpathpool, Method_T method) {
   T new = Trpathpool_new_trpath(trpathpool
 				trpathpool_trace(__FILE__,__LINE__));
+
+  debug0(printf("Creating trpath %p by Trpath_new_for_tstart_extension with trnum %d, mismatches %d\n",
+		new,trnum,nmismatches));
 
   new->tplusp = tplusp;
 
@@ -186,6 +195,9 @@ Trpath_new_for_tend_extension (Trcoord_T trdiagonal, int tstart, int tend, int n
 			       Trpathpool_T trpathpool, Method_T method) {
   T new = Trpathpool_new_trpath(trpathpool
 				trpathpool_trace(__FILE__,__LINE__));
+
+  debug0(printf("Creating trpath %p by Trpath_new_for_tend_extension with trnum %d, mismatches %d\n",
+		new,trnum,nmismatches));
 
   new->tplusp = tplusp;
 

@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: genome-write.c 224922 2022-10-08 13:23:45Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

@@ -1,4 +1,3 @@
-/* $Id: comp.h 195548 2016-08-02 17:18:50Z twu $ */
 #ifndef COMP_INCLUDED
 #define COMP_INCLUDED
 

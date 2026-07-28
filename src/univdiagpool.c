@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: f2a890d54dc96875af5b8d2a314946d9e545718e $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -243,6 +242,8 @@ Univdiagpool_new (void) {
 }
 
 
+#if 0
+/* Now using Univdiag_new_array and Univdiag_free_array */
 #ifdef UNIVDIAGPOOL_REUSE
 void
 Univdiagpool_free_univdiag (Univdiag_T *old, T this
@@ -282,6 +283,7 @@ Univdiagpool_free_list (List_T *list, T this
 
   return;
 }
+#endif
 #endif
 
 
@@ -471,6 +473,8 @@ Univdiagpool_push_existing (List_T list, T this, Univdiag_T univdiag
 }
 
 
+#if 0
+/* Now using Univdiag_new_array and Univdiag_free_array */
 Univdiag_T
 Univdiagpool_new_univdiag (T this, int qstart, int qend, int nmismatches, Univcoord_T univdiagonal
 #ifdef UNIVDIAGPOOL_TRACE
@@ -506,6 +510,7 @@ Univdiagpool_new_univdiag (T this, int qstart, int qend, int nmismatches, Univco
 
   return univdiag;
 }
+#endif
 
 
 /* Guarantees that a chunk is available */

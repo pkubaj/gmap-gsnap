@@ -1,4 +1,3 @@
-/* $Id: oligoindex_hr.h 226315 2023-02-28 18:22:20Z twu $ */
 #ifndef OLIGOINDEX_HR_INCLUDED
 #define OLIGOINDEX_HR_INCLUDED
 

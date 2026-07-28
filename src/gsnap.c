@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 99e61aac671c73e8b5069318ef6f54f34ae74d0b $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -191,7 +190,10 @@ static char rcsid[] = "$Id: 99e61aac671c73e8b5069318ef6f54f34ae74d0b $";
 #include "getopt.h"
 
 
+#define SEED 31415926
 #define ONE_GB 1000000000
+
+#define LOCALDB_REGION_SIZE 65536
 
 #define MIN_INDEXDB_SIZE_THRESHOLD 1000
 
@@ -307,6 +309,7 @@ static char *transcriptome_dbroot = NULL;
 static char *user_genomedir = NULL;
 static char *genome_dbroot = NULL;
 
+static double skip_prob = 0.0;
 static unsigned int part_modulus = 0;
 static unsigned int part_interval = 1;
 static int barcode_length = 0;
@@ -376,8 +379,9 @@ static int pairmax_rna = 200000;
 
 static int pass1_min_support = 20;
 static double defect_rate = 0.01;
-static int expected_pairlength = 1000;
+static int expected_pairlength = 200;
 static int pairlength_deviation = 100;
+static int min_insertlength;	/* expected_pairlength - 5*pairlength_deviation if >= 0 */
 static int max_insertlength;	/* expected_pairlength + 5*pairlength_deviation */
 
 
@@ -399,6 +403,7 @@ static int min_indel_end_matches = 4;
    an integer */
 static double user_nmismatches_filter_float = -1.0;
 static double user_mincoverage_filter_float = 0.5;
+static int localdb_nmismatches_allowed = 2;
 
 static int max_insertionlen = 6;
 static int max_deletionlen = 9;
@@ -428,8 +433,12 @@ static bool favor_multiexon_p = false;
 static EF64_T repetitive_ef64;
 
 /* Known splicing (from either splicing IIT or two-pass mode) */
-static FILE *dump_splices_fp = NULL;
-static char *splices_file = NULL;
+static bool splice_evalp = true;
+
+static char *dump_splices_file = NULL;
+static bool dump_splices_include_known_p = true;
+static char *read_splices_file = NULL;
+
 static Knownsplicing_T knownsplicing = NULL;
 static bool knownsplicingp = false;
 static bool intron_level_p = false;
@@ -453,6 +462,9 @@ static Knownindels_T knownindels = NULL;
 /* Need a mutex lock */
 static unsigned long long total_mismatches = 0;
 static unsigned long long total_querylength = 0;
+
+static Support_T support_tables = NULL;
+
 
 static Univcoordtableuint_T donor_table = NULL;
 static Univcoordtableuint_T acceptor_table = NULL;
@@ -583,6 +595,7 @@ static struct option long_options[] = {
   {"use-localdb", required_argument, 0, 0}, /* user_localdb_p, use_localdb_p */
   {"kmer", required_argument, 0, 'k'}, /* required_index1part, index1part */
   {"sampling", required_argument, 0, 0}, /* required_index1interval, index1interval */
+  {"align-fraction", required_argument, 0, 0}, /* skip_prob */
   {"part", required_argument, 0, 'q'}, /* part_modulus, part_interval */
   {"orientation", required_argument, 0, 0}, /* single_cell_p, invert_first_p, invert_second_p */
   {"input-buffer-size", required_argument, 0, 0}, /* input_buffer_size */
@@ -620,9 +633,7 @@ static struct option long_options[] = {
 
   {"resolve-inner", required_argument, 0, 0}, /* resolve_inner_p */
   {"pairexpect", required_argument, 0, 0},  /* expected_pairlength */
-#if 0
   {"pairdev", required_argument, 0, 0},  /* pairlength_deviation */
-#endif
 
   {"pass1-min-support", required_argument, 0, 0}, /* pass1_min_support */
 
@@ -641,18 +652,21 @@ static struct option long_options[] = {
 
   {"indel-endlength", required_argument, 0, 0}, /* min_indel_end_matches */
 
-  {"max-insertions", required_argument, 0, 'y'}, /* max_insertionlen */
-  {"max-deletions", required_argument, 0, 'z'}, /* max_deletionlen */
+  {"max-insertions", required_argument, 0, 0}, /* max_insertionlen */
+  {"max-deletions", required_argument, 0, 0}, /* max_deletionlen */
   {"suboptimal-levels", required_argument, 0, 'M'}, /* subopt_levels */
 
   {"localsplicedist", required_argument, 0, 'w'}, /* shortsplicedist */
   {"splicingdir", required_argument, 0, 0},	  /* user_splicingdir */
   {"use-splicing", required_argument, 0, 's'}, /* splicing_iit, knownsplicingp, find_dna_chimeras_p */
+
+  {"splices-noeval", no_argument, 0, 0},	     /* splice_evalp */
   {"splices-dump", required_argument, 0, 0},	       /* dump_splices_fp */
+  {"splices-exclude-known", no_argument, 0, 0},	       /* dump_splices_include_known_p */
   {"splices-read", required_argument, 0, 0},    /* splices_file */
+
   {"indels-dump", required_argument, 0, 0},	       /* dump_indels_fp */
   {"indels-read", required_argument, 0, 0},    /* indels_file */
-  {"end-detail", required_argument, 0, 0}, /* end_detail */
 
   {"merge-distant-samechr", no_argument, 0, 0},		    /* merge_samechr_p */
 
@@ -962,7 +976,13 @@ check_compiler_assumptions () {
 
 /* Pass1 updates the global list of intron info */
 static void
-process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, 
+process_request_pass1 (Request_T request,
+
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		       unsigned short *localdb_alloc,
+
+		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, 
 		       Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		       Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
@@ -970,6 +990,7 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
 		       Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool,
 		       Spliceendsgen_T spliceendsgen,
 		       Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3) {
+  Stage1_T stage1_5, stage1_3;
   Shortread_T queryseq1, queryseq2;
   Path_T *patharray, *patharray5, *patharray3, path5, path3;
   Pathpair_T *pathpairarray, pathpair;
@@ -983,8 +1004,15 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
 
   if (single_cell_p == true) {
     Spliceendsgen_reset(spliceendsgen);
+    stage1_3 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_3,streamspace_max_alloc,streamspace_alloc,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -995,28 +1023,35 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
       pthread_mutex_lock(&pass1_lock);
 #endif
       Path_learn_defect_rate(patharray[0],&total_mismatches,&total_querylength);
-      /* Path_learn_splicesites(patharray[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-      Path_learn_introns(patharray[0],&donor_startpoints,&donor_partners,
-			 &acceptor_startpoints,&acceptor_partners,
-			 &antidonor_startpoints,&antidonor_partners,
-			 &antiacceptor_startpoints,&antiacceptor_partners);
-      Path_learn_indels(patharray[0],indel_table);
 #ifdef HAVE_PTHREAD
       pthread_mutex_unlock(&pass1_lock);
 #endif
     }
 
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
     for (i = 0; i < npaths_primary + npaths_altloc; i++) {
       Path_free(&(patharray[i]),intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
     }
     FREE_OUT(patharray);
 
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
 
   } else if (queryseq2 == NULL) {
     Spliceendsgen_reset(spliceendsgen);
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_5,streamspace_max_alloc,streamspace_alloc,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -1027,30 +1062,41 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
       pthread_mutex_lock(&pass1_lock);
 #endif
       Path_learn_defect_rate(patharray[0],&total_mismatches,&total_querylength);
-      /* Path_learn_splicesites(patharray[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-      Path_learn_introns(patharray[0],&donor_startpoints,&donor_partners,
-			 &acceptor_startpoints,&acceptor_partners,
-			 &antidonor_startpoints,&antidonor_partners,
-			 &antiacceptor_startpoints,&antiacceptor_partners);
-      Path_learn_indels(patharray[0],indel_table);
 #ifdef HAVE_PTHREAD
       pthread_mutex_unlock(&pass1_lock);
 #endif
     }
+
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
+
     for (i = 0; i < npaths_primary + npaths_altloc; i++) {
       Path_free(&(patharray[i]),intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
     }
     FREE_OUT(patharray);
 
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
   } else if (Shortread_fulllength(queryseq1) < min_querylength &&
 	     Shortread_fulllength(queryseq2) < min_querylength) {
     /* Nothing to learn */
 
   } else if (Shortread_fulllength(queryseq1) < min_querylength) {
+    /* Solve only queryseq2 */
     Spliceendsgen_reset(spliceendsgen);
+    stage1_3 = Stage1_new(/*first_read_p*/false);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_3,streamspace_max_alloc,streamspace_alloc,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -1061,26 +1107,37 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
       pthread_mutex_lock(&pass1_lock);
 #endif
       Path_learn_defect_rate(patharray[0],&total_mismatches,&total_querylength);
-      /* Path_learn_splicesites(patharray[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-      Path_learn_introns(patharray[0],&donor_startpoints,&donor_partners,
-			 &acceptor_startpoints,&acceptor_partners,
-			 &antidonor_startpoints,&antidonor_partners,
-			 &antiacceptor_startpoints,&antiacceptor_partners);
-      Path_learn_indels(patharray[0],indel_table);
 #ifdef HAVE_PTHREAD
       pthread_mutex_unlock(&pass1_lock);
 #endif
     }
+
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
+
     for (i = 0; i < npaths_primary + npaths_altloc; i++) {
       Path_free(&(patharray[i]),intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
     }
     FREE_OUT(patharray);
 
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
   } else if (Shortread_fulllength(queryseq2) < min_querylength) {
+    /* Solve only queryseq1 */
     Spliceendsgen_reset(spliceendsgen);
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_5,streamspace_max_alloc,streamspace_alloc,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -1091,31 +1148,42 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
       pthread_mutex_lock(&pass1_lock);
 #endif
       Path_learn_defect_rate(patharray[0],&total_mismatches,&total_querylength);
-      /* Path_learn_splicesites(patharray[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-      Path_learn_introns(patharray[0],&donor_startpoints,&donor_partners,
-			 &acceptor_startpoints,&acceptor_partners,
-			 &antidonor_startpoints,&antidonor_partners,
-			 &antiacceptor_startpoints,&antiacceptor_partners);
-      Path_learn_indels(patharray[0],indel_table);
 #ifdef HAVE_PTHREAD
       pthread_mutex_unlock(&pass1_lock);
 #endif
     }
+
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
+
     for (i = 0; i < npaths_primary + npaths_altloc; i++) {
       Path_free(&(patharray[i]),intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
     }
     FREE_OUT(patharray);
 
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
   } else {
     Spliceendsgen_reset(spliceendsgen5);
     Spliceendsgen_reset(spliceendsgen3);
 
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
+    stage1_3 = Stage1_new(/*first_read_p*/false);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     if ((pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
 					    &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
 					    &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-					    queryseq1,queryseq2,repetitive_ef64,
+					    stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
 					    knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
+					    streamspace_max_alloc,streamspace_alloc,
+					    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
 					    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 					    intlistpool,uintlistpool,univcoordlistpool,
 					    listpool,trpathpool,pathpool,vectorpool,hitlistpool,
@@ -1133,23 +1201,15 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
 	Pathpair_learn_insertlengths(pathpairarray[0],&insertlengths);
 	Path_learn_defect_rate(path5,&total_mismatches,&total_querylength);
 	Path_learn_defect_rate(path3,&total_mismatches,&total_querylength);
-	/* Path_learn_splicesites(path5,donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-	Path_learn_introns(path5,&donor_startpoints,&donor_partners,
-				&acceptor_startpoints,&acceptor_partners,
-				&antidonor_startpoints,&antidonor_partners,
-				&antiacceptor_startpoints,&antiacceptor_partners);
-	Path_learn_indels(path5,indel_table);
-
-	/* Path_learn_splicesites(path3,donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-	Path_learn_introns(path3,&donor_startpoints,&donor_partners,
-				&acceptor_startpoints,&acceptor_partners,
-				&antidonor_startpoints,&antidonor_partners,
-				&antiacceptor_startpoints,&antiacceptor_partners);
-	Path_learn_indels(path3,indel_table);
 #ifdef HAVE_PTHREAD
 	pthread_mutex_unlock(&pass1_lock);
 #endif
       }
+
+      if (support_tables != NULL) {
+	Support_revise_paired(support_tables,pathpairarray,npaths_primary + npaths_altloc);
+      }
+
       for (i = 0; i < npaths_primary + npaths_altloc; i++) {
 	Pathpair_free(&(pathpairarray[i]),intlistpool,univcoordlistpool,
 		      listpool,pathpool,transcriptpool,hitlistpool);
@@ -1163,31 +1223,26 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
 	pthread_mutex_lock(&pass1_lock);
 #endif
 	Path_learn_defect_rate(patharray5[0],&total_mismatches,&total_querylength);
-	/* Path_learn_splicesites(patharray5[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-	Path_learn_introns(patharray5[0],&donor_startpoints,&donor_partners,
-				&acceptor_startpoints,&acceptor_partners,
-				&antidonor_startpoints,&antidonor_partners,
-				&antiacceptor_startpoints,&antiacceptor_partners);
-	Path_learn_indels(patharray5[0],indel_table);
 #ifdef HAVE_PTHREAD
 	pthread_mutex_unlock(&pass1_lock);
 #endif
       }
+
       if (npaths3_primary + npaths3_altloc == 1) {
 #ifdef HAVE_PTHREAD
 	pthread_mutex_lock(&pass1_lock);
 #endif
 	Path_learn_defect_rate(patharray3[0],&total_mismatches,&total_querylength);
-	/* Path_learn_splicesites(patharray3[0],donor_table,acceptor_table,antidonor_table,antiacceptor_table); */
-	Path_learn_introns(patharray3[0],&donor_startpoints,&donor_partners,
-				&acceptor_startpoints,&acceptor_partners,
-				&antidonor_startpoints,&antidonor_partners,
-				&antiacceptor_startpoints,&antiacceptor_partners);
-	Path_learn_indels(patharray3[0],indel_table);
 #ifdef HAVE_PTHREAD
 	pthread_mutex_unlock(&pass1_lock);
 #endif
       }
+
+      if (support_tables != NULL) {
+	Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+	Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+      }
+
       for (i = 0; i < npaths5_primary + npaths5_altloc; i++) {
 	Path_free(&(patharray5[i]),intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
@@ -1199,6 +1254,13 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
       FREE_OUT(patharray3);
       FREE_OUT(patharray5);
     }
+
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
   }
 
   return;
@@ -1208,6 +1270,10 @@ process_request_pass1 (Request_T request, Trdiagpool_T trdiagpool, Univdiagpool_
 static Filestring_T
 process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
 		       double *worker_runtime, Request_T request,
+		       
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		       unsigned short *localdb_alloc,
 
 		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 		       Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
@@ -1221,11 +1287,13 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
   Filestring_T fp;
   Result_T result;
   int jobid;
+
+  Stage1_T stage1_5, stage1_3;
   Shortread_T queryseq1, queryseq2;
   Path_T *patharray, *patharray5, *patharray3;
   Pathpair_T *pathpairarray;
 
-  int npaths_primary, npaths_altloc, npaths5_primary, npaths5_altloc, npaths3_primary, npaths3_altloc, i;
+  int npaths_primary, npaths_altloc, npaths5_primary, npaths5_altloc, npaths3_primary, npaths3_altloc;
   int first_absmq, second_absmq, first_absmq5, second_absmq5, first_absmq3, second_absmq3;
   Pairtype_T final_pairtype;
 
@@ -1241,43 +1309,74 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 
   if (single_cell_p == true) {
     Spliceendsgen_reset(spliceendsgen);
+    stage1_3 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_3,streamspace_max_alloc,streamspace_alloc,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/true,/*first_read_p*/true,
 				   /*pass*/PASS2);
 
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
     result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
 				      result,request,listpool);
     *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
+
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
     return fp;
 
   } else if (queryseq2 == NULL) {
     Spliceendsgen_reset(spliceendsgen);
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
     patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
+				   stage1_5,streamspace_max_alloc,streamspace_alloc,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_nmismatches_allowed,
+
 				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
 				   /*pass*/PASS2);
 
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
+    }
     result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
 				      result,request,listpool);
     *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
+
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
     return fp;
 
   } else if (Shortread_fulllength(queryseq1) < min_querylength &&
 	     Shortread_fulllength(queryseq2) < min_querylength) {
     patharray3 = patharray5 = (Path_T *) NULL;
+    /* No results for Support_revise */
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,/*npaths5_primary*/0,/*npaths5_altloc*/0,
 					  /*first_absmq5*/0,/*second_absmq5*/0,
 					  (void **) patharray3,/*npaths3_primary*/0,/*npaths3_altloc*/0,
@@ -1292,14 +1391,25 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
   } else if (Shortread_fulllength(queryseq1) < min_querylength) {
     /* Solve only queryseq2 */
     Spliceendsgen_reset(spliceendsgen);
+    stage1_3 = Stage1_new(/*first_read_p*/false);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     patharray5 = (Path_T *) NULL;
     patharray3 = Stage1_single_read(&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
+				    stage1_3,streamspace_max_alloc,streamspace_alloc,
 				    queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
+				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				    localdb_nmismatches_allowed,
+
 				    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				    intlistpool,uintlistpool,univcoordlistpool,
 				    listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				    spliceendsgen,/*single_cell_p*/false,/*first_read_p*/false,
 				    /*pass*/PASS2);
+
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+    }
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,/*npaths5_primary*/0,/*npaths5_altloc*/0,
 					  /*first_absmq5*/0,/*second_absmq5*/0,
 					  (void **) patharray3,npaths3_primary,npaths3_altloc,
@@ -1309,19 +1419,35 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
     *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
+
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
     return fp;
 
   } else if (Shortread_fulllength(queryseq2) < min_querylength) {
     /* Solve only queryseq1 */
     Spliceendsgen_reset(spliceendsgen);
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
     patharray3 = (Path_T *) NULL;
     patharray5 = Stage1_single_read(&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
+				    stage1_5,streamspace_max_alloc,streamspace_alloc,
 				    queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
+				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				    localdb_nmismatches_allowed,
+
 				    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				    intlistpool,uintlistpool,univcoordlistpool,
 				    listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				    spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
 				    /*pass*/PASS2);
+
+    if (support_tables != NULL) {
+      Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+    }
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,
 					  first_absmq5,second_absmq5,
 					  (void **) patharray3,/*npaths3_primary*/0,/*npaths3_altloc*/0,
@@ -1331,17 +1457,30 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
     *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
+
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
     return fp;
 
   } else {
     Spliceendsgen_reset(spliceendsgen5);
     Spliceendsgen_reset(spliceendsgen3);
 
+    stage1_5 = Stage1_new(/*first_read_p*/true);
+    Stage1_set_sequence(stage1_5,queryseq1,localdb);
+
+    stage1_3 = Stage1_new(/*first_read_p*/false);
+    Stage1_set_sequence(stage1_3,queryseq2,localdb);
+
     if ((pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
 					    &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
 					    &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-					    queryseq1,queryseq2,repetitive_ef64,
+					    stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
 					    knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
+					    streamspace_max_alloc,streamspace_alloc,
+					    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
 					    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 					    intlistpool,uintlistpool,univcoordlistpool,
 					    listpool,trpathpool,pathpool,vectorpool,hitlistpool,
@@ -1349,31 +1488,26 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 					    /*pass*/PASS2)) != NULL) {
 
       /* Paired or concordant hits found */
+      if (support_tables != NULL) {
+	Support_revise_paired(support_tables,pathpairarray,npaths_primary + npaths_altloc);
+      }
       result = Result_paired_read_new(jobid,(void **) pathpairarray,npaths_primary,npaths_altloc,first_absmq,second_absmq,
 				      final_pairtype);
-      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-					result,request,listpool);
-      *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
-      Result_free(&result,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-      return fp;
 
 #if 0
     } else if (chop_primers_p == false || Shortread_chop_primers(queryseq1,queryseq2) == false) {
       /* SAM output is now set for for poly-A/T chop, rather than primer chop */
       /* No paired or concordant hits found, and no adapters found */
       /* Report ends as unpaired */
+      if (support_tables != NULL) {
+	Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+	Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+      }
       result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,first_absmq5,second_absmq5,
 					    (void **) patharray3,npaths3_primary,npaths3_altloc,first_absmq3,second_absmq3);
-
-      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-					result,request,listpool);
-      *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
-      Result_free(&result,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-      return fp;
 #endif
 
+#if 0
     } else if (0) {
       /* Try with potential primers chopped.  queryseq1 and queryseq2 altered by Shortread_chop_primers. */
       for (i = 0; i < npaths5_primary + npaths5_altloc; i++) {
@@ -1391,40 +1525,56 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
       if ((pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
 					      &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
 					      &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-					      queryseq1,queryseq2,repetitive_ef64,
+					      stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
 					      knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
+					      streamspace_max_alloc,streamspace_alloc,
+					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
 					      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 					      intlistpool,uintlistpool,univcoordlistpool,
 					      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 					      transcriptpool,spliceendsgen5,spliceendsgen3,
 					      /*pass*/PASS2)) != NULL) {
 	/* Paired or concordant hits found, after chopping adapters */
+	if (support_tables != NULL) {
+	  Support_revise_paired(support_tables,pathpairarray,npaths_primary + npaths_altloc);
+	}
 	result = Result_paired_read_new(jobid,(void **) pathpairarray,npaths_primary,npaths_altloc,first_absmq,second_absmq,
 					final_pairtype);
 	
       } else {
 	/* No paired or concordant hits found, after chopping adapters */
+	if (support_tables != NULL) {
+	  Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+	  Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+	}
 	result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,first_absmq5,second_absmq5,
 					      (void **) patharray3,npaths3_primary,npaths3_altloc,first_absmq3,second_absmq3);
       }
+#endif
       
-      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-					result,request,listpool);
-      *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
-      Result_free(&result,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-      return fp;
-
     } else {
+      if (support_tables != NULL) {
+	Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+	Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+      }
       result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,first_absmq5,second_absmq5,
 					    (void **) patharray3,npaths3_primary,npaths3_altloc,first_absmq3,second_absmq3);
-      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-					result,request,listpool);
-      *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
-      Result_free(&result,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
-      return fp;
     }
+
+    fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
+				      result,request,listpool);
+    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+    Result_free(&result,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+
+    Stage1_free(&stage1_3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+    Stage1_free(&stage1_5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+		intlistpool,uintlistpool,univcoordlistpool,
+		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
+
+    return fp;
   }
 }
 
@@ -1507,6 +1657,16 @@ signal_handler (int sig) {
 static void
 single_thread () {
   Request_T request;
+
+  Chrpos_T positive_gap_distance;
+  int max_nintersections, max_localdb_nregions;
+
+  int streamspace_max_alloc;
+  Univcoord_T *streamspace_alloc;
+  Univdiag_T *novel_univdiags_alloc;
+  Univcoord_T *novel_diagonals_alloc;
+  unsigned short *localdb_alloc;
+
   Filestring_T fp, fp_failedinput, fp_failedinput_1, fp_failedinput_2;
   Shortread_T queryseq1;
   Stopwatch_T worker_stopwatch;
@@ -1535,6 +1695,34 @@ single_thread () {
   long int overall_max = 0, memusage_constant = 0, memusage;
   char acc[100+1], comma0[20], comma1[20], comma2[20], comma3[20], comma4[20], comma5[20], comma9[20];
 #endif
+
+  /* Intersection indices are paired */
+  positive_gap_distance = (shortsplicedist > (Chrpos_T) max_deletionlen) ? shortsplicedist : (Chrpos_T) max_deletionlen;
+
+  if (localdb == NULL) {
+    max_localdb_nregions = 0;
+    max_nintersections = 0;
+
+    streamspace_max_alloc = 0;
+    streamspace_alloc = (Univcoord_T *) NULL;
+
+    novel_univdiags_alloc = (Univdiag_T *) NULL;
+    novel_diagonals_alloc = (Univcoord_T *) NULL;
+    localdb_alloc = (unsigned short *) NULL;
+
+  } else {
+    /* Used by Localdb_get */
+    /* Because we re-use these, use the keep memory pool */
+    max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
+    max_nintersections = max_localdb_nregions * LOCALDB_REGION_SIZE;
+
+    streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; /* same as max_nintersections */
+    streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T));
+
+    novel_univdiags_alloc = Univdiag_new_array_keep(2 * max_nintersections);
+    novel_diagonals_alloc = (Univcoord_T *) MALLOC_KEEP(2 * max_nintersections * sizeof(Univcoord_T));
+    localdb_alloc = (unsigned short *) MALLOC_KEEP_ALIGN(max_nintersections * sizeof(unsigned short));
+  }
 
   trdiagpool = Trdiagpool_new(); Trdiagpool_init(trdiagpool);
   univdiagpool = Univdiagpool_new(); Univdiagpool_init(univdiagpool);
@@ -1576,13 +1764,17 @@ single_thread () {
 
     TRY
       if (pass == PASS1) {
-	process_request_pass1(request,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	process_request_pass1(request,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 			      intlistpool,uintlistpool,univcoordlistpool,
 			      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 			      transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3);
       } else if (pass == PASS2) {
 	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,&worker_runtime,
-				   request,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   request,streamspace_max_alloc,streamspace_alloc,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 				   transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3,
@@ -1680,26 +1872,25 @@ single_thread () {
     Genomicpos_commafmt_fill(comma4,Mem_usage_report_in());
     Genomicpos_commafmt_fill(comma5,Mem_usage_report_out());
 
-#if 1
-    fprintf(stdout,"Acc %s: constant %s  overall_max %s  query_max %s  std %s  keep %s  in %s  out %s\n",
+    fprintf(stderr,"Acc %s: constant %s  overall_max %s  query_max %s  std %s  keep %s  in %s  out %s\n",
 	    acc,comma0,comma9,comma1,comma2,comma3,comma4,comma5);
-#endif
 
+    /* We check only the std memory pool, and not the keep memory pool, which can be used across queries */
     if ((memusage = Mem_usage_report_std_heap()) > memusage_constant) {
       fprintf(stderr,"Acc %s: Memory leak in single thread of %ld bytes\n",acc,memusage);
       fflush(stdout);
-      exit(9);
+      /* exit(9); */
     } else if (Mem_usage_report_std_heap_max() > ONE_GB) {
       fprintf(stderr,"Acc %s: Excessive memory usage in single thread of %s bytes\n",acc,comma1);
       fflush(stdout);
-      exit(9);
+      /* exit(9); */
     }
 #endif
   }
 
 
 #ifdef MEMUSAGE
-  Mem_usage_std_heap_add(memusage_constant);
+  Mem_usage_std_heap_add(memusage_constant,__FILE__,__LINE__);
 #endif
 
   /* Except_stack_destroy(); -- requires pthreads */
@@ -1707,6 +1898,7 @@ single_thread () {
   if (worker_stopwatch != NULL) {
     Stopwatch_free(&worker_stopwatch);
   }
+
   Spliceendsgen_free(&spliceendsgen3);
   Spliceendsgen_free(&spliceendsgen5);
   Spliceendsgen_free(&spliceendsgen);
@@ -1725,6 +1917,11 @@ single_thread () {
   Univdiagpool_free(&univdiagpool);
   Trdiagpool_free(&trdiagpool);
 
+  FREE_KEEP_ALIGN(localdb_alloc);
+  FREE_KEEP(novel_diagonals_alloc);
+  Univdiag_free_array_keep(&novel_univdiags_alloc);
+  FREE_KEEP_ALIGN(streamspace_alloc);
+
 #ifdef MEMUSAGE
   Mem_usage_set_threadname("main");
 #endif
@@ -1737,6 +1934,16 @@ single_thread () {
 static void *
 worker_thread (void *data) {
   Request_T request;
+
+  Chrpos_T positive_gap_distance;
+  int max_nintersections, max_localdb_nregions;
+
+  int streamspace_max_alloc;
+  Univcoord_T *streamspace_alloc;
+  Univdiag_T *novel_univdiags_alloc;
+  Univcoord_T *novel_diagonals_alloc;
+  unsigned short *localdb_alloc;
+
   Filestring_T fp, fp_failedinput, fp_failedinput_1, fp_failedinput_2;
   Shortread_T queryseq1;
   Stopwatch_T worker_stopwatch;
@@ -1773,6 +1980,35 @@ worker_thread (void *data) {
   debug(fprintf(stderr,"worker_thread %ld starting\n",worker_id));
 
   /* Thread-specific data and storage */
+
+  /* Intersection indices are paired */
+  positive_gap_distance = (shortsplicedist > (Chrpos_T) max_deletionlen) ? shortsplicedist : (Chrpos_T) max_deletionlen;
+
+  if (localdb == NULL) {
+    max_localdb_nregions = 0;
+    max_nintersections = 0;
+
+    streamspace_max_alloc = 0;
+    streamspace_alloc = (Univcoord_T *) NULL;
+
+    novel_univdiags_alloc = (Univdiag_T *) NULL;
+    novel_diagonals_alloc = (Univcoord_T *) NULL;
+    localdb_alloc = (unsigned short *) NULL;
+
+  } else {
+    /* Used by Localdb_get */
+    /* Because we re-use these, use the keep memory pool */
+    max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
+    max_nintersections = max_localdb_nregions * LOCALDB_REGION_SIZE;
+
+    streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; /* same as max_nintersections */
+    streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T));
+
+    novel_univdiags_alloc = Univdiag_new_array_keep(2 * max_nintersections);
+    novel_diagonals_alloc = (Univcoord_T *) MALLOC_KEEP(2 * max_nintersections * sizeof(Univcoord_T));
+    localdb_alloc = (unsigned short *) MALLOC_KEEP_ALIGN(max_nintersections * sizeof(unsigned short));
+  }
+
   trdiagpool = Trdiagpool_new(); Trdiagpool_init(trdiagpool);
   univdiagpool = Univdiagpool_new(); Univdiagpool_init(univdiagpool);
   auxinfopool = Auxinfopool_new(); Auxinfopool_init(auxinfopool);
@@ -1814,13 +2050,17 @@ worker_thread (void *data) {
 
     TRY
       if (pass == PASS1) {
-	process_request_pass1(request,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	process_request_pass1(request,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 			      intlistpool,uintlistpool,univcoordlistpool,
 			      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 			      transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3);
       } else if (pass == PASS2) {
 	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,&worker_runtime,
-				   request,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   request,streamspace_max_alloc,streamspace_alloc,
+				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 				   transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3,
@@ -1924,25 +2164,24 @@ worker_thread (void *data) {
     Genomicpos_commafmt_fill(comma4,Mem_usage_report_in());
     Genomicpos_commafmt_fill(comma5,Mem_usage_report_out());
 
-#if 1
-    fprintf(stdout,"Acc %s, thread %d: constant %s  overall_max %s  query_max %s  std %s  keep %s  in %s  out %s\n",
+    fprintf(stderr,"Acc %s, thread %d: constant %s  overall_max %s  query_max %s  std %s  keep %s  in %s  out %s\n",
 	    acc,worker_id,comma0,comma9,comma1,comma2,comma3,comma4,comma5);
-#endif
 
+    /* We check only the std memory pool, and not the keep memory pool, which can be used across queries */
     if ((memusage = Mem_usage_report_std_heap()) > memusage_constant) {
       fprintf(stderr,"Acc %s: Memory leak in worker thread %ld of %ld bytes\n",acc,worker_id,memusage);
       fflush(stdout);
-      exit(9);
+      /* exit(9); */
     } else if (Mem_usage_report_std_heap_max() > ONE_GB) {
       fprintf(stderr,"Acc %s: Excessive memory usage in worker thread %ld of %s bytes\n",acc,worker_id,comma1);
       fflush(stdout);
-      exit(9);
+      /* exit(9); */
     }
 #endif
   }
 
 #ifdef MEMUSAGE
-  Mem_usage_std_heap_add(memusage_constant);
+  Mem_usage_std_heap_add(memusage_constant,__FILE__,__LINE__);
 #endif
 
   Except_stack_destroy();
@@ -1950,22 +2189,29 @@ worker_thread (void *data) {
   if (worker_stopwatch != NULL) {
     Stopwatch_free(&worker_stopwatch);
   }
+
   Spliceendsgen_free(&spliceendsgen3);
   Spliceendsgen_free(&spliceendsgen5);
   Spliceendsgen_free(&spliceendsgen);
-  Vectorpool_free(&vectorpool);
-  Transcriptpool_free(&transcriptpool);
-  Hitlistpool_free(&hitlistpool);
+
   Trpathpool_free(&trpathpool);
   Pathpool_free(&pathpool);
+  Hitlistpool_free(&hitlistpool);
+  Transcriptpool_free(&transcriptpool);
+  Vectorpool_free(&vectorpool);
   Listpool_free(&listpool);
   Univcoordlistpool_free(&univcoordlistpool);
   Uintlistpool_free(&uintlistpool);
   Intlistpool_free(&intlistpool);
-  Pathstorepool_free(&pathstorepool);
   Auxinfopool_free(&auxinfopool);
+  Pathstorepool_free(&pathstorepool);
   Univdiagpool_free(&univdiagpool);
   Trdiagpool_free(&trdiagpool);
+
+  FREE_KEEP_ALIGN(localdb_alloc);
+  FREE_KEEP(novel_diagonals_alloc);
+  Univdiag_free_array_keep(&novel_univdiags_alloc);
+  FREE_KEEP_ALIGN(streamspace_alloc);
 
 #ifdef MEMUSAGE
   Mem_usage_set_threadname("main");
@@ -2141,6 +2387,7 @@ check_valid_float (char *string, const char *option) {
   }
 }
 
+
 static char *
 check_valid_float_or_int (char *string) {
   char *p = string;
@@ -2284,6 +2531,9 @@ parse_command_line (int argc, char *argv[], int optind) {
       } else if (!strcmp(long_name,"sampling")) {
 	required_index1interval = atoi(check_valid_int(optarg));
 
+      } else if (!strcmp(long_name,"align-fraction")) {
+	skip_prob = 1.0 - check_valid_float(optarg,long_name);
+
       } else if (!strcmp(long_name,"time")) {
 	timingp = true;
 
@@ -2322,14 +2572,17 @@ parse_command_line (int argc, char *argv[], int optind) {
       } else if (!strcmp(long_name,"splicingdir")) {
 	user_splicingdir = optarg;
 
+      } else if (!strcmp(long_name,"splices-noeval")) {
+	splice_evalp = false;
+
       } else if (!strcmp(long_name,"splices-dump")) {
-	if ((dump_splices_fp = fopen(optarg,"w")) == NULL) {
-	  fprintf(stderr,"Cannot write to --splices-dump file %s\n",optarg);
-	  exit(9);
-	}
+	dump_splices_file = optarg;
+
+      } else if (!strcmp(long_name,"splices-exclude-known")) {
+	dump_splices_include_known_p = false;
 
       } else if (!strcmp(long_name,"splices-read")) {
-	splices_file = optarg;
+	read_splices_file = optarg;
 
       } else if (!strcmp(long_name,"indels-dump")) {
 	if ((dump_indels_fp = fopen(optarg,"w")) == NULL) {
@@ -2519,8 +2772,11 @@ parse_command_line (int argc, char *argv[], int optind) {
 	}
 #endif
 
-      } else if (!strcmp(long_name,"end-detail")) {
-	fprintf(stderr,"--end-detail is now deprecated.  GSNAP is now tuned to trim well at the ends\n");
+      } else if (!strcmp(long_name,"max-insertions")) {
+	max_insertionlen = atoi(check_valid_int(optarg));
+
+      } else if (!strcmp(long_name,"max-deletions")) {
+	max_deletionlen = atoi(check_valid_int(optarg));
 
       } else if (!strcmp(long_name,"merge-distant-samechr")) {
 	merge_samechr_p = true;
@@ -2959,6 +3215,16 @@ parse_command_line (int argc, char *argv[], int optind) {
   }
 #endif
 
+#if 0
+  /* Need to work on precise coordinates in Pathpair_resolve */
+  if (expected_pairlength < 5*pairlength_deviation) {
+    min_insertlength = 0;
+  } else {
+    min_insertlength = expected_pairlength - 5*pairlength_deviation;
+  }
+#else
+  min_insertlength = 0;
+#endif
   max_insertlength = expected_pairlength + 5*pairlength_deviation;
 
   if (transcriptome_dbroot == NULL) {
@@ -2966,6 +3232,7 @@ parse_command_line (int argc, char *argv[], int optind) {
   }
 
   if (transcriptome_dbroot != NULL) {
+    knownsplicingp = true;
     if (novelsplicingp == false) {
       fprintf(stderr,"Transcriptome specified => assume reads are RNA-Seq.  Turning on novel splicing.\n");
       novelsplicingp = true;
@@ -3038,7 +3305,12 @@ parse_command_line (int argc, char *argv[], int optind) {
 
   } else {
     /* Straight DNA-Seq */
-    fprintf(stderr,"Neither novel splicing (-N) nor known splicing (-s) turned on => assume reads are DNA-Seq (genomic)\n");
+    fprintf(stderr,"Neither novel splicing (-N 1) nor known splicing (-s) turned on => assume reads are DNA-Seq (genomic)\n");
+    if (dump_splices_file != NULL) {
+      fprintf(stderr,"--splices-dump given, but neither novel splicing (-N 1) nor transcriptome mode (-c) is given\n");
+      exit(9);
+    }
+
     if (user_find_dna_chimeras_p == false) {
       find_dna_chimeras_p = true;
     }
@@ -3409,7 +3681,6 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   /* Must be done before Knownsplicing_retrieve_via_splicesites */
   Genome_setup(genome,genomealt,circular_typeint);
 
-
   if (user_modedir == NULL) {
     modedir = genomesubdir;
   } else {
@@ -3463,22 +3734,6 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
     }
     exit(9);
   }
-
-  /* Note: localdb based on suffix arrays, so it is not SNP-tolerant */
-  if (use_localdb_p == false) { 
-    fprintf(stderr,"Not loading localdb files, either because reads are DNA-seq (without -N, -s, or -c flags) or because of --use-local=0\n");
-    localdb = (Localdb_T) NULL; 
-
-  } else {
-    localdb = Localdb_new(genomesubdir,genome_fileroot,localdb_access,sharedp,
-			  multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p);
-#if 0
-    if (localdb == NULL) {
-      fprintf(stderr,"Warning: Cannot find localdb files.  GSNAP will run on this older index, but there is a newer index format available\n");
-    }
-#endif
-  }
-  
 
   if (snps_root != NULL) {
     iitfile = (char *) CALLOC(strlen(mapdir)+strlen("/")+
@@ -3625,6 +3880,7 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
     fprintf(stderr,"done\n");
   }
 
+#if 0
   if (splices_file == NULL) {
     /* Skip */
   } else if ((dump_fp = fopen(splices_file,"r")) == NULL) {
@@ -3634,6 +3890,7 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
     knownsplicing = Knownsplicing_new_from_dump(dump_fp,genomelength);
     fclose(dump_fp);
   }
+#endif
 
   if (indels_file == NULL) {
     /* Skip */
@@ -3760,7 +4017,7 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   Repair_setup(genomebits,genomebits_alt);
   Path_solve_setup(circularp,transcriptome,chromosome_ef64,
 		   genomebits,genomebits_alt,genomelength,
-		   index1part,localdb,min_intronlength,
+		   index1part,min_intronlength,
 		   max_insertionlen,max_deletionlen,
 		   novelsplicingp,knownsplicingp);
   Path_fusion_setup(circularp,chromosome_ef64,genomelength,shortsplicedist,transcriptome,
@@ -3835,15 +4092,14 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
 
   min_querylength = index1part + index1interval - 1;
   Indexdb_setup(index1part);
-  Localdb_setup(genome,genomelength,index1part,index1interval);
+  /* Localdb_setup(genome,genomelength,index1part,index1interval); */
 
-  /* spansize = Spanningelt_setup(index1part,index1interval); */
-
-  Splice_setup(genomebits,genomebits_alt,max_insertionlen,max_deletionlen,novelsplicingp);
+  Splice_setup(genomebits,genomebits_alt,max_insertionlen,max_deletionlen,
+	       novelsplicingp,splice_evalp);
   Spliceends_setup(circularp,genomebits,genomebits_alt,genomelength,
 		   indexdb,index1part,index1interval,
 		   max_insertionlen,max_deletionlen,shortsplicedist,
-		   localdb,allow_soft_clips_p,novelsplicingp,knownsplicingp);
+		   allow_soft_clips_p,novelsplicingp,knownsplicingp);
   Indel_setup(genomebits,genomebits_alt,
 	      min_indel_end_matches,maskedp);
   Transcript_setup(pairmax_transcriptome,output_type,transcriptome,transcript_iit);
@@ -3860,7 +4116,7 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
 			user_nmismatches_filter_float,user_mincoverage_filter_float,splicingp);
   Stage1hr_paired_setup(mode,index1part,index1interval,index1part_tr,
 			transcriptome,genome_align_p,transcriptome_align_p,
-			genomebits,localdb,chromosome_ef64,
+			genomebits,chromosome_ef64,
 			user_nmismatches_filter_float,user_mincoverage_filter_float,
 			max_deletionlen,max_insertlength,shortsplicedist,
 			splicingp,maxpaths_search,maxpaths_report,
@@ -3884,6 +4140,37 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
 	       failedinput_root,quality_shift,
 	       output_type,invert_first_p,invert_second_p,single_cell_p,
 	       only_concordant_p,only_tr_consistent_p,sam_read_group_id);
+
+  return;
+}
+
+
+static void
+worker_localdb_setup (char *genomesubdir, char *genome_fileroot) {
+
+  /* Note: localdb based on suffix arrays, so it is not SNP-tolerant */
+  if (use_localdb_p == false) { 
+    fprintf(stderr,"Not loading localdb files because --use-local=0\n");
+    localdb = (Localdb_T) NULL; 
+
+  } else if (splicingp == false) {
+    fprintf(stderr,"Not loading localdb files because reads are DNA-seq (without -N, -s, or -c flags)\n");
+    localdb = (Localdb_T) NULL; 
+
+  } else {
+    localdb = Localdb_new(genomesubdir,genome_fileroot,localdb_access,sharedp,
+			  multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p);
+#if 0
+    if (localdb == NULL) {
+      fprintf(stderr,"Warning: Cannot find localdb files.  GSNAP will run on this older index, but there is a newer index format available\n");
+    }
+#endif
+  }
+  
+  Localdb_setup(genome,genomelength,index1part,index1interval);
+  Path_solve_localdb_setup(localdb);
+  Spliceends_localdb_setup(localdb);
+  Stage1hr_paired_localdb_setup(localdb);
 
   return;
 }
@@ -4140,7 +4427,7 @@ main (int argc, char *argv[]) {
 			  bzipped,bzipped2,
 #endif
 			  interleavedp,read_files_command,files,nfiles,input_buffer_size,
-			  part_modulus,part_interval);
+			  skip_prob,/*seed*/SEED,part_modulus,part_interval);
 
   if ((nread = Inbuffer_fill_init(inbuffer)) > 1) {
     multiple_sequences_p = true;
@@ -4178,6 +4465,7 @@ main (int argc, char *argv[]) {
 
   genomesubdir = Datadir_find_genomesubdir(&genome_fileroot,&dbversion,user_genomedir,genome_dbroot);
   FREE(dbversion);
+
   chromosome_iit = chromosome_iit_setup(&genomelength,&nchromosomes,&circular_typeint,&any_circular_p,&circularp,
 					genomesubdir,genome_fileroot);
   chromosome_ef64 = EF64_new_from_chromosome_iit(chromosome_iit);
@@ -4226,18 +4514,33 @@ main (int argc, char *argv[]) {
 					  transcriptome_fileroot);
     transcript_ef64 = EF64_new_from_chromosome_iit(transcript_iit);
 
+
     /* transcript_map_iit relates transcripts to genomic coordinates and is an IIT_T */
-    iitfile = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
-			      strlen(genome_fileroot)+strlen(".transcripts/")+
-			      strlen(transcriptome_fileroot)+strlen(".genes.iit")+1,sizeof(char));
-    sprintf(iitfile,"%s/%s.transcripts/%s.genes.iit",genomesubdir,genome_fileroot,transcriptome_fileroot);
+    /* New format */
+    iitfile = (char *) CALLOC(strlen(transcriptomesubdir)+strlen("/")+
+			      strlen(transcriptome_fileroot)+strlen(".genomes/")+
+			      strlen(genome_fileroot)+strlen(".genes.iit")+1,sizeof(char));
+    sprintf(iitfile,"%s/%s.genomes/%s.genes.iit",transcriptomesubdir,transcriptome_fileroot,genome_fileroot);
 
     if ((transcript_map_iit = IIT_read(iitfile,/*name*/transcriptome_fileroot,/*readonlyp*/true,/*divread*/READ_ALL,
-				       /*divstring*/NULL,/*add_iit_p*/false)) == NULL) {
-      fprintf(stderr,"Transcript map file %s not found\n",iitfile);
-      exit(9);
-    } else {
+				       /*divstring*/NULL,/*add_iit_p*/false)) != NULL) {
       FREE(iitfile);
+    } else {
+      fprintf(stderr,"Transcript map file %s not found.  Trying old format.\n",iitfile);
+      FREE(iitfile);
+
+      iitfile = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
+				strlen(genome_fileroot)+strlen(".transcripts/")+
+				strlen(transcriptome_fileroot)+strlen(".genes.iit")+1,sizeof(char));
+      sprintf(iitfile,"%s/%s.transcripts/%s.genes.iit",genomesubdir,genome_fileroot,transcriptome_fileroot);
+      
+      if ((transcript_map_iit = IIT_read(iitfile,/*name*/transcriptome_fileroot,/*readonlyp*/true,/*divread*/READ_ALL,
+				       /*divstring*/NULL,/*add_iit_p*/false)) != NULL) {
+	FREE(iitfile);
+      } else {
+	fprintf(stderr,"Transcript map file %s not found in new format either.\n",iitfile);
+	exit(9);
+      }
     }
 
     /* transcript_map_iit (generated by iit_store) probably has genes
@@ -4246,7 +4549,7 @@ main (int argc, char *argv[]) {
        chromosomes */
     transcript_chrnum_crosstable = Univ_IIT_divint_crosstable(chromosome_iit,transcript_map_iit);
 
-    transcriptome = Transcriptome_new(genomesubdir,genome_fileroot,transcriptome_fileroot,sharedp);
+    transcriptome = Transcriptome_new(genomesubdir,genome_fileroot,transcriptomesubdir,transcriptome_fileroot,sharedp);
     tr_indexdb = Indexdb_new_transcriptome(&index1part_tr,&index1interval_tr,transcriptomesubdir,
 					   transcriptome_fileroot,/*idx_filesuffix*/"ref",/*snps_root*/NULL,
 					   /*required_index1part*/0,/*required_index1interval*/0,
@@ -4260,11 +4563,13 @@ main (int argc, char *argv[]) {
 
 
   Access_setup(preload_shared_memory_p,unload_shared_memory_p);
+
   worker_setup(transcriptomesubdir,transcriptome_fileroot,genomesubdir,genome_fileroot,chromosome_iit);
+
   FREE(transcriptomesubdir);
   FREE(transcriptome_fileroot);
-  FREE(genomesubdir);
-  FREE(genome_fileroot);
+  /* FREE(genomesubdir); -- Needed for worker_localdb_setup */
+  /* FREE(genome_fileroot); -- Needed for worker_localdb_setup */
   if (preload_shared_memory_p == true || unload_shared_memory_p == true) {
     worker_cleanup();
     return 0;
@@ -4289,8 +4594,11 @@ main (int argc, char *argv[]) {
     acceptor_table = Univcoordtableuint_new(/*hint*/500000);
     antidonor_table = Univcoordtableuint_new(/*hint*/500000);
     antiacceptor_table = Univcoordtableuint_new(/*hint*/500000);
+
+#if 0
     indel_table = Univcoordtable_new(/*hint*/500000);
-    
+#endif
+
 #if !defined(HAVE_PTHREAD)
     /* Serial version */
     single_thread();
@@ -4358,14 +4666,16 @@ main (int argc, char *argv[]) {
 				      antidonor_startpoints,antidonor_partners,
 				      antiacceptor_startpoints,antiacceptor_partners,
 				      donor_table,acceptor_table,antidonor_table,antiacceptor_table,
-				      genomelength,dump_splices_fp,chromosome_iit,chromosome_ef64,
+				      genomelength,chromosome_iit,chromosome_ef64,
 				      /*intron_level_p*/true);
-    if (dump_splices_fp != NULL) {
-      fclose(dump_splices_fp);
-    }
 
+#if 0
+    /* Not working */
     knownindels = Knownindels_new(indel_table,genomelength,dump_indels_fp,
 				  chromosome_iit,chromosome_ef64);
+#endif
+    max_insertlength = expected_pairlength + 5*pairlength_deviation;
+
     if (dump_indels_fp != NULL) {
       fclose(dump_indels_fp);
     }
@@ -4379,7 +4689,8 @@ main (int argc, char *argv[]) {
     Stage1hr_paired_pass2_setup(max_insertlength,shortsplicedist);
     Uintlist_free(&insertlengths);
 
-    Univcoordtable_free(&indel_table);
+    /* TODO: Free values of indel_table */
+    /* Univcoordtable_free(&indel_table); */
 
     Univcoordtableuint_free(&antiacceptor_table);
     Univcoordtableuint_free(&antidonor_table);
@@ -4410,7 +4721,7 @@ main (int argc, char *argv[]) {
 			    bzipped,bzipped2,
 #endif
 			    interleavedp,read_files_command,files,nfiles,input_buffer_size,
-			    part_modulus,part_interval);
+			    skip_prob,/*seed*/SEED,part_modulus,part_interval);
 
     if ((nread = Inbuffer_fill_init(inbuffer)) > 1) {
       multiple_sequences_p = true;
@@ -4420,7 +4731,42 @@ main (int argc, char *argv[]) {
   }
     
 
-  /* Pass 2 */
+  /* Pass 2 (for either 1-pass or 2-pass mode) */
+  worker_localdb_setup(genomesubdir,genome_fileroot);	/* localdb not used in pass 1 */
+  FREE(genomesubdir);
+  FREE(genome_fileroot);
+
+  if (read_splices_file == NULL) {
+    /* Without support_tables, this branch and subsequent ones must be 1-pass mode */
+    /* No externally-provided splices */
+
+    if (dump_splices_file != NULL) {
+      /* Also want to record and write splice counts */
+      support_tables = Support_new(knownsplicing);
+    }
+
+  } else if ((fp = fopen(read_splices_file,"r")) == NULL) {
+    /* Externally-provided splices not readable.  Treat as no externally-provided splices */
+    fprintf(stderr,"Unable to open --splices-read file %s\n",read_splices_file);
+
+    if (dump_splices_file != NULL) {
+      /* Also want to record and write splice counts */
+      support_tables = Support_new(knownsplicing);
+    }
+
+  } else {
+    support_tables = Support_read(fp,chromosome_ef64,chromosome_iit);
+    fclose(fp);
+	
+    /* External program has already filtered splices, so convert only  */
+    Support_convert(support_tables,genomelength); /* Prepare for pass 2 */
+#if 0
+    Splice_pass2_setup(/*for read*/support_tables);
+    Trpath_convert_pass2_setup(/*for read*/support_tables);
+#endif
+  }
+
+
   Filestring_setup(split_simple_p);
   SAM_header_setup(argc,argv,optind,nthreads,orderedp,chromosome_iit,output_type,
 		   sam_headers_p,sam_read_group_id,sam_read_group_name,
@@ -4497,6 +4843,7 @@ main (int argc, char *argv[]) {
   runtime = Stopwatch_stop(stopwatch);
   nread = Outbuffer_nread(outbuffer);
   /* nbeyond = Outbuffer_nbeyond(outbuffer); */
+
   if (two_pass_p == true) {
     fprintf(stderr,"Pass 2: Aligned %u queries in %.2f seconds (%.2f queries/sec)\n",
 	    nread,runtime,(double) nread/runtime);
@@ -4506,6 +4853,21 @@ main (int argc, char *argv[]) {
   }
   
   Stopwatch_free(&stopwatch);
+
+  if (dump_splices_file == NULL) {
+    /* Skip */
+  } else if ((fp = fopen(dump_splices_file,"w")) == NULL) {
+    fprintf(stderr,"Cannot write to --splices-dump file %s\n",dump_splices_file);
+  } else {
+    fprintf(stderr,"Dumping splices to %s\n",dump_splices_file);
+    Support_dump(fp,support_tables,chromosome_ef64,chromosome_iit,
+		 genomebits,dump_splices_include_known_p);
+  fclose(fp);
+  }
+
+  if (support_tables != NULL) {
+    Support_free(&support_tables);
+  }
 
   Outbuffer_free(&outbuffer);
   Inbuffer_free(&inbuffer);
@@ -4566,6 +4928,8 @@ Usage: gsnap [OPTIONS...] <FASTA file>, or\n\
   --sampling=INT                 Sampling to use in genome database.  If not specified, the program\n\
                                    will find the smallest available sampling value in the genome database\n\
                                    within selected k-mer size\n\
+  --align-fraction=FLOAT         Process only the given fraction of reads, selected at random\n\
+                                   If --align-fraction and --part are given, --align-fraction takes precedence\n\
   -q, --part=INT/INT             Process only the i-th out of every n sequences\n\
                                    e.g., 0/100 or 99/100 (useful for distributing jobs\n\
                                    to a computer farm).\n\
@@ -4698,10 +5062,10 @@ is still designed to be fast.\n\
 ",min_indel_end_matches);
 
   fprintf(stdout,"\
-  -Y, --max-insertions=INT       Maximum number of insertions allowed (default %d)\n\
+  --max-insertions=INT           Maximum number of insertions allowed (default %d)\n\
 ",max_insertionlen);
   fprintf(stdout,"\
-  -Z, --max-deletions=INT        Maximum number of deletions allowed (default %d)\n\
+  --max-deletions=INT            Maximum number of deletions allowed (default %d)\n\
 ",max_deletionlen);
   fprintf(stdout,"\
   -M, --suboptimal-levels=INT    Report suboptimal hits beyond best hit (default %d)\n\
@@ -4791,6 +5155,13 @@ is still designed to be fast.\n\
                                          (in <STRING>.iit), at short or long distances\n\
                                          See README instructions for the distinction between known sites\n\
                                          and known introns\n\
+  --splices-noeval                     Do not evaluate splices for probability or intron length, but depend\n\
+                                         only on sequence alignment\n\
+  --splices-dump=FILE                  Write splice junction information to FILE, in the same format as for STAR\n\
+                                         plus MaxEnt probabilities for the two intron positions.  Note that in this\n\
+                                         dump file, the annotation column is reserved strictly for known introns,\n\
+                                         and not novel introns that passed some criterion from a first pass.\n\
+  --splices-exclude-known              In the file for --splices-dump, exclude all known introns\n\
 ");
 
   fprintf(stdout,"\
@@ -4828,12 +5199,10 @@ is still designed to be fast.\n\
                                    of paired-end reads, and for pairing DNA-seq reads (default %d)\n\
 ",expected_pairlength);
 
-#if 0
   fprintf(stdout,"\
   --pairdev=INT                  Allowable deviation from expected paired-end length, used for\n\
                                    resolving soft-clipping on the insides of paired-end reads (default %d).\n\
 ",pairlength_deviation);
-#endif
 
 #if 0
   fprintf(stdout,"\n");

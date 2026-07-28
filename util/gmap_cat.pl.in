@@ -47,12 +47,6 @@ if (!defined($destdir) || $destdir !~ /\S/) {
     $destdir = $gmapdb;
 }
 
-if (!defined($build_localdb_p)) {
-    print STDERR "--local flag not specified, so building localdb by default\n";
-    $build_localdb_p = 1;
-}
-
-
 if (defined($contig_name_file)) {
     # Need to look at the first line
     $FP = new IO::File("$contig_name_file") or die;
@@ -200,9 +194,22 @@ if ($noffsets <= 4294967295) {
 
 
 # (4) Create localdb
-if ($build_localdb_p == 0) {
-    # Skip
-} elsif ($large_genome_p == 1) {
+if ($large_genome_p == 1) {
+    # Skip making a regiondb
+    print STDERR "Not building localdb for large genomes\n";
+    $localp = 0;
+} elsif (!defined($build_localdb_p)) {
+    print STDERR "--local flag not specified, so building localdb by default\n";
+    $localp = 1;
+} elsif ($build_localdb_p eq "0") {
+    $localp = 0;
+} elsif ($build_localdb_p eq "1") {
+    $localp = 1;
+} else {
+    die "Argument to --local needs to be 0 or 1";
+}
+
+if ($localp == 0) {
     # Skip
 } else {
     $index_cmd = "\"$bindir/gmapindex\" -D \"$dbdir\" -d $dbname";

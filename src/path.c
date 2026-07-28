@@ -1,4 +1,5 @@
-static char rcsid[] = "$Id: 1dd83c68fef05cae9d673fae0bca77867d24bd17 $";
+#define DEBUG1 1
+static char rcsid[] = "$Id: 752f22be04232dfdc0bba011a1fcd4f9511a71b3 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -148,6 +149,29 @@ Path_effective_sensedir (T this) {
       }
     }
     return SENSE_NULL;
+  }
+}
+
+
+int
+Path_qstart (T this) {
+  
+  if (this->qstart_alts != NULL) {
+    return 0;
+  } else {
+    return Intlist_head(this->endpoints);
+  }
+}
+
+
+/* Assumes that path is reversed */
+int
+Path_qend (T this) {
+  
+  if (this->qend_alts != NULL) {
+    return this->querylength;
+  } else {
+    return Intlist_head(this->endpoints);
   }
 }
 
@@ -386,6 +410,8 @@ Univcoord_T
 Path_genomiclow (T this) {
   Altsplice_T altsplice;
 
+#if 0
+  /* Leads to bad insertlengths */
   if ((altsplice = this->qstart_alts) != NULL) {
     return Altsplice_best_univdiagonal(altsplice) - (Univcoord_T) this->querylength;
   } else if (Univcoordlist_head(this->univdiagonals) < (Univcoord_T) this->querylength) {
@@ -393,17 +419,30 @@ Path_genomiclow (T this) {
   } else {
     return Univcoordlist_head(this->univdiagonals) - this->querylength;
   }
+#else
+  if (Univcoordlist_head(this->univdiagonals) < (Univcoord_T) this->querylength) {
+    return 0;
+  } else {
+    return Univcoordlist_head(this->univdiagonals) - this->querylength;
+  }
+#endif
+
 }
 
 Univcoord_T
 Path_genomichigh (T this) {
   Altsplice_T altsplice;
 
+#if 0
+  /* Leads to bad insertlengths */
   if ((altsplice = this->qend_alts) != NULL) {
     return Altsplice_best_univdiagonal(altsplice);
   } else {
     return Univcoordlist_last_value(this->univdiagonals);
   }
+#else
+  return Univcoordlist_last_value(this->univdiagonals);
+#endif
 }
 
 
@@ -1378,7 +1417,7 @@ Path_merge_univdiagonals_auxinfo (Univcoord_T **_all_univdiagonals, Auxinfo_T **
     }
 #endif
 
-    MALLOC_ALIGN(*_all_univdiagonals,(nold+nnew)*sizeof(Univcoord_T));
+    *_all_univdiagonals = (Univcoord_T *) MALLOC_ALIGN((nold+nnew)*sizeof(Univcoord_T));
     *all_auxinfo = (Auxinfo_T *) MALLOC((nold+nnew)*sizeof(Auxinfo_T));
     *all_pathstores = (Pathstore_T *) MALLOC((nold+nnew)*sizeof(Pathstore_T));
 
@@ -1659,6 +1698,19 @@ Path_reverse (T this, bool expect_fwd_p) {
 }
 
 
+T
+Path_reverse_nocheck (T this) {
+
+  this->endpoints = Intlist_reverse(this->endpoints);
+  this->univdiagonals = Univcoordlist_reverse(this->univdiagonals);
+  this->nmismatches = Intlist_reverse(this->nmismatches);
+  this->ref_nmismatches = Intlist_reverse(this->ref_nmismatches);
+  this->junctions = List_reverse(this->junctions);
+  
+  return this;
+}
+
+
 /* Sometimes merging of left and right paths can result in anomalies */
 /* Same as Trpath_endpoints_acceptable_p */
 bool
@@ -1675,8 +1727,9 @@ Path_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
   for (p = Intlist_next(endpoints), q = junctions; Intlist_next(p) != NULL; p = Intlist_next(p), q = List_next(q)) {
     last_endpoint = Intlist_head(p);
     junction = (Junction_T) List_head(q);
-    /* Previously used >=, but a deletion can yield duplicated endpoints */
-    if (last_endpoint + Junction_ninserts(junction) > Intlist_head(Intlist_next(p))) {
+    /* (1) Previously used >=, but a deletion can yield duplicated endpoints */
+    /* (2) Previously used >, but deletions should not yield duplicated endpoints */
+    if (last_endpoint + Junction_ninserts(junction) >= Intlist_head(Intlist_next(p))) {
       debug2(printf("Endpoint %d + %d >= %d, so unacceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_head(Intlist_next(p))));
       return false;
@@ -3232,6 +3285,57 @@ Path_print (T this) {
   }
 
   return;
+}
+#endif
+
+
+#if 0
+/* Not effective.  Pruning transcriptome paths early yields to partial
+   trpaths, which can obscure complete genomic paths */
+bool
+Path_segments_good_p (T this) {
+  int nmatches, nmismatches;
+  int qstart, qend, ninserts;
+  Intlist_T r, x;
+  Univcoordlist_T q;
+  Junction_T junction;
+  List_T j;
+
+
+  qstart = Intlist_head(this->endpoints);
+  ninserts = 0;
+
+  j = this->junctions;		/* Put here before we handle querystart_alts */
+  for (q = this->univdiagonals, x = this->nmismatches, r = Intlist_next(this->endpoints); q != NULL;
+       q = Univcoordlist_next(q), x = Intlist_next(x), r = Intlist_next(r), j = List_next(j)) {
+    qstart += ninserts;
+    qend = Intlist_head(r);
+    
+    nmismatches = Intlist_head(x);
+    /* ref_nmismatches = Intlist_head(y); */
+    
+    nmatches = (qend - qstart) - nmismatches;
+    if (qend - qstart < 4) {
+      /* Skip, since too short to evaluate */
+    } else if (nmatches < nmismatches) { /* was 3*nmismatches */
+      /* printf("In %d..%d, have %d matches and %d mismatches\n",qstart,qend,nmatches,nmismatches); */
+      return false;
+    }
+    
+    /* Prepare for next iteration */
+    qstart = qend;
+    
+    if (j == NULL) {
+      ninserts = 0;
+    } else if ((junction = (Junction_T) List_head(j)) == NULL) {
+      /* qstart_junction */
+      ninserts = 0;
+    } else {
+      ninserts = Junction_ninserts(junction);
+    }
+  }
+
+  return true;
 }
 #endif
 

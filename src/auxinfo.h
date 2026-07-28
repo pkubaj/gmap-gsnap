@@ -1,4 +1,4 @@
-/* $Id$ */
+/* $Id: 059e1b94f91de630da3007d6d1ac5f9fa343f889 $ */
 #ifndef AUXINFO_INCLUDED
 #define AUXINFO_INCLUDED
 

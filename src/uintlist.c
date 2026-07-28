@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 39fa5e620ccaa8b4de25c3a3b7c594bf59e8b11e $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -39,6 +38,11 @@ Uintlist_pop (T list, unsigned int *x) {
 unsigned int
 Uintlist_head (T list) {
   return list->first;
+}
+
+unsigned int
+Uintlist_second_value (T list) {
+  return list->rest->first;
 }
 
 T
@@ -285,7 +289,7 @@ Uintlist_last_value (T this) {
 }
 
 T
-Uintlist_last_item (T this) {
+Uintlist_last_elt (T this) {
   T last = NULL, r;
 
   for (r = this; r != NULL; r = r->rest) {

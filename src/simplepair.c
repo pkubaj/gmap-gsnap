@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: simplepair.c 225638 2023-01-06 20:28:08Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

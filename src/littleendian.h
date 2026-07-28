@@ -1,4 +1,3 @@
-/* $Id: littleendian.h 223349 2020-10-28 02:49:25Z twu $ */
 #ifndef LITTLEENDIAN_INCLUDED
 #define LITTLEENDIAN_INCLUDED
 #ifdef HAVE_CONFIG_H

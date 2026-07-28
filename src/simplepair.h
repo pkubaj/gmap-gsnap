@@ -1,4 +1,3 @@
-/* $Id: simplepair.h 225638 2023-01-06 20:28:08Z twu $ */
 #ifndef SIMPLEPAIR_INCLUDED
 #define SIMPLEPAIR_INCLUDED
 

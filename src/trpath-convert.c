@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: 2d1589d3621db3a00e22fdb481d7ebb666d5c143 $";
+static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -86,16 +86,15 @@ binary_search (int lowi, int highi, int *exonbounds, int trstart) {
 }
 
 
-#ifdef TEST_EXONS
 static List_T
-compute_exons_simple (int trstart, int trend, int *exonbounds, int nexons,
-		      Listpool_T listpool, Transcriptpool_T transcriptpool) {
+compute_exons (int trstart, int trend, int *exonbounds, int nexons,
+	       Listpool_T listpool, Transcriptpool_T transcriptpool) {
   List_T exons;
   char firstchar, lastchar;
   int exoni, exonj, i;
 
 #ifdef DEBUG10
-  printf("compute_exons_simple with trstart %d, trend %d\n",trstart,trend);
+  printf("compute_exons with trstart %d, trend %d\n",trstart,trend);
   for (i = 0; i < nexons; i++) {
     printf("exon %d: exonbound %d\n",i,exonbounds[i]);
   }
@@ -176,7 +175,6 @@ compute_exons_simple (int trstart, int trend, int *exonbounds, int nexons,
   assert(exons != NULL);
   return List_reverse(exons);
 }
-#endif
 
 
 
@@ -184,9 +182,14 @@ static Path_T
 convert_to_path_geneplus (int *nintrons, int *found_score,
 			  Trpath_T trpath, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			  bool plusp, bool first_read_p, int sensedir,
-			  Shortread_T queryseq, int querylength,
+			  Shortread_T queryseq, char *queryptr, int querylength,
 			  Stage1_T this, Knownsplicing_T knownsplicing, Compress_T query_compress,
 			  Compress_T query_compress_fwd, Compress_T query_compress_rev,
+
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			  Univcoordlistpool_T univcoordlistpool,
 			  Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
@@ -201,7 +204,10 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   Trnum_T trnum;
 
   List_T exons = NULL;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
+  Exon_T exon;
   char firstchar, lastchar;
+#endif
   int exoni;
 #ifdef TEST_EXONS
   List_T exons_simple;
@@ -222,7 +228,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   int exonpos, exonlength, uselength, adj;
 
   Transcript_T transcript;
-  int overall_trstart;
+  int overall_trstart, overall_trend;
 
   /* Procedure modifies tr_endpoints and tr_nmismatches, which prevenst a second call to convert trpath */
   Intlist_T tr_endpoints = Intlistpool_copy(trpath->endpoints,intlistpool);
@@ -231,6 +237,9 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   List_T tr_junctions = trpath->junctions;
   Trcoord_T troffset = trpath->troffset;
   Trcoord_T trdiagonal;
+
+  int local_trimpos, local_nmismatches;
+  int ntrim_qstart, ntrim_qend, pos5, pos3;
 
 
   *nintrons = 0;
@@ -259,7 +268,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   tend = Intlist_second_value(tr_endpoints);
 
   trdiagonal = Uintlist_head(trdiagonals);
-  overall_trstart = trstart = (trdiagonal - troffset - querylength) + tstart;
+  trstart = (trdiagonal - troffset - querylength) + tstart;
   trend = (trdiagonal - troffset - querylength) + tend;
   debug10(printf("Initial tstart %d => trstart %d.  tend %d => trend %d.\n",
 		 tstart,trstart,tend,trend));
@@ -305,6 +314,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 
   exonpos = trstart - exstart;
   exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
   if (exoni == 0) {
     firstchar = '.';
   } else if (exonpos == 0) {
@@ -312,6 +322,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   } else {
     firstchar = '.';
   }
+#endif
   debug10(printf("Initial exon %d\n",exoni));
 
   /* Initial endpoint */
@@ -353,10 +364,12 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	/* gplus pre-intron: Indel is at or near donor splice site */
 	debug10(printf("gplus pre-intron\n"));
 	++exoni;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	lastchar = (exonpos < exonlength) ? 'y' : 'x';
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,lastchar,transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = exonstarts[exoni] - (exonstarts[exoni-1] + exonlength); /* gplus */
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
@@ -405,7 +418,9 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
 
 	/* Advance to next transcript segment */
 	trdiagonal = Uintlist_head(trdiagonals);
@@ -420,6 +435,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	/* gplus post-intron: Indel is at or near acceptor splice site */
 	debug10(printf("gplus post-intron\n"));
 	++exoni;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	if (exonpos < exonlength) {
 	  lastchar = 'y';
 	} else if (exonpos > exonlength) {
@@ -430,6 +446,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,lastchar,transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = exonstarts[exoni] - (exonstarts[exoni-1] + exonlength); /* gplus */
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
@@ -478,7 +495,9 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
 
 	/* Advance to next transcript segment */
 	trdiagonal = Uintlist_head(trdiagonals);
@@ -564,9 +583,11 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
       }
       
       if (++exoni < nexons) {
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,/*lastchar*/'s',transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = exonstarts[exoni] - (exonstarts[exoni-1] + exonlength); /* gplus */
 	junction = Junction_new_splice(splice_distance,sensedir,
@@ -586,13 +607,16 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
       }
     }
   }
 
   debug10(printf(">>Final exoni %d, tcoords %d..%d, trcoords %d..%d\n",
 		 exoni,tstart,tend,trstart,trend));
+#ifdef COMPUTE_EXONS_INCREMENTALLY
   if (exoni >= nexons - 1) {
     exons = Listpool_push(exons,listpool,
 			  Exon_new(firstchar,nexons-1,/*lastchar*/'.',transcriptpool)
@@ -608,12 +632,13 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 			  Exon_new(firstchar,exoni,lastchar,transcriptpool)
 			  listpool_trace(__FILE__,__LINE__));
   }
-
   exons = List_reverse(exons);
+
 #ifdef DEBUG10
   printf("New exons: ");
   Exon_print_list_stdout(exons);
   printf("\n");
+#endif
 #endif
 
 
@@ -645,7 +670,9 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
     Intlistpool_free_list(&ref_nmismatches,intlistpool
 			  intlistpool_trace(__FILE__,__LINE__)); /* Allocated by Intlistpool_T */
     Junction_list_gc(&junctions,listpool,pathpool);
+#ifdef COMPUTE_EXONS_INCREMENTALLY
     Exon_list_gc(&exons,listpool,transcriptpool);
+#endif
 
     Intlistpool_free_list(&tr_endpoints,intlistpool);
     Intlistpool_free_list(&tr_nmismatches,intlistpool);
@@ -662,7 +689,13 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 
     if ((newpath = Path_solve_junctions(&(*found_score),path,sensedir,/*genestrand*/0,
 					query_compress,query_compress_fwd,query_compress_rev,
-					queryseq,querylength,this,knownsplicing,
+					queryseq,queryptr,querylength,
+
+					streamspace_max_alloc,streamspace_alloc,
+					novel_univdiags_alloc,novel_diagonals_alloc,
+					localdb_alloc,localdb,localdb_nmismatches_allowed,
+
+					this,knownsplicing,
 					uintlistpool,intlistpool,univcoordlistpool,listpool,
 					pathpool,transcriptpool)) == NULL) {
       Path_free(&path,intlistpool,univcoordlistpool,
@@ -675,8 +708,15 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
       debug10(Path_print(newpath));
 
       newpath->completep = true;
+
+      overall_trstart = (trdiagonal - troffset - querylength) + Intlist_head(path->endpoints);
+      overall_trend = (trdiagonal - troffset - querylength) + Intlist_last_value(path->endpoints);
+      exons = compute_exons(overall_trstart,overall_trend,exonbounds,nexons,
+			    listpool,transcriptpool);
+
       transcript = Transcript_new(/*num*/trnum,/*transcript_genestrand*/+1,
-				  overall_trstart+/*1-based*/1,trend,/*trstart_overhang*/0,/*trend_overhang*/0,
+				  overall_trstart+/*1-based*/1,overall_trend,
+				  /*trstart_overhang*/0,/*trend_overhang*/0,
 				  exons,nexons,/*trlength*/exonbounds[nexons-1],
 				  transcriptpool);
       /* Path_consolidate and Concordance_tr need to handle paths without valid transcripts */
@@ -687,7 +727,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 
   } else {
 #ifdef TEST_EXONS
-    exons_simple = compute_exons_simple(overall_trstart,/*overall_trend*/trend,exonbounds,nexons,
+    exons_simple = compute_exons_simple(overall_trstart,overall_trend,exonbounds,nexons,
 					listpool,transcriptpool);
     printf("Correct exons: ");
     Exon_print_list_stdout(exons_simple);
@@ -710,11 +750,29 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	*found_score = 0;
       }
     } else {
+      debug10(printf("(1) Calling Path_eval_nmatches\n"));
       Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
     }
 
+#if 0
+    /* Not effective.  Pruning transcriptome paths early yields to partial
+       trpaths, which can obscure complete genomic paths */
+    if (Path_segments_good_p(path) == false) {
+      debug10(printf("(1) Path segments are not good, so returning NULL\n"));
+      Path_free(&path,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+      return (Path_T) NULL;
+    }
+#endif
+
+    overall_trstart = (trdiagonal - troffset - querylength) + Intlist_head(path->endpoints);
+    overall_trend = (trdiagonal - troffset - querylength) + Intlist_last_value(path->endpoints);
+    exons = compute_exons(overall_trstart,overall_trend,exonbounds,nexons,
+			  listpool,transcriptpool);
+    
     transcript = Transcript_new(/*num*/trnum,/*transcript_genestrand*/+1,
-				overall_trstart+/*1-based*/1,trend,/*trstart_overhang*/0,/*trend_overhang*/0,
+				overall_trstart+/*1-based*/1,overall_trend,
+				/*trstart_overhang*/0,/*trend_overhang*/0,
 				exons,nexons,/*trlength*/exonbounds[nexons-1],
 				transcriptpool);
     path->transcripts = Listpool_push(NULL,listpool,(void *) transcript
@@ -724,7 +782,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 
     Intlistpool_free_list(&tr_endpoints,intlistpool);
     Intlistpool_free_list(&tr_nmismatches,intlistpool);
-
+    
     return path;
   }
 }
@@ -734,9 +792,14 @@ static Path_T
 convert_to_path_geneminus (int *nintrons, int *found_score,
 			   Trpath_T trpath, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			   bool plusp, bool first_read_p, int sensedir,
-			   Shortread_T queryseq, int querylength,
+			   Shortread_T queryseq, char *queryptr, int querylength,
 			   Stage1_T this, Knownsplicing_T knownsplicing, Compress_T query_compress,
 			   Compress_T query_compress_fwd, Compress_T query_compress_rev,
+
+			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			   unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 			   Hitlistpool_T hitlistpool, Method_T method) {
@@ -749,7 +812,10 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   Trnum_T trnum;
 
   List_T exons = NULL;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
+  Exon_T exon;
   char firstchar, lastchar;
+#endif
   int exoni;
 #ifdef TEST_EXONS
   List_T exons_simple;
@@ -770,7 +836,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   int exonpos, exonlength, uselength, adj;
 
   Transcript_T transcript;
-  int overall_trstart;
+  int overall_trstart, overall_trend;
 
   /* Procedure modifies tr_endpoints and tr_nmismatches, which prevents a second call to convert trpath */
   Intlist_T tr_endpoints = Intlistpool_copy(trpath->endpoints,intlistpool);
@@ -779,6 +845,9 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   List_T tr_junctions = trpath->junctions;
   Trcoord_T troffset = trpath->troffset;
   Trcoord_T trdiagonal;
+
+  int local_trimpos, local_nmismatches;
+  int ntrim_qstart, ntrim_qend, pos5, pos3;
 
 
   *nintrons = 0;
@@ -807,7 +876,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   tend = Intlist_second_value(tr_endpoints);
 
   trdiagonal = Uintlist_head(trdiagonals);
-  overall_trstart = trstart = (trdiagonal - troffset - querylength) + tstart;
+  trstart = (trdiagonal - troffset - querylength) + tstart;
   trend = (trdiagonal - troffset - querylength) + tend;
   debug10(printf("Initial tstart %d => trstart %d.  tend %d => trend %d.\n",
 		 tstart,trstart,tend,trend));
@@ -852,6 +921,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 
   exonpos = trstart - exstart;
   exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
   if (exoni == 0) {
     firstchar = '.';
   } else if (exonpos == 0) {
@@ -859,6 +929,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   } else {
     firstchar = '.';
   }
+#endif
   debug10(printf("Initial exon %d\n",exoni));
 
   /* Initial endpoint */
@@ -900,10 +971,12 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	/* gminus pre-intron: Indel is at or near donor splice site */
 	debug10(printf("gplus pre-intron\n"));
 	++exoni;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	lastchar = (exonpos < exonlength) ? 'y' : 'x';
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,lastchar,transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = (exonstarts[exoni-1] - exonlength) - exonstarts[exoni]; /* gminus */
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
@@ -952,7 +1025,9 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
 
 	/* Advance to next transcript segment */
 	trdiagonal = Uintlist_head(trdiagonals);
@@ -967,6 +1042,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	/* gminus post-intron: Indel is at or near acceptor splice site */
 	debug10(printf("gplus post-intron\n"));
 	++exoni;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	if (exonpos < exonlength) {
 	  lastchar = 'y';
 	} else if (exonpos > exonlength) {
@@ -977,6 +1053,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,lastchar,transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = (exonstarts[exoni-1] - exonlength) - exonstarts[exoni]; /* gminus */
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
@@ -1025,7 +1102,9 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
 
 	/* Advance to next transcript segment */
 	trdiagonal = Uintlist_head(trdiagonals);
@@ -1119,9 +1198,11 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
       }
 
       if (++exoni < nexons) {
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	exons = Listpool_push(exons,listpool,
 			      Exon_new(firstchar,exoni-1,/*lastchar*/'s',transcriptpool)
 			      listpool_trace(__FILE__,__LINE__));
+#endif
 
 	splice_distance = (exonstarts[exoni-1] - exonlength) - exonstarts[exoni]; /* gminus */
 	junction = Junction_new_splice(splice_distance,sensedir,
@@ -1141,13 +1222,16 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	exstart = exend;
 	exend = exonbounds[exoni];
 	exonlength = exend - exstart;
+#ifdef COMPUTE_EXONS_INCREMENTALLY
 	firstchar = 's';
+#endif
       }
     }
   }
 
   debug10(printf(">>Final exoni %d, tcoords %d..%d, trcoords %d..%d\n",
 		 exoni,tstart,tend,trstart,trend));
+#ifdef COMPUTE_EXONS_INCREMENTALLY
   if (exoni >= nexons - 1) {
     exons = Listpool_push(exons,listpool,
 			  Exon_new(firstchar,nexons-1,/*lastchar*/'.',transcriptpool)
@@ -1169,6 +1253,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   printf("New exons: ");
   Exon_print_list_stdout(exons);
   printf("\n");
+#endif
 #endif
 
 
@@ -1212,7 +1297,13 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 
     if ((newpath = Path_solve_junctions(&(*found_score),path,sensedir,/*genestrand*/0,
 					query_compress,query_compress_fwd,query_compress_rev,
-					queryseq,querylength,this,knownsplicing,
+					queryseq,queryptr,querylength,
+
+					streamspace_max_alloc,streamspace_alloc,
+					novel_univdiags_alloc,novel_diagonals_alloc,
+					localdb_alloc,localdb,localdb_nmismatches_allowed,
+
+					this,knownsplicing,
 					uintlistpool,intlistpool,univcoordlistpool,listpool,
 					pathpool,transcriptpool)) == NULL) {
       Path_free(&path,intlistpool,univcoordlistpool,
@@ -1225,8 +1316,17 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
       debug10(Path_print(newpath));
 
       newpath->completep = true;
+
+      overall_trstart = (trdiagonal - troffset - querylength) +
+	(querylength - Intlist_last_value(path->endpoints));
+      overall_trend = (trdiagonal - troffset - querylength) +
+	(querylength - Intlist_head(path->endpoints));
+      exons = compute_exons(overall_trstart,overall_trend,exonbounds,nexons,
+			    listpool,transcriptpool);
+
       transcript = Transcript_new(/*num*/trnum,/*transcript_genestrand*/-1,
-				  overall_trstart+/*1-based*/1,trend,/*trstart_overhang*/0,/*trend_overhang*/0,
+				  overall_trstart+/*1-based*/1,overall_trend,
+				  /*trstart_overhang*/0,/*trend_overhang*/0,
 				  exons,nexons,/*trlength*/exonbounds[nexons-1],
 				  transcriptpool);
       /* Path_consolidate and Concordance_tr need to handle paths without valid transcripts */
@@ -1237,7 +1337,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
     
   } else {
 #ifdef TEST_EXONS
-    exons_simple = compute_exons_simple(overall_trstart,/*overall_trend*/trend,exonbounds,nexons,
+    exons_simple = compute_exons_simple(overall_trstart,overall_trend,exonbounds,nexons,
 					listpool,transcriptpool);
     printf("Correct exons: ");
     Exon_print_list_stdout(exons_simple);
@@ -1257,11 +1357,31 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
       path->nmatches = path->ref_nmatches = querylength /*- trpath->found_score*/ - trpath->total_ninserts;
       path->total_splice_prob = path->junction_splice_prob = (*nintrons) * 4.0;
     } else {
+      debug10(printf("(2) Calling Path_eval_nmatches\n"));
       Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
     }
 
+#if 0    
+    /* Not effective.  Pruning transcriptome paths early yields to partial
+       trpaths, which can obscure complete genomic paths */
+    if (Path_segments_good_p(path) == false) {
+      debug10(printf("(2) Path segments are not good, so returning NULL\n"));
+      Path_free(&path,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+      return (Path_T) NULL;
+    }
+#endif  
+
+    overall_trstart = (trdiagonal - troffset - querylength) +
+      (querylength - Intlist_last_value(path->endpoints));
+    overall_trend = (trdiagonal - troffset - querylength) +
+      (querylength - Intlist_head(path->endpoints));
+    exons = compute_exons(overall_trstart,overall_trend,exonbounds,nexons,
+			  listpool,transcriptpool);
+
     transcript = Transcript_new(/*num*/trnum,/*transcript_genestrand*/-1,
-				overall_trstart+/*1-based*/1,trend,/*trstart_overhang*/0,/*trend_overhang*/0,
+				overall_trstart+/*1-based*/1,overall_trend,
+				/*trstart_overhang*/0,/*trend_overhang*/0,
 				exons,nexons,/*trlength*/exonbounds[nexons-1],
 				transcriptpool);
     path->transcripts = Listpool_push(NULL,listpool,(void *) transcript
@@ -1272,7 +1392,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 
     Intlistpool_free_list(&tr_endpoints,intlistpool);
     Intlistpool_free_list(&tr_nmismatches,intlistpool);
-
+    
     return path;
   }
 }
@@ -1294,6 +1414,10 @@ Trpath_convert_sense (int *found_score,
 
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
+		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		      Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
 		      Pathpool_T pathpool, Vectorpool_T vectorpool, Transcriptpool_T transcriptpool,
@@ -1302,6 +1426,7 @@ Trpath_convert_sense (int *found_score,
   Path_T path, copy;
   T trpath;
   int nintrons;
+  char *queryptr;
   /* int ignore_found_score = 0; */
 
   Univcoord_T chroffset, chrhigh;
@@ -1313,12 +1438,18 @@ Trpath_convert_sense (int *found_score,
     /* nexons = Transcriptome_exons(&exonbounds,&exonstarts,transcriptome,trpath->trnum); */
 
     if (trpath->transcript_genestrand > 0) {
+      queryptr = Shortread_queryuc_ptr(queryseq);
       if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),
 					   trpath,trpath->chrnum,chroffset,chrhigh,
 					   /*plusp*/true,first_read_p,/*sensedir*/SENSE_FORWARD,
-					   queryseq,querylength,this,knownsplicing,
+					   queryseq,queryptr,querylength,this,knownsplicing,
 					   /*query_compress*/query_compress_fwd,
 					   query_compress_fwd,query_compress_rev,
+
+					   streamspace_max_alloc,streamspace_alloc,
+					   novel_univdiags_alloc,novel_diagonals_alloc,
+					   localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 					   intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					   transcriptpool,hitlistpool,trpath->method)) != NULL) {
 	/* Path_eval_nmatches(&ignore_found_score,path,query_compress_fwd,query_compress_rev); */
@@ -1341,12 +1472,18 @@ Trpath_convert_sense (int *found_score,
       }
 
     } else {
+      queryptr = Shortread_queryrc(queryseq);
       if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),
 					    trpath,trpath->chrnum,chroffset,chrhigh,
 					    /*plusp*/false,first_read_p,/*sensedir*/SENSE_FORWARD,
-					    queryseq,querylength,this,knownsplicing,
+					    queryseq,queryptr,querylength,this,knownsplicing,
 					    /*query_compress*/query_compress_rev,
 					    query_compress_fwd,query_compress_rev,
+					    
+					    streamspace_max_alloc,streamspace_alloc,
+					    novel_univdiags_alloc,novel_diagonals_alloc,
+					    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 					    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					    transcriptpool,hitlistpool,trpath->method)) != NULL) {
 	/* Path_eval_nmatches(&ignore_found_score,path,query_compress_fwd,query_compress_rev); */
@@ -1385,6 +1522,10 @@ Trpath_convert_antisense (int *found_score,
 
 			  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			  
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			  Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
 			  Pathpool_T pathpool, Vectorpool_T vectorpool, Transcriptpool_T transcriptpool,
@@ -1393,6 +1534,7 @@ Trpath_convert_antisense (int *found_score,
   Path_T path, copy;
   T trpath;
   int nintrons;
+  char *queryptr;
   /* int ignore_found_score = 0; */
 
   Univcoord_T chroffset, chrhigh;
@@ -1404,12 +1546,18 @@ Trpath_convert_antisense (int *found_score,
     /* nexons = Transcriptome_exons(&exonbounds,&exonstarts,transcriptome,trpath->trnum); */
 
     if (trpath->transcript_genestrand > 0) {
+      queryptr = Shortread_queryrc(queryseq);
       if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),
 					   trpath,trpath->chrnum,chroffset,chrhigh,
 					   /*plusp*/false,first_read_p,/*sensedir*/SENSE_ANTI,
-					   queryseq,querylength,this,knownsplicing,
+					   queryseq,queryptr,querylength,this,knownsplicing,
 					   /*query_compress*/query_compress_rev,
 					   query_compress_fwd,query_compress_rev,
+
+					   streamspace_max_alloc,streamspace_alloc,
+					   novel_univdiags_alloc,novel_diagonals_alloc,
+					   localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 					   intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					   transcriptpool,hitlistpool,trpath->method)) != NULL) {
 	/* Path_eval_nmatches(&ignore_found_score,path,query_compress_fwd,query_compress_rev); */
@@ -1431,12 +1579,18 @@ Trpath_convert_antisense (int *found_score,
       }
 
     } else {
+      queryptr = Shortread_queryuc_ptr(queryseq);
       if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),
 					    trpath,trpath->chrnum,chroffset,chrhigh,
 					    /*plusp*/true,first_read_p,/*sensedir*/SENSE_ANTI,
-					    queryseq,querylength,this,knownsplicing,
+					    queryseq,queryptr,querylength,this,knownsplicing,
 					    /*query_compress*/query_compress_fwd,
 					    query_compress_fwd,query_compress_rev,
+
+					    streamspace_max_alloc,streamspace_alloc,
+					    novel_univdiags_alloc,novel_diagonals_alloc,
+					    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 					    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					    transcriptpool,hitlistpool,trpath->method)) != NULL) {
 	/* Path_eval_nmatches(&ignore_found_score,path,query_compress_fwd,query_compress_rev); */

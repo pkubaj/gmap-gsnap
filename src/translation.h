@@ -1,4 +1,4 @@
-/* $Id: translation.h 210493 2017-10-12 16:34:49Z twu $ */
+/* $Id: 189eb88e6d9a4e0c4fa0e471a55157cfe562e275 $ */
 #ifndef TRANSLATION_INCLUDED
 #define TRANSLATION_INCLUDED
 

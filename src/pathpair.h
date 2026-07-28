@@ -1,4 +1,4 @@
-/* $Id: 1487607813818a5fbb243a91137b9734272def35 $ */
+/* $Id: b7ffa7b67341307ad30875ec94c6789ae4b56199 $ */
 #ifndef PATHPAIR_INCLUDED
 #define PATHPAIR_INCLUDED
 
@@ -150,10 +150,11 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 		  Compress_T query_compress_L, Compress_T queryL_compress_fwd, Compress_T queryL_compress_rev,
 		  Compress_T query_compress_H, Compress_T queryH_compress_fwd, Compress_T queryH_compress_rev,
 		  Shortread_T queryseqL, Shortread_T queryseqH, char *queryptrL, char *queryptrH,
-		  int querylengthL, int querylengthH,
+		  int querylengthL, int querylengthH, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		  int localdb_nmismatches_allowed,
+		  
 		  Stage1_T stage1L, Stage1_T stage1H, Knownsplicing_T knownsplicing,
-		  int nmismatches_allowed_L, int nmismatches_allowed_H,
 		  Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		  Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		  Univdiagpool_T univdiagpool, Vectorpool_T vectorpool);

@@ -1,4 +1,3 @@
-/* $Id: matchpool.h 157221 2015-01-22 18:38:57Z twu $ */
 #ifndef MATCHPOOL_INCLUDED
 #define MATCHPOOL_INCLUDED
 

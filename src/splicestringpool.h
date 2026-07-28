@@ -1,4 +1,3 @@
-/* $Id: splicestringpool.h 135405 2014-05-07 19:16:09Z twu $ */
 #ifndef SPLICESTRINGPOOL_INCLUDED
 #define SPLICESTRINGPOOL_INCLUDED
 

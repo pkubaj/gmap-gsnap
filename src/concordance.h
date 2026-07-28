@@ -1,4 +1,4 @@
-/* $Id: c2d8248301f76c304e492b8326a95cece3910ac2 $ */
+/* $Id: 83eac34899ed4bf1e3522eecae4a32f9e9ff59e5 $ */
 #ifndef CONCORDANCE_INCLUDED
 #define CONCORDANCE_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -42,6 +42,10 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 
 		int nmismatches_filter_5, int nmismatches_filter_3,
 		int mincoverage_filter_5, int mincoverage_filter_3,
+
+		int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,

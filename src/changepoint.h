@@ -1,4 +1,3 @@
-/* $Id: changepoint.h 218286 2019-01-23 16:46:55Z twu $ */
 #ifndef CHANGEPOINT_INCLUDED
 #define CHANGEPOINT_INCLUDED
 

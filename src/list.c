@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: list.c 225763 2023-01-26 18:05:13Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -104,6 +103,11 @@ List_next (T list) {
   } else {
     return NULL;
   }
+}
+
+void *
+List_second_value (T list) {
+  return list->rest->first;
 }
 
 void
@@ -439,7 +443,7 @@ List_last_value (T this, T end) {
 }
 
 T
-List_last_item (T this, T end) {
+List_last_elt (T this, T end) {
   T last = NULL, r;
 
   for (r = this; r != end; r = r->rest) {

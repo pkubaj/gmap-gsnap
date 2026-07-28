@@ -1,4 +1,3 @@
-/* $Id: bitpack64-access.h 212659 2018-01-20 00:58:14Z twu $ */
 #ifndef BITPACK64_ACCESS_INCLUDED
 #define BITPACK64_ACCESS_INCLUDED
 #include "types.h"

@@ -1,4 +1,3 @@
-/* $Id: gbuffer.h 218286 2019-01-23 16:46:55Z twu $ */
 #ifndef GBUFFER_INCLUDED
 #define GBUFFER_INCLUDED
 

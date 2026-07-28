@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 5f3588790dcf2b71b0ff218b1afc12f5cadc3009 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -264,7 +263,7 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
 	FPRINTF(*cigar_fp,"%dM",n);
       }
       for (i = 0; i < n; i++) {
-	debug(printf("isupper %c, nconsecutive %d\n",*p,nconsecutive));
+	/* debug(printf("isupper %c, nconsecutive %d\n",*p,nconsecutive)); */
 	if (isupper(c = *p++)) {
 	  /* Match */
 	  nconsecutive++;
@@ -328,7 +327,7 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
       FPRINTF(*cigar_fp,"%dM",n);
     }
     for (i = 0; i < n; i++) {
-      debug(printf("isupper %c, nconsecutive %d\n",*p,nconsecutive));
+      /* debug(printf("isupper %c, nconsecutive %d\n",*p,nconsecutive)); */
       if (isupper(c = *p++)) {
 	/* Match */
 	nconsecutive++;
@@ -596,7 +595,7 @@ Path_print_sam_nomapping (Filestring_T fp, char *abbrev, Shortread_T queryseq, S
 			  T mate, int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p) {
   unsigned int flag;
 
-  Univcoord_T mate_chrpos_low;
+  Univcoord_T mate_univcoord_low;
   Filestring_T mate_cigar_fp, mate_md_fp;
   int mate_hardclip_low, mate_hardclip_high;
 
@@ -635,11 +634,15 @@ Path_print_sam_nomapping (Filestring_T fp, char *abbrev, Shortread_T queryseq, S
   /* 8. MPOS: Mate chrpos */
   if (mate == (Path_T) NULL) {
     FPRINTF(fp,"\t*\t0");
+#if 0
   } else if ((mate_chrpos_low = Path_genomiclow_softclipped(mate)) == 0U) {
+    /* Needed previously to prevent negative chrpos, but that problem should be fixed now */
     FPRINTF(fp,"\t*\t0");
+#endif
   } else {
     chr = Univ_IIT_label(chromosome_iit,mate->chrnum,&allocp);
-    FPRINTF(fp,"\t%s\t%u",chr,mate_chrpos_low - mate->chroffset + 1U);
+    mate_univcoord_low = Path_genomiclow_softclipped(mate);
+    FPRINTF(fp,"\t%s\t%u",chr,mate_univcoord_low - mate->chroffset + 1U);
     if (allocp == true) {
       FREE(chr);
     }

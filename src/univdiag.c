@@ -1,4 +1,3 @@
-static char rcsid[] = "$I$";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -14,8 +13,6 @@ static char rcsid[] = "$I$";
 #define T Univdiag_T
 
 
-#if 0
-/* Now in univdiagpool.c */
 T
 Univdiag_new (int qstart, int qend, Univcoord_T univdiagonal) {
   T new = (T) MALLOC(sizeof(*new));
@@ -29,7 +26,6 @@ Univdiag_new (int qstart, int qend, Univcoord_T univdiagonal) {
 
   return new;
 }
-#endif
 
 
 #if 0
@@ -118,10 +114,37 @@ Univdiag_list_gc (List_T *paths) {
 
 void
 Univdiag_transfer (T new, T old) {
+
   new->univdiagonal = old->univdiagonal;
   new->qstart = old->qstart;
   new->qend = old->qend;
   new->nmismatches = old->nmismatches;
+
+  return;
+}
+
+
+void
+Univdiag_transfer_list_to_array (T *array, List_T p) {
+
+  while (p != NULL) {
+    Univdiag_transfer(*array,(T) List_head(p));
+    array++;
+    p = List_next(p);
+  }
+
+  return;
+}
+
+
+void
+Univdiag_free_array (Univdiag_T **array) {
+
+  if (*array) {
+    FREE((*array)[0]);
+    FREE(*array);
+  }
+
   return;
 }
 
@@ -134,6 +157,36 @@ Univdiag_new_array (int n) {
 
   array = (T *) MALLOC(n*sizeof(T));
   space = (struct T *) MALLOC(n*sizeof(struct T));
+
+  array[0] = space;
+  for (i = 1; i < n; i++) {
+    array[i] = &(array[i-1][1]);
+  }
+
+  return array;
+}
+
+
+void
+Univdiag_free_array_keep (Univdiag_T **array) {
+
+  if (*array) {
+    FREE_KEEP((*array)[0]);
+    FREE_KEEP(*array);
+  }
+
+  return;
+}
+
+
+T *
+Univdiag_new_array_keep (int n) {
+  T *array;
+  struct T *space;
+  int i;
+
+  array = (T *) MALLOC_KEEP(n*sizeof(T));
+  space = (struct T *) MALLOC_KEEP(n*sizeof(struct T));
 
   array[0] = space;
   for (i = 1; i < n; i++) {
@@ -241,6 +294,7 @@ Univdiag_descending_cmp (const void *a, const void *b) {
 
 
 
+#if 0
 int
 Univdiag_diagonal_cmp (const void *a, const void *b) {
   T x = * (T *) a;
@@ -262,8 +316,33 @@ Univdiag_diagonal_cmp (const void *a, const void *b) {
     return 0;
   }
 }
+#endif
 
 
+int
+Univdiag_struct_diagonal_fwd_cmp (const void *a, const void *b) {
+  struct T x = * (struct T *) a;
+  struct T y = * (struct T *) b;
+
+  if (x.univdiagonal < y.univdiagonal) {
+    return -1;
+  } else if (y.univdiagonal < x.univdiagonal) {
+    return +1;
+  } else if (x.qstart < y.qstart) {
+    return -1;
+  } else if (y.qstart < x.qstart) {
+    return +1;
+  } else if (x.qend < y.qend) {
+    return -1;
+  } else if (y.qend < x.qend) {
+    return +1;
+  } else {
+    return 0;
+  }
+}
+
+
+#if 0
 int
 Univdiag_diagonal_rev_cmp (const void *a, const void *b) {
   T x = * (T *) a;
@@ -280,6 +359,30 @@ Univdiag_diagonal_rev_cmp (const void *a, const void *b) {
   } else if (x->qend < y->qend) {
     return -1;
   } else if (y->qend < x->qend) {
+    return +1;
+  } else {
+    return 0;
+  }
+}
+#endif
+
+
+int
+Univdiag_struct_diagonal_rev_cmp (const void *a, const void *b) {
+  struct T x = * (struct T *) a;
+  struct T y = * (struct T *) b;
+
+  if (x.univdiagonal > y.univdiagonal) {
+    return -1;
+  } else if (y.univdiagonal > x.univdiagonal) {
+    return +1;
+  } else if (x.qstart < y.qstart) {
+    return -1;
+  } else if (y.qstart < x.qstart) {
+    return +1;
+  } else if (x.qend < y.qend) {
+    return -1;
+  } else if (y.qend < x.qend) {
     return +1;
   } else {
     return 0;

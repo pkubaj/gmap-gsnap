@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: 1245ca2d13b807b9a91a4c822754468cb0945282 $";
+static char rcsid[] = "$Id: 9b5e019498250861d74e87b48405b43377a23983 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -620,7 +620,7 @@ static void
 get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_elts, List_T *best_minus_elts,
 		       Stage1_T stage1, int querylength,
 		       Compress_T query_compress_fwd, Compress_T query_compress_rev, 
-		       int nmismatches_allowed, int genestrand, Listpool_T listpool,
+		       int read_nmismatches_allowed, int genestrand, Listpool_T listpool,
 		       Trdiagpool_T trdiagpool) {
   T elt;
   List_T p;
@@ -637,19 +637,19 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 
 
   debug(printf("\nStarting get_elt_sets_queryfwd with querylength %d and nmismatches_allowed %d, genestrand %d\n",
-	       querylength,nmismatches_allowed,genestrand));
+	       querylength,read_nmismatches_allowed,genestrand));
 
 #if 0
   /* Allow calls to Extension_search_queryfwd in addition to other methods */
   *paths_gplus = *paths_gminus = (List_T) NULL;
 #endif
 
-  if (nmismatches_allowed < 0) {
-    nmismatches_allowed = 0;
+  if (read_nmismatches_allowed < 0) {
+    read_nmismatches_allowed = 0;
 #if 0
   } else {
     /* It is possible that this makes GSNAP too slow */
-    nmismatches_allowed = querylength;
+    read_nmismatches_allowed = querylength;
 #endif
   }
 
@@ -659,7 +659,7 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
   niter_plus = niter_minus = 0;
 
   while (total_npositions <= MAX_TOTAL_NPOSITIONS &&
-	 niter_plus <= nmismatches_allowed && niter_minus <= nmismatches_allowed &&
+	 niter_plus <= read_nmismatches_allowed && niter_minus <= read_nmismatches_allowed &&
 	 plus_qpos < query_lastpos && minus_qpos < query_lastpos) {
     if ((queryoffset = plus_qpos) >= query_lastpos) {
       /* Skip */
@@ -871,7 +871,7 @@ static void
 get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_elts, List_T *best_minus_elts,
 		       Stage1_T stage1, int querylength,
 		       Compress_T query_compress_fwd, Compress_T query_compress_rev, 
-		       int nmismatches_allowed, int genestrand, Listpool_T listpool,
+		       int read_nmismatches_allowed, int genestrand, Listpool_T listpool,
 		       Trdiagpool_T trdiagpool) {
   T elt;
   List_T p;
@@ -887,19 +887,19 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
   int queryoffset, querypos_rc;
 
   debug(printf("\nStarting get_elt_sets_queryrev with querylength %d and nmismatches_allowed %d, genestrand %d\n",
-	       querylength,nmismatches_allowed,genestrand));
+	       querylength,read_nmismatches_allowed,genestrand));
 
 #if 0
   /* Allow calls to Extension_search_queryrev in addition to other methods */
   *paths_gplus = *paths_gminus = (List_T) NULL;
 #endif
 
-  if (nmismatches_allowed < 0) {
-    nmismatches_allowed = 0;
+  if (read_nmismatches_allowed < 0) {
+    read_nmismatches_allowed = 0;
 #if 0
   } else {
     /* It is possible that this makes GSNAP too slow */
-    nmismatches_allowed = querylength;
+    read_nmismatches_allowed = querylength;
 #endif
   }
 
@@ -909,7 +909,7 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
   niter_plus = niter_minus = 0;
 
   while (total_npositions <= MAX_TOTAL_NPOSITIONS &&
-	 niter_plus <= nmismatches_allowed && niter_minus <= nmismatches_allowed &&
+	 niter_plus <= read_nmismatches_allowed && niter_minus <= read_nmismatches_allowed &&
 	 plus_qpos > 0 && minus_qpos > 0) {
     if ((queryoffset = plus_qpos) < 0) {
       /* Skip */
@@ -1379,6 +1379,7 @@ process_seed (int *found_score, int sufficient_score,
 					      stage1->indelinfo,intlistpool,uintlistpool,listpool,
 					      trpathpool,pathpool,method)) != NULL) {
       if (partialp == true) {
+	/* Currently partialp always set to false */
 	*partial_sense_trpaths = Hitlist_push(*partial_sense_trpaths,hitlistpool,(void *) trpath
 					      hitlistpool_trace(__FILE__,__LINE__));
       } else {
@@ -1398,6 +1399,7 @@ process_seed (int *found_score, int sufficient_score,
 					      stage1->indelinfo,intlistpool,uintlistpool,listpool,
 					      trpathpool,pathpool,method)) != NULL) {
       if (partialp == true) {
+	/* Currently partialp always set to false */
 	*partial_antisense_trpaths = Hitlist_push(*partial_antisense_trpaths,hitlistpool,(void *) trpath
 						  hitlistpool_trace(__FILE__,__LINE__));
       } else {
@@ -1882,7 +1884,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 		     Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool,
 		     Hitlistpool_T hitlistpool,
 
-		     int nmismatches_allowed, int genestrand, Method_T method) {
+		     int read_nmismatches_allowed, int genestrand, Method_T method) {
 
   List_T queryfwd_best_plus_elts, queryrev_best_plus_elts, queryfwd_best_minus_elts, queryrev_best_minus_elts;
 
@@ -1890,12 +1892,12 @@ Tr_extension_search (int *found_score, int sufficient_score,
   get_elt_sets_queryfwd(&stage1->tr_queryfwd_plus_set,&stage1->tr_queryfwd_minus_set,
 			&queryfwd_best_plus_elts,&queryfwd_best_minus_elts,
 			stage1,querylength,query_compress_fwd,query_compress_rev,
-			nmismatches_allowed,genestrand,listpool,trdiagpool);
+			read_nmismatches_allowed,genestrand,listpool,trdiagpool);
   
   get_elt_sets_queryrev(&stage1->tr_queryrev_plus_set,&stage1->tr_queryrev_minus_set,
 			&queryrev_best_plus_elts,&queryrev_best_minus_elts,
 			stage1,querylength,query_compress_fwd,query_compress_rev,
-			nmismatches_allowed,genestrand,listpool,trdiagpool);
+			read_nmismatches_allowed,genestrand,listpool,trdiagpool);
 
   if (queryfwd_best_plus_elts == NULL && queryrev_best_plus_elts == NULL) {
     /* Skip */

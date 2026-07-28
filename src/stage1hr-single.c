@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 254bf8e98d592b24b209ae7013bf82a5182ef4bb $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -213,7 +212,7 @@ single_read_next_method_tr (int *found_score, int sufficient_score, Method_T las
 			    int *mismatch_positions_alloc,
 			    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-			    int nmismatches_allowed,
+			    int read_nmismatches_allowed,
 			 
 			    Trdiagpool_T trdiagpool,
 			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -259,7 +258,7 @@ single_read_next_method_tr (int *found_score, int sufficient_score, Method_T las
 
 			trdiagpool,intlistpool,uintlistpool,listpool,
 			trpathpool,pathpool,hitlistpool,
-			nmismatches_allowed,genestrand,/*method*/TR_EXT);
+			read_nmismatches_allowed,genestrand,/*method*/TR_EXT);
     debug(printf(" => %d sense and %d antisense trpaths\n",
 		 List_length(*sense_trpaths),List_length(*antisense_trpaths)));
     return TR_EXT;
@@ -281,10 +280,12 @@ single_read_extend (int *found_score, T this,
 		    List_T *unextended_antisense_paths_gplus, List_T *unextended_antisense_paths_gminus,
 
 		    Shortread_T queryseq, char *queryuc_ptr, char *queryrc, int querylength,
+		    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels,
-		    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-		    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-		    Compress_T query_compress_fwd, Compress_T query_compress_rev, int nmismatches_allowed,
+
+		    int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int localdb_nmismatches_allowed,
 
 		    Intlistpool_T intlistpool,
 		    Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -340,12 +341,13 @@ single_read_extend (int *found_score, T this,
     } else if ((complete_paths = 
 		Path_extend(&(*found_score),&unextended_paths,/*original_path*/path,
 			    queryseq,/*queryptr*/queryuc_ptr,querylength,
-			    mismatch_positions_alloc,novel_univdiags_alloc,
-			    novel_diagonals_alloc,localdb_alloc,
-			    this,knownsplicing,knownindels,
-			    /*query_compress*/query_compress_fwd,
+			    this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			    localdb_nmismatches_allowed,
+
+			    this,knownsplicing,knownindels,/*query_compress*/query_compress_fwd,
 			    query_compress_fwd,query_compress_rev,/*genestrand*/0,
-			    nmismatches_allowed,/*paired_end_p*/false,/*lowp*/true,
+			    /*paired_end_p*/false,/*lowp*/true,
 			    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 			    univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			    /*extend_qstart_p*/true,/*extend_qend_p*/true)) != NULL) {
@@ -375,12 +377,13 @@ single_read_extend (int *found_score, T this,
     } else if ((complete_paths =
 		Path_extend(&(*found_score),&unextended_paths,/*original_path*/path,
 			    queryseq,/*queryptr*/queryrc,querylength,
-			    mismatch_positions_alloc,novel_univdiags_alloc,
-			    novel_diagonals_alloc,localdb_alloc,
-			    this,knownsplicing,knownindels,
-			    /*query_compress*/query_compress_rev,
+			    this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			    localdb_nmismatches_allowed,
+
+			    this,knownsplicing,knownindels,/*query_compress*/query_compress_rev,
 			    query_compress_fwd,query_compress_rev,/*genestrand*/0,
-			    nmismatches_allowed,/*paired_end_p*/false,/*lowp*/true,
+			    /*paired_end_p*/false,/*lowp*/true,
 			    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 			    univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			    /*extend_qstart_p*/true,/*extend_qend_p*/true)) != NULL) {
@@ -410,12 +413,13 @@ single_read_extend (int *found_score, T this,
     } else if ((complete_paths = 
 		Path_extend(&(*found_score),&unextended_paths,/*original_path*/path,
 			    queryseq,/*queryptr*/queryuc_ptr,querylength,
-			    mismatch_positions_alloc,novel_univdiags_alloc,
-			    novel_diagonals_alloc,localdb_alloc,
-			    this,knownsplicing,knownindels,
-			    /*query_compress*/query_compress_fwd,
+			    this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			    localdb_nmismatches_allowed,
+
+			    this,knownsplicing,knownindels,/*query_compress*/query_compress_fwd,
 			    query_compress_fwd,query_compress_rev,/*genestrand*/0,
-			    nmismatches_allowed,/*paired_end_p*/false,/*lowp*/true,
+			    /*paired_end_p*/false,/*lowp*/true,
 			    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 			    univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			    /*extend_qstart_p*/true,/*extend_qend_p*/true)) != NULL) {
@@ -444,12 +448,13 @@ single_read_extend (int *found_score, T this,
     } else if ((complete_paths = 
 		Path_extend(&(*found_score),&unextended_paths,/*original_path*/path,
 			    queryseq,/*queryptr*/queryrc,querylength,
-			    mismatch_positions_alloc,novel_univdiags_alloc,
-			    novel_diagonals_alloc,localdb_alloc,
-			    this,knownsplicing,knownindels,
-			    /*query_compress*/query_compress_rev,
+			    this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			    localdb_nmismatches_allowed,
+
+			    this,knownsplicing,knownindels,/*query_compress*/query_compress_rev,
 			    query_compress_fwd,query_compress_rev,/*genestrand*/0,
-			    nmismatches_allowed,/*paired_end_p*/false,/*lowp*/true,
+			    /*paired_end_p*/false,/*lowp*/true,
 			    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 			    univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			    /*extend_qstart_p*/true,/*extend_qend_p*/true)) != NULL) {
@@ -622,6 +627,10 @@ convert_trpaths (int *found_score,
 		 Shortread_T queryseq, int querylength,
 		 Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
+		 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		 unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		 Uintlistpool_T uintlistpool, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 		 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
@@ -633,6 +642,11 @@ convert_trpaths (int *found_score,
 		       sense_trpaths,first_read_p,
 		       queryseq,querylength,this,knownsplicing,
 		       query_compress_fwd,query_compress_rev,
+
+		       streamspace_max_alloc,streamspace_alloc,
+		       novel_univdiags_alloc,novel_diagonals_alloc,
+		       localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 		       intlistpool,uintlistpool,univcoordlistpool,listpool,
 		       pathpool,vectorpool,transcriptpool,hitlistpool,
 		       /*crossover_sense_p*/false);
@@ -645,6 +659,11 @@ convert_trpaths (int *found_score,
 			   antisense_trpaths,first_read_p,
 			   queryseq,querylength,this,knownsplicing,
 			   query_compress_fwd,query_compress_rev,
+
+			   streamspace_max_alloc,streamspace_alloc,
+			   novel_univdiags_alloc,novel_diagonals_alloc,
+			   localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			   intlistpool,uintlistpool,univcoordlistpool,listpool,
 			   pathpool,vectorpool,transcriptpool,hitlistpool,
 			   /*crossover_sense_p*/false);
@@ -679,11 +698,14 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 		      T this, int genestrand,
 		      
 		      Shortread_T queryseq, int querylength,
-		      Knownsplicing_T knownsplicing, int *mismatch_positions_alloc, 
+		      Knownsplicing_T knownsplicing, 
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
-
 		      int nmismatches_allowed,
 			 
+		      int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		      Trdiagpool_T trdiagpool, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
 		      Trpathpool_T trpathpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
@@ -787,6 +809,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 		      this->sense_trpaths,this->antisense_trpaths,/*first_read_p*/true,
 		      this,knownsplicing,queryseq,querylength,
 		      query_compress_fwd,query_compress_rev,
+
+		      streamspace_max_alloc,streamspace_alloc,
+		      novel_univdiags_alloc,novel_diagonals_alloc,
+		      localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 		      uintlistpool,intlistpool,univcoordlistpool,listpool,
 		      pathpool,vectorpool,transcriptpool,hitlistpool);
       return true;
@@ -820,6 +847,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 		      this->sense_trpaths,this->antisense_trpaths,/*first_read_p*/true,
 		      this,knownsplicing,queryseq,querylength,
 		      query_compress_fwd,query_compress_rev,
+
+		      streamspace_max_alloc,streamspace_alloc,
+		      novel_univdiags_alloc,novel_diagonals_alloc,
+		      localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 		      uintlistpool,intlistpool,univcoordlistpool,listpool,
 		      pathpool,vectorpool,transcriptpool,hitlistpool);
       return true;
@@ -835,6 +867,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 			 this->partial_sense_trpaths,/*first_read_p*/true,
 			 queryseq,querylength,this,knownsplicing,
 			 query_compress_fwd,query_compress_rev,
+
+			 streamspace_max_alloc,streamspace_alloc,
+			 novel_univdiags_alloc,novel_diagonals_alloc,
+			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,
 			 pathpool,vectorpool,transcriptpool,hitlistpool,
 			 /*crossover_sense_p*/false);
@@ -846,6 +883,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 			 this->sense_trpaths,/*first_read_p*/true,
 			 queryseq,querylength,this,knownsplicing,
 			 query_compress_fwd,query_compress_rev,
+
+			 streamspace_max_alloc,streamspace_alloc,
+			 novel_univdiags_alloc,novel_diagonals_alloc,
+			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,
 			 pathpool,vectorpool,transcriptpool,hitlistpool,
 			 /*crossover_sense_p*/false);
@@ -858,6 +900,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 			     this->partial_antisense_trpaths,/*first_read_p*/true,
 			     queryseq,querylength,this,knownsplicing,
 			     query_compress_fwd,query_compress_rev,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,vectorpool,transcriptpool,hitlistpool,
 			     /*crossover_sense_p*/false);
@@ -869,6 +916,11 @@ single_read_tr_paths (int *found_score, int sufficient_score, Method_T *last_met
 			     this->antisense_trpaths,/*first_read_p*/true,
 			     queryseq,querylength,this,knownsplicing,
 			     query_compress_fwd,query_compress_rev,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,vectorpool,transcriptpool,hitlistpool,
 			     /*crossover_sense_p*/false);
@@ -920,10 +972,12 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 		 
 		       Shortread_T queryseq, char *queryuc_ptr, char *queryrc, int querylength,
 		       Knownsplicing_T knownsplicing, Knownindels_T knownindels,
-		       int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-		       Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
 		       Compress_T query_compress_fwd, Compress_T query_compress_rev,
-		 
+
+		       int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		       unsigned short *localdb_alloc,
+
 		       int localdb_nmismatches_allowed, EF64_T repetitive_ef64,
 		       
 		       Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
@@ -1093,13 +1147,15 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 			      &(*sense_paths_gplus),&(*antisense_paths_gplus),
 
 			      univdiagonal,auxinfo,queryseq,/*queryptr*/queryuc_ptr,querylength,
-			      mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-			      localdb_alloc,/*stage1*/this,knownsplicing,knownindels,
+			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_nmismatches_allowed,
+
+			      /*stage1*/this,knownsplicing,knownindels,
 			      /*query_compress*/query_compress_fwd,query_compress_fwd,query_compress_rev,
 			      /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
 			      /*chrhigh*/pathstore->chrhigh,
-			      /*plusp*/true,genestrand,
-			      localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+			      /*plusp*/true,genestrand,/*paired_end_p*/false,/*first_read_p*/true,
 			      intlistpool,uintlistpool,univcoordlistpool,listpool,
 			      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			      /*method*/EXT,/*find_splices_p*/true);
@@ -1121,13 +1177,15 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 			      &(*sense_paths_gminus),&(*antisense_paths_gminus),
 
 			      univdiagonal,auxinfo,queryseq,/*queryptr*/queryrc,querylength,
-			      mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-			      localdb_alloc,/*stage1*/this,knownsplicing,knownindels,
+			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_nmismatches_allowed,
+			      
+			      /*stage1*/this,knownsplicing,knownindels,
 			      /*query_compress*/query_compress_rev,query_compress_fwd,query_compress_rev,
 			      /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
-			      /*chrhigh*/pathstore->chrhigh,
-			      /*plusp*/false,genestrand,
-			      localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+			      /*chrhigh*/pathstore->chrhigh,/*plusp*/false,genestrand,
+			      /*paired_end_p*/false,/*first_read_p*/true,
 			      intlistpool,uintlistpool,univcoordlistpool,listpool,
 			      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			      /*method*/EXT,/*find_splices_p*/true);
@@ -1182,13 +1240,15 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 			      &(*sense_paths_gplus),&(*antisense_paths_gplus),
 
 			      univdiagonal,auxinfo,queryseq,/*queryptr*/queryuc_ptr,querylength,
-			      mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-			      localdb_alloc,/*stage1*/this,knownsplicing,knownindels,
+			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_nmismatches_allowed,
+
+			      /*stage1*/this,knownsplicing,knownindels,
 			      /*query_compress*/query_compress_fwd,query_compress_fwd,query_compress_rev,
 			      /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
 			      /*chrhigh*/pathstore->chrhigh,
-			      /*plusp*/true,genestrand,
-			      localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+			      /*plusp*/true,genestrand,/*paired_end_p*/false,/*first_read_p*/true,
 			      intlistpool,uintlistpool,univcoordlistpool,listpool,
 			      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			      /*method*/SEGMENT1,/*find_splices_p*/true);
@@ -1211,13 +1271,15 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 			      &(*sense_paths_gminus),&(*antisense_paths_gminus),
 
 			      univdiagonal,auxinfo,queryseq,/*queryptr*/queryrc,querylength,
-			      mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-			      localdb_alloc,/*stage1*/this,knownsplicing,knownindels,
+			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_nmismatches_allowed,
+
+			      /*stage1*/this,knownsplicing,knownindels,
 			      /*query_compress*/query_compress_rev,query_compress_fwd,query_compress_rev,
 			      /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
-			      /*chrhigh*/pathstore->chrhigh,
-			      /*plusp*/false,genestrand,
-			      localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+			      /*chrhigh*/pathstore->chrhigh,/*plusp*/false,genestrand,
+			      /*paired_end_p*/false,/*first_read_p*/true,
 			      intlistpool,uintlistpool,univcoordlistpool,listpool,
 			      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			      /*method*/SEGMENT1,/*find_splices_p*/true);
@@ -1262,9 +1324,12 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 				 query_compress_fwd,query_compress_rev,
 				 /*plusp*/true,querylength,mismatch_positions_alloc,
 				   
+				 streamspace_max_alloc,streamspace_alloc,
 				 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				 localdb_nmismatches_allowed,
+
 				 this,knownsplicing,knownindels,
-				 localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+				 /*paired_end_p*/false,/*first_read_p*/true,
 
 				 intlistpool,uintlistpool,univcoordlistpool,listpool,
 				 pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
@@ -1286,9 +1351,12 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 				 query_compress_fwd,query_compress_rev,
 				 /*plusp*/false,querylength,mismatch_positions_alloc,
 				 
+				 streamspace_max_alloc,streamspace_alloc,
 				 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				 localdb_nmismatches_allowed,
+
 				 this,knownsplicing,knownindels,
-				 localdb_nmismatches_allowed,/*paired_end_p*/false,/*first_read_p*/true,
+				 /*paired_end_p*/false,/*first_read_p*/true,
 				 
 				 intlistpool,uintlistpool,univcoordlistpool,listpool,
 				 pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
@@ -1327,10 +1395,12 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 		       &(*unextended_antisense_paths_gplus),&(*unextended_antisense_paths_gminus),
 
 		       queryseq,queryuc_ptr,queryrc,querylength,
-		       knownsplicing,knownindels,mismatch_positions_alloc,
-		       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 		       query_compress_fwd,query_compress_rev,
+		       knownsplicing,knownindels,mismatch_positions_alloc,
+		       streamspace_max_alloc,streamspace_alloc,
+		       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
 		       localdb_nmismatches_allowed,
+
 		       intlistpool,uintlistpool,univcoordlistpool,
 		       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
 		       hitlistpool,spliceendsgen);
@@ -1346,8 +1416,13 @@ single_read_gen_paths (int *found_score, Method_T *last_method,
 
 Path_T *
 Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq,
+		    T this, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		    Shortread_T queryseq, EF64_T repetitive_ef64,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels, Localdb_T localdb,
+
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		    unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
 		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 		    Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -1357,7 +1432,6 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 		    Spliceendsgen_T spliceendsgen, bool single_cell_p, bool first_read_p,
 		    Pass_T pass) {
   Path_T *patharray;
-  T this;
   List_T paths;
 
   bool any_imperfect_ends_p;
@@ -1368,10 +1442,7 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   List_T sense_paths_gplus, sense_paths_gminus,
     antisense_paths_gplus, antisense_paths_gminus;
 
-  int *mismatch_positions_alloc;
-  Univdiag_T *novel_univdiags_alloc;
-  Univcoord_T *novel_diagonals_alloc;
-  unsigned short *localdb_alloc;
+  /* int *mismatch_positions_alloc; */
 
   int nmismatches_filter, mincoverage_filter;
   int nmismatches_allowed;
@@ -1398,7 +1469,6 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   } else {
     queryuc_ptr = Shortread_queryuc_ptr(queryseq);
     queryrc = Shortread_queryrc(queryseq);
-    this = Stage1_new(queryuc_ptr,querylength,first_read_p);
   }
 
   /* nmismatches_allowed means nmismatches_search and is not specified
@@ -1431,13 +1501,8 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   }
 #endif
 
-  mismatch_positions_alloc = (int *) MALLOC((querylength+MISMATCH_EXTRA)*sizeof(int));
-
-  /* 2 localdb regions possible if shortsplicedist_novelend < 65536 */
-  /* 65536 represents the worst possible case where every position in the localdb region matches the query */
-  novel_univdiags_alloc = Univdiag_new_array(2 * 65536);
-  novel_diagonals_alloc = (Univcoord_T *) MALLOC(2 * 65536 * sizeof(Univcoord_T));
-  MALLOC_ALIGN(localdb_alloc,65536 * sizeof(unsigned short)); /* Maximum number of intersections in a localdb region */
+  /* Now allocated in Stage1hr_new */
+  /* mismatch_positions_alloc = (int *) MALLOC((querylength+MISMATCH_EXTRA)*sizeof(int)); */
 
   query_compress_fwd = Compress_new_fwd(queryuc_ptr,querylength);
   query_compress_rev = Compress_new_rev(queryuc_ptr,querylength);
@@ -1454,10 +1519,13 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 			     &antisense_paths_gplus,&antisense_paths_gminus,
 		       
 			     this,/*genestrand*/0,queryseq,querylength,
-			     knownsplicing,mismatch_positions_alloc,
-			     query_compress_fwd,query_compress_rev,
-		       
-			     nmismatches_allowed,
+			     knownsplicing,
+			     query_compress_fwd,query_compress_rev,nmismatches_allowed,
+
+			     this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     trdiagpool,intlistpool,uintlistpool,univcoordlistpool,
 			     listpool,trpathpool,pathpool,vectorpool,transcriptpool,
 			     hitlistpool) == true) {
@@ -1481,13 +1549,14 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				     &sense_paths_gplus,&sense_paths_gminus,
 				     &antisense_paths_gplus,&antisense_paths_gminus,
 
-				     this,/*genestrand*/0,
-				     queryseq,queryuc_ptr,queryrc,querylength,
-				     knownsplicing,knownindels,mismatch_positions_alloc,
-				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				     query_compress_fwd,query_compress_rev,nmismatches_allowed,
+				     this,/*genestrand*/0,queryseq,queryuc_ptr,queryrc,querylength,
+				     knownsplicing,knownindels,query_compress_fwd,query_compress_rev,
 
-				     repetitive_ef64,auxinfopool,pathstorepool,univdiagpool,
+				     this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     nmismatches_allowed,repetitive_ef64,
+
+				     auxinfopool,pathstorepool,univdiagpool,
 				     intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,vectorpool,
 				     hitlistpool,spliceendsgen) == true) {
@@ -1565,17 +1634,7 @@ Stage1_single_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   
   Compress_free(&query_compress_fwd);
   Compress_free(&query_compress_rev);
-  FREE_ALIGN(localdb_alloc);
-  FREE(novel_diagonals_alloc);
-  FREE(novel_univdiags_alloc[0]);
-  FREE(novel_univdiags_alloc);
-  FREE(mismatch_positions_alloc);
-
-  /* Do not free paths, since they are now appended to paths */
-  Stage1_free(&this,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
-	      intlistpool,uintlistpool,univcoordlistpool,
-	      listpool,pathpool,trpathpool,transcriptpool,hitlistpool,
-	      /*free_paths_p*/false);
+  /* FREE(mismatch_positions_alloc); */
 
   /* FREE(queryrc); -- Now taken from Shortread */
 

@@ -1,4 +1,3 @@
-/* $Id: bytecoding.h 179281 2015-11-20 00:10:35Z twu $ */
 #ifndef BYTECODING_INCLUDED
 #define BYTECODING_INCLUDED
 

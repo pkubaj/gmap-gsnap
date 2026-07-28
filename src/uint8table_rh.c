@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: uint8table_rh.c 223349 2020-10-28 02:49:25Z twu $";
+static char rcsid[] = "$Id: df71052f7bac18d487f01487c111521431c1bf60 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

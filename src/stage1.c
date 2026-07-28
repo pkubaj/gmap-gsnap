@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 1c5095d5e4aa04edfd5bcc317e9a54e070b33168 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -328,11 +327,13 @@ Stage1_new (Sequence_T queryuc, int maxtotallen, int maxentries) {
   debug(Sequence_print(stdout,queryuc,/*uppercasep*/true,/*wraplength*/50,/*trimmedp*/true));
 #endif
 #ifdef PMAP
-  reader = Reader_new(Sequence_fullpointer(queryuc),new->querystart,new->queryend,/*oligosize*/index1part_aa);
+  reader = Reader_new(/*oligosize*/index1part_aa);
+  Reader_set_sequence(reader,Sequence_fullpointer(queryuc),new->querystart,new->queryend);
   new->block5 = Block_new(FIVE,/*oligosize*/index1part_aa,reader,3*new->querylength);
   new->block3 = Block_new(THREE,/*oligosize*/index1part_aa,reader,3*new->querylength);
 #else
-  reader = Reader_new(Sequence_fullpointer(queryuc),new->querystart,new->queryend,/*oligosize*/index1part);
+  reader = Reader_new(/*oligosize*/index1part);
+  Reader_set_sequence(reader,Sequence_fullpointer(queryuc),new->querystart,new->queryend);
   new->block5 = Block_new(FIVE,/*oligosize*/index1part,leftreadshift,reader,new->querylength);
   new->block3 = Block_new(THREE,/*oligosize*/index1part,leftreadshift,reader,new->querylength);
 #endif
@@ -2126,8 +2127,8 @@ read_oligos (T this, Sequence_T queryuc, int genestrand) {
   this->validp = (bool *) CALLOC(this->querylength,sizeof(bool));
 #ifdef PMAP
   this->oligos = (Oligospace_T *) CALLOC(this->querylength,sizeof(Oligospace_T));
-  reader = Reader_new(Sequence_fullpointer(queryuc),/*querystart*/0,/*queryend*/this->querylength,
-		      /*oligosize*/index1part_aa);
+  reader = Reader_new(/*oligosize*/index1part_aa);
+  Reader_set_sequence(reader,Sequence_fullpointer(queryuc),/*querystart*/0,/*queryend*/this->querylength);
   /* Prevents us from processing invalid query 12-mers */
   for (querypos = 0; querypos <= this->querylength - index1part_aa; querypos++) {
     this->validp[querypos] = false;
@@ -2135,8 +2136,8 @@ read_oligos (T this, Sequence_T queryuc, int genestrand) {
 #else
   this->forward_oligos = (Oligospace_T *) CALLOC(this->querylength,sizeof(Oligospace_T));
   this->revcomp_oligos = (Oligospace_T *) CALLOC(this->querylength,sizeof(Oligospace_T));
-  reader = Reader_new(Sequence_fullpointer(queryuc),/*querystart*/0,/*queryend*/this->querylength,
-		      /*oligosize*/index1part);
+  reader = Reader_new(/*oligosize*/index1part);
+  Reader_set_sequence(reader,Sequence_fullpointer(queryuc),/*querystart*/0,/*queryend*/this->querylength);
   debug(printf("oligobase is %d, oligobase_mask is %08X\n",index1part,oligobase_mask));
   /* Prevents us from processing invalid query 12-mers */
   for (querypos = 0; querypos <= this->querylength - index1part; querypos++) {

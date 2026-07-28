@@ -1,4 +1,3 @@
-/* $Id: sarray-write.h 225250 2022-11-06 05:12:48Z twu $ */
 #ifndef SARRAY_WRITE_INCLUDED
 #define SARRAY_WRITE_INCLUDED
 #include "types.h"

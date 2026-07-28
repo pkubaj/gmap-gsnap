@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: d2e7d015de963a8324654340fc1a4c7c388395a2 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -15,6 +14,7 @@ static char rcsid[] = "$Id: d2e7d015de963a8324654340fc1a4c7c388395a2 $";
 #include <stddef.h>
 #include <string.h>		/* Needed for strlen and strcpy */
 
+#include "assert.h"
 #include "mem.h"
 #include "access.h"
 #include "list.h"
@@ -101,7 +101,8 @@ Transcriptome_free (T *old) {
 
 
 T
-Transcriptome_new (char *genomesubdir, char *genome_fileroot, char *transcriptome_fileroot,
+Transcriptome_new (char *genomesubdir, char *genome_fileroot,
+		   char *transcriptomesubdir, char *transcriptome_fileroot,
 		   bool sharedp) {
   T new = (T) MALLOC(sizeof(*new));
 
@@ -114,26 +115,53 @@ Transcriptome_new (char *genomesubdir, char *genome_fileroot, char *transcriptom
   int divint;
 
 
-  info_root = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
-			      strlen(genome_fileroot)+strlen(".transcripts/")+strlen(transcriptome_fileroot)+1,
+  /* New format */
+  info_root = (char *) CALLOC(strlen(transcriptomesubdir)+strlen("/")+
+			      strlen(transcriptome_fileroot)+strlen(".genomes/")+strlen(genome_fileroot)+1,
 			      sizeof(char));
-  sprintf(info_root,"%s/%s.transcripts/%s",genomesubdir,genome_fileroot,transcriptome_fileroot);
+  sprintf(info_root,"%s/%s.genomes/%s",transcriptomesubdir,transcriptome_fileroot,genome_fileroot);
 
   /* Read dbindex file */
   filename = (char *) CALLOC(strlen(info_root)+strlen(".dbindex")+1,sizeof(char));
   sprintf(filename,"%s.dbindex",info_root);
   nalignments = Access_filesize(filename)/sizeof(int) - 1;
 
-  if ((fp = fopen(filename,"rb")) == NULL) {
-    fprintf(stderr,"Cannot open file %s\n",filename);
-    exit(9);
+  if ((fp = fopen(filename,"rb")) != NULL) {
+    FREE(filename);
+
+  } else {
+    fprintf(stderr,"Cannot open file %s.  Trying old format\n",filename);
+    FREE(filename);
+    FREE(info_root);
+
+    /* Old format */
+    info_root = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
+				strlen(genome_fileroot)+strlen(".transcripts/")+strlen(transcriptome_fileroot)+1,
+				sizeof(char));
+    sprintf(info_root,"%s/%s.transcripts/%s",genomesubdir,genome_fileroot,transcriptome_fileroot);
+
+    filename = (char *) CALLOC(strlen(info_root)+strlen(".dbindex")+1,sizeof(char));
+    sprintf(filename,"%s.dbindex",info_root);
+    nalignments = Access_filesize(filename)/sizeof(int) - 1;
+
+    if ((fp = fopen(filename,"rb")) != NULL) {
+      FREE(filename);
+
+    } else {
+      fprintf(stderr,"Cannot open file %s, in old format.  Exiting.\n",filename);
+      exit(9);
+    }
   }
-  FREE(filename);
 
   new->dbindex = (int *) MALLOC((nalignments+1)*sizeof(int));
   for (map_index = 0; map_index <= nalignments; map_index++) {
     FREAD_INT(&trnum,fp);
-    new->dbindex[map_index] = trnum;
+    if (trnum < 0) {
+      /* Handling an older version of trindex, when Trnum_T was an int, rather than an unsigned int */
+      new->dbindex[map_index] = 0;
+    } else {
+      new->dbindex[map_index] = trnum;
+    }
   }
   fclose(fp);
 
@@ -267,9 +295,9 @@ Transcriptome_trnum (int *nexons, int **exonbounds, Chrpos_T **exonstarts, T thi
   Trnum_T trnum;
   UINT4 offset0, offset1;
 
-  if ((trnum = this->dbindex[map_index]) < 1) {
+  if ((trnum = this->dbindex[map_index]) == 0) {
     /* Not found in transcriptomedb */
-    return -1;
+    return 0;
 
   } else {
     offset0 = Bitpack64_read_two(&offset1,(Oligospace_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
@@ -285,6 +313,7 @@ Transcriptome_trnum (int *nexons, int **exonbounds, Chrpos_T **exonstarts, T thi
     printf("\n");
 #endif
 
+    assert((int) trnum > 0);
     return trnum;
   }
 }

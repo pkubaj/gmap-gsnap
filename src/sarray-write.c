@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: sarray-write.c 225269 2022-11-06 20:45:23Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

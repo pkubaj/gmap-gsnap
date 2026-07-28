@@ -1,4 +1,3 @@
-/* $Id: tableint.h 224367 2021-07-07 19:23:12Z twu $ */
 #ifndef TABLEINT_INCLUDED
 #define TABLEINT_INCLUDED
 

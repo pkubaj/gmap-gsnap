@@ -1,4 +1,4 @@
-/* $Id: 3490efc9467595dd1c93ccef1612ebf2174a2d8a $ */
+/* $Id: cfe17711e609430167546bdec68d3089af00ffa7 $ */
 #ifndef READER_INCLUDED
 #define READER_INCLUDED
 
@@ -65,7 +65,9 @@ extern void
 Reader_reset_ends (T this);
 
 extern T
-Reader_new (char *sequence, int querystart, int queryend, int oligosize);
+Reader_new (int oligosize);
+extern void
+Reader_set_sequence (T this, char *sequence, int querystart, int queryend);
 extern void
 Reader_free (T *old);
 

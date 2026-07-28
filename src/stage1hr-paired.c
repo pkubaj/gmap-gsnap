@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 5d5b09a79cc1f61b88042c59cd2d29a7fa9026f6 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -203,6 +202,10 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 
 			   int nmismatches_filter_5, int nmismatches_filter_3,
 			   int mincoverage_filter_5, int mincoverage_filter_3,
+
+			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			   unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			   Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
@@ -413,7 +416,7 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 						*last_method_5)) != NULL) {
       if (partialp == true) {
 	this5->partial_antisense_trpaths = Hitlist_push(this5->partial_antisense_trpaths,hitlistpool,(void *) trpath5
-						hitlistpool_trace(__FILE__,__LINE__));
+							hitlistpool_trace(__FILE__,__LINE__));
       } else {
 	this5->antisense_trpaths = Hitlist_push(this5->antisense_trpaths,hitlistpool,(void *) trpath5
 						hitlistpool_trace(__FILE__,__LINE__));
@@ -460,6 +463,10 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
 			     
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
 			     /*sensedir*/SENSE_FORWARD);
@@ -476,6 +483,10 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
 
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -659,7 +670,7 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 						    *last_method_5)) != NULL) {
 	  if (partialp == true) {
 	    this5->partial_antisense_trpaths = Hitlist_push(this5->partial_antisense_trpaths,hitlistpool,(void *) trpath5
-						    hitlistpool_trace(__FILE__,__LINE__));
+							    hitlistpool_trace(__FILE__,__LINE__));
 	  } else {
 	    this5->antisense_trpaths = Hitlist_push(this5->antisense_trpaths,hitlistpool,(void *) trpath5
 						    hitlistpool_trace(__FILE__,__LINE__));
@@ -730,7 +741,7 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 						    *last_method_3)) != NULL) {
 	  if (partialp == true) {
 	    this3->partial_antisense_trpaths = Hitlist_push(this3->partial_antisense_trpaths,hitlistpool,(void *) trpath3
-						    hitlistpool_trace(__FILE__,__LINE__));
+							    hitlistpool_trace(__FILE__,__LINE__));
 	  } else {
 	    this3->antisense_trpaths = Hitlist_push(this3->antisense_trpaths,hitlistpool,(void *) trpath3
 						    hitlistpool_trace(__FILE__,__LINE__));
@@ -766,7 +777,7 @@ paired_search_trdiagonals (int *found_score_paired, int *found_score_5, int *fou
 						  *last_method_3)) != NULL) {
 	if (partialp == true) {
 	  this3->partial_antisense_trpaths = Hitlist_push(this3->partial_antisense_trpaths,hitlistpool,(void *) trpath3
-						  hitlistpool_trace(__FILE__,__LINE__));
+							  hitlistpool_trace(__FILE__,__LINE__));
 	} else {
 	  this3->antisense_trpaths = Hitlist_push(this3->antisense_trpaths,hitlistpool,(void *) trpath3
 						  hitlistpool_trace(__FILE__,__LINE__));
@@ -799,6 +810,10 @@ paired_read_next_method_tr_5 (int *found_score_paired, int *found_score_5, int *
 
 			      int nmismatches_filter_5, int nmismatches_filter_3,
 			      int mincoverage_filter_5, int mincoverage_filter_3,
+
+			      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			      int genestrand, Trdiagpool_T trdiagpool, Intlistpool_T intlistpool,
 			      Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -833,6 +848,10 @@ paired_read_next_method_tr_5 (int *found_score_paired, int *found_score_5, int *
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
 
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
 			     /*sensedir*/SENSE_FORWARD);
@@ -851,6 +870,10 @@ paired_read_next_method_tr_5 (int *found_score_paired, int *found_score_5, int *
 
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
 
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -877,6 +900,10 @@ paired_read_next_method_tr_3 (int *found_score_paired, int *found_score_5, int *
 			    
 			      int nmismatches_filter_5, int nmismatches_filter_3,
 			      int mincoverage_filter_5, int mincoverage_filter_3,
+
+			      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			      int genestrand, Trdiagpool_T trdiagpool, Intlistpool_T intlistpool,
 			      Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -911,6 +938,10 @@ paired_read_next_method_tr_3 (int *found_score_paired, int *found_score_5, int *
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
 
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
 			     /*sensedir*/SENSE_FORWARD);
@@ -929,6 +960,10 @@ paired_read_next_method_tr_3 (int *found_score_paired, int *found_score_5, int *
 
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
+
+			     streamspace_max_alloc,streamspace_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,
+			     localdb_alloc,localdb,localdb_nmismatches_allowed,
 
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,
 			     pathpool,transcriptpool,vectorpool,hitlistpool,
@@ -950,11 +985,12 @@ solve_univdiagonal_auxinfo (bool *complete_sense_p, bool *complete_antisense_p,
 			    char *queryptr, char *queryuc_ptr, char *queryrc, int querylength,
 			    T this, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			      
-			    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-			    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			    int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			    unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
 			    Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
-			   
-			    int localdb_nmismatches_allowed, int genestrand,
+			    int genestrand,
 			     
 			    Auxinfopool_T auxinfopool,
 			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -1014,12 +1050,15 @@ solve_univdiagonal_auxinfo (bool *complete_sense_p, bool *complete_antisense_p,
 				  &pathstore->complete_sense_paths,&pathstore->complete_antisense_paths,
 				  
 				  univdiagonal,*auxinfo,queryseq,queryptr,querylength,
-				  mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-				  localdb_alloc,this,knownsplicing,knownindels,
+
+				  mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+				  novel_univdiags_alloc,novel_diagonals_alloc,
+				  localdb_alloc,localdb_nmismatches_allowed,
+
+				  this,knownsplicing,knownindels,
 				  query_compress,query_compress_fwd,query_compress_rev,
 				  /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
-				  /*chrhigh*/pathstore->chrhigh,
-				  plusp,genestrand,localdb_nmismatches_allowed,
+				  /*chrhigh*/pathstore->chrhigh,plusp,genestrand,
 				  /*paired_end_p*/true,first_read_p,intlistpool,
 				  uintlistpool,univcoordlistpool,listpool,pathpool,
 				  transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
@@ -1049,12 +1088,15 @@ solve_univdiagonal_auxinfo (bool *complete_sense_p, bool *complete_antisense_p,
 				  &pathstore->complete_sense_paths,&pathstore->complete_antisense_paths,
 				  
 				  univdiagonal,*auxinfo,queryseq,queryptr,querylength,
-				  mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-				  localdb_alloc,this,knownsplicing,knownindels,
+
+				  mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+				  novel_univdiags_alloc,novel_diagonals_alloc,
+				  localdb_alloc,localdb_nmismatches_allowed,
+
+				  this,knownsplicing,knownindels,
 				  query_compress,query_compress_fwd,query_compress_rev,
 				  /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,
-				  /*chrhigh*/pathstore->chrhigh,
-				  plusp,genestrand,localdb_nmismatches_allowed,
+				  /*chrhigh*/pathstore->chrhigh,plusp,genestrand,
 				  /*paired_end_p*/true,first_read_p,intlistpool,
 				  uintlistpool,univcoordlistpool,listpool,pathpool,
 				  transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
@@ -1926,11 +1968,13 @@ concordance_univdiagonals (bool *completeL_p, bool *completeH_p, int *found_scor
 			   Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			      
 			   int *mismatch_positions_alloc_L, int *mismatch_positions_alloc_H,
+			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			   int localdb_nmismatches_allowed,
+
 			   Compress_T queryL_compress, Compress_T queryL_compress_fwd, Compress_T queryL_compress_rev,
 			   Compress_T queryH_compress, Compress_T queryH_compress_fwd, Compress_T queryH_compress_rev,
-			   
-			   int localdb_nmismatches_allowed_L, int localdb_nmismatches_allowed_H, int genestrand,
+			   int sufficient_score_L, int sufficient_score_H, int genestrand,
 			     
 			   int nmismatches_filter_5, int nmismatches_filter_3,
 			   int mincoverage_filter_5, int mincoverage_filter_3,
@@ -2015,11 +2059,11 @@ concordance_univdiagonals (bool *completeL_p, bool *completeH_p, int *found_scor
 				   queryseqL,queryptrL,queryuc_ptr_L,queryrcL,querylengthL,
 				   thisL,knownsplicing,knownindels,
 				   
-				   mismatch_positions_alloc_L,
+				   mismatch_positions_alloc_L,streamspace_max_alloc,streamspace_alloc,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   queryL_compress,queryL_compress_fwd,queryL_compress_rev,
-				   
-				   localdb_nmismatches_allowed_L,genestrand,
+				   localdb_nmismatches_allowed,
+
+				   queryL_compress,queryL_compress_fwd,queryL_compress_rev,genestrand,
 				   auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
 				   hitlistpool,spliceendsgenL,plusp,L_first_read_p,/*lowp*/true,
@@ -2092,11 +2136,11 @@ concordance_univdiagonals (bool *completeL_p, bool *completeH_p, int *found_scor
 				   queryseqH,queryptrH,queryuc_ptr_H,queryrcH,querylengthH,
 				   thisH,knownsplicing,knownindels,
 
-				   mismatch_positions_alloc_H,
+				   mismatch_positions_alloc_H,streamspace_max_alloc,streamspace_alloc,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   queryH_compress,queryH_compress_fwd,queryH_compress_rev,
-
-				   localdb_nmismatches_allowed_H,genestrand,
+				   localdb_nmismatches_allowed,
+				   
+				   queryH_compress,queryH_compress_fwd,queryH_compress_rev,genestrand,
 				   auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
 				   hitlistpool,spliceendsgenH,plusp,H_first_read_p,/*lowp*/false,
@@ -2286,6 +2330,248 @@ single_read_gen_univdiagonals (Method_T *last_method, int *querystart, int *quer
 }
 
 
+#if 0
+static List_T
+paired_search_exact (bool *complete5_p, bool *complete3_p, int *found_score_paired,
+		     int *found_score_5, int *found_score_3,
+		     Method_T *last_method_5, Method_T *last_method_3,
+		     bool *any_imperfect_ends5_p, bool *any_imperfect_ends3_p,
+		  
+		     List_T *unextended_pathpairs, List_T pathpairs, T this5, T this3,
+		     
+		     Shortread_T queryseq5, Shortread_T queryseq3,
+		     char *queryuc_ptr_5, char *queryrc5, int querylength5,
+		     char *queryuc_ptr_3, char *queryrc3, int querylength3,
+		     Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+		     
+		     int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     int localdb_nmismatches_allowed,
+
+		     Compress_T query5_compress_fwd, Compress_T query5_compress_rev,
+		     Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
+		     
+		     int sufficient_score_5, int sufficient_score_3, int genestrand,
+		     
+		     int nmismatches_filter_5, int nmismatches_filter_3,
+		     int mincoverage_filter_5, int mincoverage_filter_3,
+
+		     EF64_T repetitive_ef64,
+		     Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
+		     Univdiagpool_T univdiagpool, Intlistpool_T intlistpool,
+		     Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+		     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		     Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+		     Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3,
+		     Method_T method_goal, Pass_T pass) {
+  
+  int kmer5_querystart, kmer5_queryend, kmer3_querystart, kmer3_queryend;
+
+  Chrpos_T slop;
+  Univcoord_T *_univdiagonals5_gplus = NULL, *_univdiagonals5_gminus = NULL, *_univdiagonals3_gplus = NULL, *_univdiagonals3_gminus = NULL;
+  Auxinfo_T *auxinfo5_gplus = NULL, *auxinfo5_gminus = NULL, *auxinfo3_gplus = NULL, *auxinfo3_gminus = NULL;
+  Pathstore_T *pathstores5_gplus = NULL, *pathstores5_gminus = NULL, *pathstores3_gplus = NULL, *pathstores3_gminus = NULL;
+  int nunivdiagonals5_gplus = 0, nunivdiagonals5_gminus = 0, nunivdiagonals3_gplus = 0, nunivdiagonals3_gminus = 0;
+  int nnovel5_gplus, nnovel5_gminus, nnovel3_gplus, nnovel3_gminus;
+
+  /* int ndense5_gplus, ndense3_gplus, ndense5_gminus, ndense3_gminus; */
+
+
+  /* Actually want to provide pair distance */
+  debug(printf("\n>>Entered paired_search_exact with found scores %d and %d, methods %s and %s, nunivdiagonals %d,%d and %d,%d\n",
+	       *found_score_5,*found_score_3,Method_string(*last_method_5),Method_string(*last_method_3),
+	       this5->all_nunivdiagonals_gplus,this5->all_nunivdiagonals_gminus,
+	       this3->all_nunivdiagonals_gplus,this3->all_nunivdiagonals_gminus));
+	       
+  single_read_gen_univdiagonals(&(*last_method_5),&kmer5_querystart,&kmer5_queryend,
+				&_univdiagonals5_gplus,&_univdiagonals5_gminus,
+				&auxinfo5_gplus,&auxinfo5_gminus,
+				&pathstores5_gplus,&pathstores5_gminus,
+				&nunivdiagonals5_gplus,&nunivdiagonals5_gminus,
+				this5,genestrand,query5_compress_fwd,query5_compress_rev,
+				querylength5,repetitive_ef64,
+				auxinfopool,pathstorepool,
+				univdiagpool,univcoordlistpool,listpool,/*first_read_p*/true);
+
+  single_read_gen_univdiagonals(&(*last_method_3),&kmer3_querystart,&kmer3_queryend,
+				&_univdiagonals3_gplus,&_univdiagonals3_gminus,
+				&auxinfo3_gplus,&auxinfo3_gminus,
+				&pathstores3_gplus,&pathstores3_gminus,
+				&nunivdiagonals3_gplus,&nunivdiagonals3_gminus,
+				this3,genestrand,query3_compress_fwd,query3_compress_rev,
+				querylength3,repetitive_ef64,
+				auxinfopool,pathstorepool,
+				univdiagpool,univcoordlistpool,listpool,/*first_read_p*/false);
+
+#ifdef DEBUG
+  printf("After methods %s and %s, have %d and %d plus univdiagonals, %d and %d minus univdiagonals\n",
+	 Method_string(*last_method_5),Method_string(*last_method_3),
+	 nunivdiagonals5_gplus,nunivdiagonals3_gplus,
+	 nunivdiagonals5_gminus,nunivdiagonals3_gminus);
+
+  printf("5' plus:");
+  for (int i = 0; i < nunivdiagonals5_gplus; i++) {
+    printf(" %u %s",_univdiagonals5_gplus[i],Method_string(auxinfo5_gplus[i]->method));
+  }
+  printf("\n");
+
+  printf("3' plus:");
+  for (int i = 0; i < nunivdiagonals3_gplus; i++) {
+    printf(" %u %s",_univdiagonals3_gplus[i],Method_string(auxinfo3_gplus[i]->method));
+  }
+  printf("\n");
+    
+
+  printf("5' minus:");
+  for (int i = 0; i < nunivdiagonals5_gminus; i++) {
+    printf(" %u %s",_univdiagonals5_gminus[i],Method_string(auxinfo5_gminus[i]->method));
+  }
+  printf("\n");
+
+  printf("3' minus:");
+  for (int i = 0; i < nunivdiagonals3_gminus; i++) {
+    printf(" %u %s",_univdiagonals3_gminus[i],Method_string(auxinfo3_gminus[i]->method));
+  }
+  printf("\n");
+#endif
+
+
+  /* Identify novel univdiagonals, so we can reuse results from the old Auxinfo_T objects */
+  nnovel5_gplus = Path_setdiff_univdiagonals_auxinfo(this5->all_univdiagonals_gplus,this5->all_auxinfo_gplus,
+						     this5->all_pathstores_gplus,this5->all_nunivdiagonals_gplus,
+						     _univdiagonals5_gplus,auxinfo5_gplus,pathstores5_gplus,
+						     nunivdiagonals5_gplus,pathstorepool,intlistpool);
+  nnovel5_gminus = Path_setdiff_univdiagonals_auxinfo(this5->all_univdiagonals_gminus,this5->all_auxinfo_gminus,
+						      this5->all_pathstores_gminus,this5->all_nunivdiagonals_gminus,
+						      _univdiagonals5_gminus,auxinfo5_gminus,pathstores5_gminus,
+						      nunivdiagonals5_gminus,pathstorepool,intlistpool);
+
+  nnovel3_gplus = Path_setdiff_univdiagonals_auxinfo(this3->all_univdiagonals_gplus,this3->all_auxinfo_gplus,
+						     this3->all_pathstores_gplus,this3->all_nunivdiagonals_gplus,
+						     _univdiagonals3_gplus,auxinfo3_gplus,pathstores3_gplus,
+						     nunivdiagonals3_gplus,pathstorepool,intlistpool);
+  nnovel3_gminus = Path_setdiff_univdiagonals_auxinfo(this3->all_univdiagonals_gminus,this3->all_auxinfo_gminus,
+						      this3->all_pathstores_gminus,this3->all_nunivdiagonals_gminus,
+						      _univdiagonals3_gminus,auxinfo3_gminus,pathstores3_gminus,
+						      nunivdiagonals3_gminus,pathstorepool,intlistpool);
+
+#ifdef CHECK_ASSERTIONS
+  int ncases = 0;
+  if (nnovel5_gplus > 0 && nnovel3_gplus > 0) {
+    ncases++;
+  } else if (nnovel5_gplus > 0 && this3->all_nunivdiagonals_gplus > 0) {
+    ncases++;
+  } else if (nnovel3_gplus > 0 && this5->all_nunivdiagonals_gplus > 0) {
+    ncases++;
+  }
+  assert(ncases <= 1);
+
+  ncases = 0;
+  if (nnovel5_gminus > 0 && nnovel3_gminus > 0) {
+    ncases++;
+  } else if (nnovel5_gminus > 0 && this3->all_nunivdiagonals_gminus > 0) {
+    ncases++;
+  } else if (nnovel3_gminus > 0 && this5->all_nunivdiagonals_gminus > 0) {
+    ncases++;
+  }
+  assert(ncases <= 1);
+#endif
+
+
+#if 0
+  if (*last_method_5 == KMER_EXACT1 && *last_method_3 == KMER_EXACT1) {
+    slop = max_insertlength;
+  } else {
+    slop = concordance_distance;
+  }
+#else
+  slop = concordance_distance;
+#endif
+
+  /* Novel5 vs Novel3 plus */
+  pathpairs = concordance_univdiagonals(&(*complete5_p),&(*complete3_p),
+					&(*found_score_paired),&(*found_score_5),&(*found_score_3),
+					&(*unextended_pathpairs),pathpairs,/*stage1L*/this5,/*stage1H*/this3,
+					/*L*/_univdiagonals5_gplus,auxinfo5_gplus,pathstores5_gplus,nnovel5_gplus,
+					/*H*/_univdiagonals3_gplus,auxinfo3_gplus,pathstores3_gplus,nnovel3_gplus,
+
+					queryseq5,queryseq3,
+					/*queryptrL*/queryuc_ptr_5,queryuc_ptr_5,queryrc5,querylength5,
+					/*queryptrH*/queryuc_ptr_3,queryuc_ptr_3,queryrc3,querylength3,
+					knownsplicing,knownindels,
+			      
+					mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					streamspace_max_alloc,streamspace_alloc,
+					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
+
+					/*queryL_compress*/query5_compress_fwd,query5_compress_fwd,query5_compress_rev,
+					/*queryH_compress*/query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
+					sufficient_score_5,sufficient_score_3,genestrand,
+					
+					nmismatches_filter_5,nmismatches_filter_3,
+					mincoverage_filter_5,mincoverage_filter_3,
+					
+					auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
+					listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+					/*L*/spliceendsgen5,/*H*/spliceendsgen3,/*plusp*/true,
+					/*L_first_read_p*/true,/*H_first_read_p*/false);
+  
+  /* minus */
+  pathpairs = concordance_univdiagonals(&(*complete3_p),&(*complete5_p),
+					&(*found_score_paired),&(*found_score_3),&(*found_score_5),
+					&(*unextended_pathpairs),pathpairs,/*stage1L*/this3,/*stage1H*/this5,
+					/*L*/_univdiagonals3_gminus,auxinfo3_gminus,pathstores3_gminus,nnovel3_gminus,
+					/*H*/_univdiagonals5_gminus,auxinfo5_gminus,pathstores5_gminus,nnovel5_gminus,
+					
+					queryseq3,queryseq5,
+					/*queryptrL*/queryrc3,queryuc_ptr_3,queryrc3,querylength3,
+					/*queryptrH*/queryrc5,queryuc_ptr_5,queryrc5,querylength5,
+					knownsplicing,knownindels,
+					
+					mismatch_positions_alloc_3,mismatch_positions_alloc_5,
+					streamspace_max_alloc,streamspace_alloc,
+					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
+					
+					/*queryL_compress*/query3_compress_rev,query3_compress_fwd,query3_compress_rev,
+					/*queryH_compress*/query5_compress_rev,query5_compress_fwd,query5_compress_rev,
+					sufficient_score_3,sufficient_score_5,genestrand,
+					
+					nmismatches_filter_5,nmismatches_filter_3,
+					mincoverage_filter_5,mincoverage_filter_3,
+					
+					auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
+					listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+					/*L*/spliceendsgen3,/*H*/spliceendsgen5,/*plusp*/false,
+					/*L_first_read_p*/false,/*H_first_read_p*/true);
+
+  /* Always merge information, since we may return to this procedure even if pathpairs is not NULL */
+  Path_merge_univdiagonals_auxinfo(&this5->all_univdiagonals_gplus,&this5->all_auxinfo_gplus,
+				   &this5->all_pathstores_gplus,&this5->all_nunivdiagonals_gplus,
+				   _univdiagonals5_gplus,auxinfo5_gplus,pathstores5_gplus,nnovel5_gplus,
+				   pathstorepool,intlistpool);
+  Path_merge_univdiagonals_auxinfo(&this5->all_univdiagonals_gminus,&this5->all_auxinfo_gminus,
+				   &this5->all_pathstores_gminus,&this5->all_nunivdiagonals_gminus,
+				   _univdiagonals5_gminus,auxinfo5_gminus,pathstores5_gminus,nnovel5_gminus,
+				   pathstorepool,intlistpool);
+  
+  Path_merge_univdiagonals_auxinfo(&this3->all_univdiagonals_gplus,&this3->all_auxinfo_gplus,
+				   &this3->all_pathstores_gplus,&this3->all_nunivdiagonals_gplus,
+				   _univdiagonals3_gplus,auxinfo3_gplus,pathstores3_gplus,nnovel3_gplus,
+				   pathstorepool,intlistpool);
+  Path_merge_univdiagonals_auxinfo(&this3->all_univdiagonals_gminus,&this3->all_auxinfo_gminus,
+				   &this3->all_pathstores_gminus,&this3->all_nunivdiagonals_gminus,
+				   _univdiagonals3_gminus,auxinfo3_gminus,pathstores3_gminus,nnovel3_gminus,
+				   pathstorepool,intlistpool);
+
+  debug(printf("paired_search_exact returning %d pathpairs\n",List_length(pathpairs)));
+
+  return pathpairs;
+}
+#endif
+
+
+
 /* Follows paired_search_trdiagonals */
 static List_T
 paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_score_paired,
@@ -2301,11 +2587,14 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 			     Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 			      
 			     int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
+
+			     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			     int localdb_nmismatches_allowed,
+
 			     Compress_T query5_compress_fwd, Compress_T query5_compress_rev,
 			     Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
-	      
-			     int nmismatches_allowed_5, int nmismatches_allowed_3, int genestrand,
+			     int sufficient_score_5, int sufficient_score_3, int genestrand,
 			     
 			     int nmismatches_filter_5, int nmismatches_filter_3,
 			     int mincoverage_filter_5, int mincoverage_filter_3,
@@ -2316,9 +2605,10 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 			     Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 			     Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
-			     Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3) {
+			     Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3,
+			     Method_T method_goal) {
   
-  Method_T method_goal = SEGMENT1;
+  /* Method_T method_goal = SEGMENT1; */
   int kmer5_querystart, kmer5_queryend, kmer3_querystart, kmer3_queryend;
 
   Univcoord_T *_univdiagonals5_gplus = NULL, *_univdiagonals5_gminus = NULL, *_univdiagonals3_gplus = NULL, *_univdiagonals3_gminus = NULL;
@@ -2508,11 +2798,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 			      
 					  mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+					  
 					  /*queryL_compress*/query5_compress_fwd,query5_compress_fwd,query5_compress_rev,
 					  /*queryH_compress*/query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
-			   
-					  nmismatches_allowed_5,nmismatches_allowed_3,genestrand,
+					  sufficient_score_5,sufficient_score_3,genestrand,
 			     
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2535,11 +2827,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 					  
 					  mismatch_positions_alloc_3,mismatch_positions_alloc_5,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+					  
 					  /*queryL_compress*/query3_compress_rev,query3_compress_fwd,query3_compress_rev,
 					  /*queryH_compress*/query5_compress_rev,query5_compress_fwd,query5_compress_rev,
-					  
-					  nmismatches_allowed_3,nmismatches_allowed_5,genestrand,
+					  sufficient_score_3,sufficient_score_5,genestrand,
 					  
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2564,11 +2858,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 					  
 					  mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+					  
 					  /*queryL_compress*/query5_compress_fwd,query5_compress_fwd,query5_compress_rev,
 					  /*queryH_compress*/query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
-					  
-					  nmismatches_allowed_5,nmismatches_allowed_3,genestrand,
+					  sufficient_score_5,sufficient_score_3,genestrand,
 					  
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2592,11 +2888,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 					  
 					  mismatch_positions_alloc_3,mismatch_positions_alloc_5,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+
 					  /*queryL_compress*/query3_compress_rev,query3_compress_fwd,query3_compress_rev,
 					  /*queryH_compress*/query5_compress_rev,query5_compress_fwd,query5_compress_rev,
-					  
-					  nmismatches_allowed_3,nmismatches_allowed_5,genestrand,
+					  sufficient_score_3,sufficient_score_5,genestrand,
 					  
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2620,11 +2918,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 					  
 					  mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+					  
 					  /*queryL_compress*/query5_compress_fwd,query5_compress_fwd,query5_compress_rev,
 					  /*queryH_compress*/query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
-					  
-					  nmismatches_allowed_5,nmismatches_allowed_3,genestrand,
+					  sufficient_score_5,sufficient_score_3,genestrand,
 					  
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2648,11 +2948,13 @@ paired_search_univdiagonals (bool *complete5_p, bool *complete3_p, int *found_sc
 					  knownsplicing,knownindels,
 					  
 					  mismatch_positions_alloc_3,mismatch_positions_alloc_5,
+					  streamspace_max_alloc,streamspace_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_nmismatches_allowed,
+
 					  /*queryL_compress*/query3_compress_rev,query3_compress_fwd,query3_compress_rev,
 					  /*queryH_compress*/query5_compress_rev,query5_compress_fwd,query5_compress_rev,
-					  
-					  nmismatches_allowed_3,nmismatches_allowed_5,genestrand,
+					  sufficient_score_3,sufficient_score_5,genestrand,
 					  
 					  nmismatches_filter_5,nmismatches_filter_3,
 					  mincoverage_filter_5,mincoverage_filter_3,
@@ -2882,6 +3184,10 @@ create_univdiagonals_auxinfo_from_tr (int *found_score, Stage1_T this, Knownspli
 				      List_T sense_trpaths, List_T antisense_trpaths,
 				      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
+				      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+				      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+				      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 				      Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 				      Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 				      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -2908,6 +3214,11 @@ create_univdiagonals_auxinfo_from_tr (int *found_score, Stage1_T this, Knownspli
 		       sense_trpaths,first_read_p,
 		       queryseq,querylength,this,knownsplicing,
 		       query_compress_fwd,query_compress_rev,
+
+		       streamspace_max_alloc,streamspace_alloc,
+		       novel_univdiags_alloc,novel_diagonals_alloc,
+		       localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 		       intlistpool,uintlistpool,univcoordlistpool,listpool,
 		       pathpool,vectorpool,transcriptpool,hitlistpool,
 		       /*crossover_sense_p*/true);
@@ -2920,6 +3231,11 @@ create_univdiagonals_auxinfo_from_tr (int *found_score, Stage1_T this, Knownspli
 			   antisense_trpaths,first_read_p,
 			   queryseq,querylength,this,knownsplicing,
 			   query_compress_fwd,query_compress_rev,
+
+			   streamspace_max_alloc,streamspace_alloc,
+			   novel_univdiags_alloc,novel_diagonals_alloc,
+			   localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 			   intlistpool,uintlistpool,univcoordlistpool,listpool,
 			   pathpool,vectorpool,transcriptpool,hitlistpool,
 			   /*crossover_sense_p*/true);
@@ -2951,7 +3267,7 @@ create_univdiagonals_auxinfo_from_tr (int *found_score, Stage1_T this, Knownspli
 
   /* Build plus */
   if ((npaths = sense_npaths_gplus + antisense_npaths_gplus) > 0) {
-    MALLOC_ALIGN(this->all_univdiagonals_gplus,npaths*sizeof(Univcoord_T));
+    this->all_univdiagonals_gplus = (Univcoord_T *) MALLOC_ALIGN(npaths*sizeof(Univcoord_T));
     this->all_auxinfo_gplus = (Auxinfo_T *) MALLOC(npaths*sizeof(Auxinfo_T));
     this->all_pathstores_gplus = (Pathstore_T *) MALLOC(npaths*sizeof(Pathstore_T));
 
@@ -3088,7 +3404,7 @@ create_univdiagonals_auxinfo_from_tr (int *found_score, Stage1_T this, Knownspli
 
   /* Build minus */
   if ((npaths = sense_npaths_gminus + antisense_npaths_gminus) > 0) {
-    MALLOC_ALIGN(this->all_univdiagonals_gminus,npaths*sizeof(Univcoord_T));
+    this->all_univdiagonals_gminus = (Univcoord_T *) MALLOC_ALIGN(npaths*sizeof(Univcoord_T));
     this->all_auxinfo_gminus = (Auxinfo_T *) MALLOC(npaths*sizeof(Auxinfo_T));
     this->all_pathstores_gminus = (Pathstore_T *) MALLOC(npaths*sizeof(Pathstore_T));
 
@@ -3249,6 +3565,10 @@ paired_search_tr (int *found_score_paired, int *found_score_5, int *found_score_
 		  int nmismatches_filter_5, int nmismatches_filter_3,
 		  int mincoverage_filter_5, int mincoverage_filter_3,
 
+		  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+		  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+
 		  Trdiagpool_T trdiagpool, Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		  Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
@@ -3288,6 +3608,11 @@ here */
 					       
 					       nmismatches_filter_5,nmismatches_filter_3,
 					       mincoverage_filter_5,mincoverage_filter_3,
+					       
+					       streamspace_max_alloc,streamspace_alloc,
+					       novel_univdiags_alloc,novel_diagonals_alloc,
+					       localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 					       intlistpool,uintlistpool,univcoordlistpool,
 					       listpool,trpathpool,pathpool,transcriptpool,vectorpool,
 					       hitlistpool,/*method_goal*/TR_PREVALENT)) != NULL) {
@@ -3319,6 +3644,11 @@ here */
 						    query3_compress_fwd,query3_compress_rev,
 						    nmismatches_filter_5,nmismatches_filter_3,
 						    mincoverage_filter_5,mincoverage_filter_3,
+
+						    streamspace_max_alloc,streamspace_alloc,
+						    novel_univdiags_alloc,novel_diagonals_alloc,
+						    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 						    genestrand,trdiagpool,intlistpool,uintlistpool,univcoordlistpool,
 						    listpool,trpathpool,pathpool,transcriptpool,
 						    vectorpool,hitlistpool)) != NULL) {
@@ -3338,6 +3668,11 @@ here */
 						    query3_compress_fwd,query3_compress_rev,
 						    nmismatches_filter_5,nmismatches_filter_3,
 						    mincoverage_filter_5,mincoverage_filter_3,
+
+						    streamspace_max_alloc,streamspace_alloc,
+						    novel_univdiags_alloc,novel_diagonals_alloc,
+						    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 						    genestrand,trdiagpool,intlistpool,uintlistpool,univcoordlistpool,
 						    listpool,trpathpool,pathpool,transcriptpool,
 						    vectorpool,hitlistpool)) != NULL) {
@@ -3357,6 +3692,11 @@ here */
 						    query3_compress_fwd,query3_compress_rev,
 						    nmismatches_filter_5,nmismatches_filter_3,
 						    mincoverage_filter_5,mincoverage_filter_3,
+
+						    streamspace_max_alloc,streamspace_alloc,
+						    novel_univdiags_alloc,novel_diagonals_alloc,
+						    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 						    genestrand,trdiagpool,intlistpool,uintlistpool,univcoordlistpool,
 						    listpool,trpathpool,pathpool,transcriptpool,
 						    vectorpool,hitlistpool)) != NULL) {
@@ -3376,6 +3716,11 @@ here */
 						    query3_compress_fwd,query3_compress_rev,
 						    nmismatches_filter_5,nmismatches_filter_3,
 						    mincoverage_filter_5,mincoverage_filter_3,
+
+						    streamspace_max_alloc,streamspace_alloc,
+						    novel_univdiags_alloc,novel_diagonals_alloc,
+						    localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 						    genestrand,trdiagpool,intlistpool,uintlistpool,univcoordlistpool,
 						    listpool,trpathpool,pathpool,transcriptpool,
 						    vectorpool,hitlistpool)) != NULL) {
@@ -3397,6 +3742,11 @@ here */
 				       queryseq5,querylength5,
 				       this5->sense_trpaths,this5->antisense_trpaths,
 				       query5_compress_fwd,query5_compress_rev,
+
+				       streamspace_max_alloc,streamspace_alloc,
+				       novel_univdiags_alloc,novel_diagonals_alloc,
+				       localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				       auxinfopool,pathstorepool,intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 				       /*first_read_p*/true);
@@ -3405,6 +3755,11 @@ here */
 				       queryseq3,querylength3,
 				       this3->sense_trpaths,this3->antisense_trpaths,
 				       query3_compress_fwd,query3_compress_rev,
+
+				       streamspace_max_alloc,streamspace_alloc,
+				       novel_univdiags_alloc,novel_diagonals_alloc,
+				       localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				       auxinfopool,pathstorepool,intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 				       /*first_read_p*/false);
@@ -3661,15 +4016,16 @@ consolidate_results (int *found_score_5, int *found_score_3, Pairtype_T *final_p
 		     char *queryuc_ptr_3, char *queryrc3, int querylength3,
 
 		     Knownsplicing_T knownsplicing, Knownindels_T knownindels,
-		     Univdiag_T *novel_univdiags_alloc,Univcoord_T *novel_diagonals_alloc,
-		     unsigned short *localdb_alloc, T this5, T this3,
 
 		     int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
+		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     Univdiag_T *novel_univdiags_alloc,Univcoord_T *novel_diagonals_alloc,
+		     unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
 
+		     T this5, T this3,
 		     Compress_T query5_compress_fwd, Compress_T query5_compress_rev,
 		     Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
 
-		     int nmismatches_allowed_5, int nmismatches_allowed_3,
 		     int nmismatches_filter_5, int nmismatches_filter_3,
 		     int mincoverage_filter_5, int mincoverage_filter_3,
 		
@@ -3766,11 +4122,12 @@ consolidate_results (int *found_score_5, int *found_score_3, Pairtype_T *final_p
 
     } else if ((complete_paths = Path_extend(&(*found_score_5),&unextended_paths5,
 					     /*original_path*/path,queryseq5,queryptr,querylength5,
-					     mismatch_positions_alloc_5,novel_univdiags_alloc,
-					     novel_diagonals_alloc,localdb_alloc,
+					     this5->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+					     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					     localdb_nmismatches_allowed,
+
 					     this5,knownsplicing,knownindels,
-					     query_compress,query5_compress_fwd,query5_compress_rev,
-					     /*genestrand*/0,nmismatches_allowed_5,
+					     query_compress,query5_compress_fwd,query5_compress_rev,/*genestrand*/0,
 					     /*paired_end_p*/false,/*lowp*/true,
 					     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 					     univdiagpool,vectorpool,hitlistpool,spliceendsgen5,
@@ -3812,11 +4169,12 @@ consolidate_results (int *found_score_5, int *found_score_3, Pairtype_T *final_p
 
     } else if ((complete_paths = Path_extend(&(*found_score_3),&unextended_paths3,
 					     /*original_path*/path,queryseq3,queryptr,querylength3,
-					     mismatch_positions_alloc_3,novel_univdiags_alloc,
-					     novel_diagonals_alloc,localdb_alloc,
+					     this3->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+					     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					     localdb_nmismatches_allowed,
+
 					     this3,knownsplicing,knownindels,
-					     query_compress,query3_compress_fwd,query3_compress_rev,
-					     /*genestrand*/0,nmismatches_allowed_3,
+					     query_compress,query3_compress_fwd,query3_compress_rev,/*genestrand*/0,
 					     /*paired_end_p*/false,/*lowp*/true,
 					     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
 					     univdiagpool,vectorpool,hitlistpool,spliceendsgen3,
@@ -3962,11 +4320,12 @@ consolidate_results (int *found_score_5, int *found_score_3, Pairtype_T *final_p
 					   queryuc_ptr_5,queryrc5,queryuc_ptr_3,queryrc3,
 					   /*quality_string_5*/Shortread_quality_string(queryseq5),
 					   /*quality_string_3*/Shortread_quality_string(queryseq3),
-					   mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					   this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+					   streamspace_max_alloc,streamspace_alloc,
 					   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					   knownsplicing,knownindels,
+					   localdb_nmismatches_allowed,
 
-					   nmismatches_allowed_5,nmismatches_allowed_3,
+					   knownsplicing,knownindels,
 					   nmismatches_filter_5,nmismatches_filter_3,
 					   mincoverage_filter_5,mincoverage_filter_3,
 					   querylength5,querylength3,
@@ -4061,10 +4420,11 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 			  Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
 			  
 			  int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
+			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			  T this5, T this3, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+			  int localdb_nmismatches_allowed,
 
-			  int nmismatches_allowed_5, int nmismatches_allowed_3,
+			  T this5, T this3, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 
 			  int nmismatches_filter_5, int nmismatches_filter_3,
 			  int mincoverage_filter_5, int mincoverage_filter_3,
@@ -4176,10 +4536,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 					    univdiagonal5,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					    /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/index1part);
 
-	if (univdiagonal5 < (Univcoord_T) querylength5) {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,0,univdiagonal5);
+	if (univdiagonal5 + qstart5 < (Univcoord_T) querylength5) {
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/0,/*high_univcoord*/univdiagonal5 - querylength5 + qend5);
 	} else {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,univdiagonal5 - querylength5,univdiagonal5);
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/univdiagonal5 - querylength5 + qstart5,
+			       /*high_univcoord*/univdiagonal5 - querylength5 + qend5);
 	}
 	auxinfo5 = Auxinfo_new(EXHAUSTIVE,qstart5,qend5,auxinfopool);
 	pathstore5 = Pathstore_new(pathstorepool);
@@ -4192,10 +4555,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 				     /*query_compress*/query5_compress_fwd,
 				     query5_compress_fwd,query5_compress_rev,
 				     /*plusp*/true,querylength5,mismatch_positions_alloc_5,
+
+				     streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+
 				     this5,knownsplicing,knownindels,
-				     nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
-				     chrnum,chroffset,chrhigh,
+				     /*paired_end_p*/true,/*first_read_p*/true,chrnum,chroffset,chrhigh,
 				     intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen5,/*method*/EXHAUSTIVE,/*find_splices_p*/true);
@@ -4210,10 +4576,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 					    univdiagonal3,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					    /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/index1part);
 
-	if (univdiagonal3 < (Univcoord_T) querylength3) {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,0,univdiagonal3);
+	if (univdiagonal3 + qstart3 < (Univcoord_T) querylength3) {
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/0,/*high_univcoord*/univdiagonal3 - querylength3 + qend3);
 	} else {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,univdiagonal3 - querylength3,univdiagonal3);
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/univdiagonal3 - querylength3 + qstart3,
+			       /*high_univcoord*/univdiagonal3 - querylength3 + qend3);
 	}
 	auxinfo3 = Auxinfo_new(EXHAUSTIVE,qstart3,qend3,auxinfopool);
 	pathstore3 = Pathstore_new(pathstorepool);
@@ -4226,10 +4595,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 				     /*query_compress*/query3_compress_fwd,
 				     query3_compress_fwd,query3_compress_rev,
 				     /*plusp*/true,querylength3,mismatch_positions_alloc_3,
+
+				     streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+				     
 				     this3,knownsplicing,knownindels,
-				     nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
-				     chrnum,chroffset,chrhigh,
+				     /*paired_end_p*/true,/*first_read_p*/false,chrnum,chroffset,chrhigh,
 				     intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen3,/*method*/EXHAUSTIVE,/*find_splices_p*/true);
@@ -4273,13 +4645,16 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 					    univdiagonal3,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					    /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/index1part);
 
+	if (univdiagonal3 + qstart3 < (Univcoord_T) querylength3) {
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/0,/*high_univcoord*/univdiagonal3 - querylength3 + qend3);
+	} else {
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/univdiagonal3 - querylength3 + qstart3,
+			       /*high_univcoord*/univdiagonal3 - querylength3 + qend3);
+	}
 	auxinfo3 = Auxinfo_new(EXHAUSTIVE,qstart3,qend3,auxinfopool);
 	pathstore3 = Pathstore_new(pathstorepool);
-	if (univdiagonal3 < (Univcoord_T) querylength3) {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,0,univdiagonal3);
-	} else {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,univdiagonal3 - querylength3,univdiagonal3);
-	}
 	Path_solve_from_univdiagonal(&(*found_score_3),
 				     
 				     &pathstore3->unextended_sense_paths,&pathstore3->unextended_antisense_paths,
@@ -4289,10 +4664,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 				     /*query_compress*/query3_compress_rev,
 				     query3_compress_fwd,query3_compress_rev,
 				     /*plusp*/false,querylength3,mismatch_positions_alloc_3,
+
+				     streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+				     
 				     this3,knownsplicing,knownindels,
-				     nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
-				     chrnum,chroffset,chrhigh,
+				     /*paired_end_p*/true,/*first_read_p*/false,chrnum,chroffset,chrhigh,
 				     intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen3,/*method*/EXHAUSTIVE,/*find_splices_p*/true);
@@ -4307,10 +4685,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 					    univdiagonal5,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					    /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/index1part);
 
-	if (univdiagonal5 < (Univcoord_T) querylength5) {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,0,univdiagonal5);
+	if (univdiagonal5 + qstart5 < (Univcoord_T) querylength5) {
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/0,/*high_univcoord*/univdiagonal5 - querylength5 + qend5);
 	} else {
-	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,univdiagonal5 - querylength5,univdiagonal5);
+	  chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
+			       /*low_univcoord*/univdiagonal5 - querylength5 + qstart5,
+			       /*high_univcoord*/univdiagonal5 - querylength5 + qend5);
 	}
 	auxinfo5 = Auxinfo_new(EXHAUSTIVE,qstart5,qend5,auxinfopool);
 	pathstore5 = Pathstore_new(pathstorepool);
@@ -4323,10 +4704,13 @@ paired_search_exhaustive (int *found_score_paired, int *found_score_5, int *foun
 				     /*query_compress*/query5_compress_rev,
 				     query5_compress_fwd,query5_compress_rev,
 				     /*plusp*/false,querylength5,mismatch_positions_alloc_5,
+
+				     streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+				     
 				     this5,knownsplicing,knownindels,
-				     nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
-				     chrnum,chroffset,chrhigh,
+				     /*paired_end_p*/true,/*first_read_p*/true,chrnum,chroffset,chrhigh,
 				     intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen5,/*method*/EXHAUSTIVE,/*find_splices_p*/true);
@@ -4452,12 +4836,13 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 	      char *queryuc_ptr_3, char *queryrc3, int querylength3,
 	      Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 		  
-	      int *mismatch_positions_alloc_3, Univdiag_T *novel_univdiags_alloc,
-	      Univcoord_T *novel_diagonals_alloc,
-	      unsigned short *localdb_alloc, T this5, T this3,
-		  
+	      int *mismatch_positions_alloc_3,
+	      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+	      unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
+	      T this5, T this3,
 	      Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
-	      int nmismatches_allowed_3,
 		  
 	      int nmismatches_filter_5, int nmismatches_filter_3,
 	      int mincoverage_filter_5, int mincoverage_filter_3,
@@ -4605,23 +4990,35 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 		   querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE && 
 		   (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							    novel_diagonals_alloc,localdb_alloc,this3,
+							    streamspace_max_alloc,streamspace_alloc,
 							    /*queryptr*/queryuc_ptr_3,querylength3,
 							    low_univdiagonal,high_univdiagonal,
 							    /*query_compress*/query3_compress_fwd,
 							    /*plusp*/true,/*genestrand*/0,
-							    genomebits,nmismatches_allowed_3)) != 0) {
+							    genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					      univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					      /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					     univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					     /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(1) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(1) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(1) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qstart >= pathstore->chrhigh + querylength3) { /* Upstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_3),
 				     
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -4631,9 +5028,12 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 				       /*query_compress*/query3_compress_fwd,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/true,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -4686,23 +5086,35 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 		   querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							    novel_diagonals_alloc,localdb_alloc,this3,
+							    streamspace_max_alloc,streamspace_alloc,
 							    /*queryptr*/queryuc_ptr_3,querylength3,
 							    low_univdiagonal,high_univdiagonal,
 							    /*query_compress*/query3_compress_fwd,
 							    /*plusp*/true,/*genestrand*/0,
-							    genomebits,nmismatches_allowed_3)) != 0) {
+							    genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					      univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					      /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					     univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					     /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(2) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(2) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(2) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qstart >= pathstore->chrhigh + querylength3) { /* Upstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_3),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -4712,9 +5124,12 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 				       /*query_compress*/query3_compress_fwd,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/true,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+				       
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -4781,23 +5196,35 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 		   querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							     novel_diagonals_alloc,localdb_alloc,this3,
+							     streamspace_max_alloc,streamspace_alloc,
 							     /*queryptr*/queryrc3,querylength3,
 							     low_univdiagonal,high_univdiagonal,
 							     /*query_compress*/query3_compress_rev,
 							     /*plusp*/false,/*genestrand*/0,
-							     genomebits,nmismatches_allowed_3)) != 0) {
+							     genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					      univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					      /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					     univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					     /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(3) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(3) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(3) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 	
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qend < pathstore->chroffset + querylength3) { /* Downstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_3),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -4807,9 +5234,12 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 				       /*query_compress*/query3_compress_rev,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/false,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+				       
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -4862,23 +5292,35 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 		   querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							     novel_diagonals_alloc,localdb_alloc,this3,
+							     streamspace_max_alloc,streamspace_alloc,
 							     /*queryptr*/queryrc3,querylength3,
 							     low_univdiagonal,high_univdiagonal,
 							     /*query_compress*/query3_compress_rev,
 							     /*plusp*/false,/*genestrand*/0,
-							     genomebits,nmismatches_allowed_3)) != 0) {
+							     genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					      univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					      /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					     univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					     /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(4) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(4) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(4) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 	
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qend < pathstore->chroffset + querylength3) { /* Downstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_3),
 				     
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -4888,9 +5330,12 @@ paths5_mates (int *found_score_paired, int *found_score_3,
 				       /*query_compress*/query3_compress_rev,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/false,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+				       
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -4929,12 +5374,14 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 	      char *queryuc_ptr_5, char *queryrc5, int querylength5,
 	      Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 		  
-	      int *mismatch_positions_alloc_5, Univdiag_T *novel_univdiags_alloc,
-	      Univcoord_T *novel_diagonals_alloc,
-	      unsigned short *localdb_alloc, T this5, T this3,
-		  
+	      int *mismatch_positions_alloc_5,
+	      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+	      unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
+
+	      T this5, T this3,
 	      Compress_T query5_compress_fwd, Compress_T query5_compress_rev,
-	      int nmismatches_allowed_5,
 		  
 	      int nmismatches_filter_5, int nmismatches_filter_3,
 	      int mincoverage_filter_5, int mincoverage_filter_3,
@@ -5081,23 +5528,35 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 		   querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE && 
 		   (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							     novel_diagonals_alloc,localdb_alloc,this5,
+							     streamspace_max_alloc,streamspace_alloc,
 							     /*queryptr*/queryuc_ptr_5,querylength5,
 							     low_univdiagonal,high_univdiagonal,
 							     /*query_compress*/query5_compress_fwd,
 							     /*plusp*/true,/*genestrand*/0,
-							     genomebits,nmismatches_allowed_5)) != 0) {
+							     genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					      univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					      /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					     univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					     /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(5) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(5) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(5) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 	
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qend < pathstore->chroffset + querylength5) { /* Downstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_5),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -5107,9 +5566,12 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 				       /*query_compress*/query5_compress_fwd,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/true,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+				       
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5162,23 +5624,35 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 		   querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							     novel_diagonals_alloc,localdb_alloc,this5,
+							     streamspace_max_alloc,streamspace_alloc,
 							     /*queryptr*/queryuc_ptr_5,querylength5,
 							     low_univdiagonal,high_univdiagonal,
 							     /*query_compress*/query5_compress_fwd,
 							     /*plusp*/true,/*genestrand*/0,
-							     genomebits,nmismatches_allowed_5)) != 0) {
+							     genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					      univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					      /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					     univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					     /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(6) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(6) highest mate: %u %u %d..%d\n",univdiagonal_mate,high_univdiagonal - univdiagonal_mate,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(6) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qend < pathstore->chroffset + querylength5) { /* Downstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_5),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -5188,9 +5662,12 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 				       /*query_compress*/query5_compress_fwd,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/true,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5258,23 +5735,35 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 		   querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							    novel_diagonals_alloc,localdb_alloc,this5,
+							    streamspace_max_alloc,streamspace_alloc,
 							    /*queryptr*/queryrc5,querylength5,
 							    low_univdiagonal,high_univdiagonal,
 							    /*query_compress*/query5_compress_rev,
 							    /*plusp*/false,/*genestrand*/0,
-							    genomebits,nmismatches_allowed_5)) != 0) {
+							    genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					      univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					      /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					     univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					     /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(7) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(7) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(7) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 	
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qstart >= pathstore->chrhigh + querylength5) { /* Upstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_5),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -5284,9 +5773,12 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 				       /*query_compress*/query5_compress_rev,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/false,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+				       
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5339,23 +5831,35 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 		   querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		   (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							    novel_diagonals_alloc,localdb_alloc,this5,
+							    streamspace_max_alloc,streamspace_alloc,
 							    /*queryptr*/queryrc5,querylength5,
 							    low_univdiagonal,high_univdiagonal,
 							    /*query_compress*/query5_compress_rev,
 							    /*plusp*/false,/*genestrand*/0,
-							    genomebits,nmismatches_allowed_5)) != 0) {
+							    genomebits,localdb_nmismatches_allowed)) != 0) {
 	  qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					      univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					      /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	  qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					     univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					     /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	  debug11(printf("(8) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
-	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	  pathstore_mate = Pathstore_new(pathstorepool);
+	  if (qstart < qend) {
+	    debug11(printf("(8) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - low_univdiagonal,qstart,qend));
+	    auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	    pathstore_mate = Pathstore_new(pathstorepool);
+	  } else {
+	    debug11(printf("(8) qstart %d >= qend %d\n",qstart,qend));
+	  }
 	}
 	
-	if (auxinfo_mate != NULL) {
+	if (auxinfo_mate == NULL) {
+	  /* Skip */
+	} else if (univdiagonal_mate + qstart >= pathstore->chrhigh + querylength5) { /* Upstream */
+	  /* Skip */
+	  Auxinfo_free(&auxinfo_mate,univdiagpool,auxinfopool);
+	  Pathstore_free(&pathstore_mate,pathstorepool,intlistpool,univcoordlistpool,
+			 listpool,pathpool,transcriptpool,hitlistpool);
+	} else {
 	  Path_solve_from_univdiagonal(&(*found_score_5),
 				       
 				       &pathstore_mate->unextended_sense_paths,&pathstore_mate->unextended_antisense_paths,
@@ -5365,9 +5869,12 @@ paths3_mates (int *found_score_paired, int *found_score_5,
 				       /*query_compress*/query5_compress_rev,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/false,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+				       
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5551,20 +6058,25 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 		 querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE && 
 		 (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							  novel_diagonals_alloc,localdb_alloc,this3,
+							  streamspace_max_alloc,streamspace_alloc,
 							  /*queryptr*/queryuc_ptr_3,querylength3,
 							  /*low_univdiagonal*/univdiagonal,high_univdiagonal,
 							  /*query_compress*/query3_compress_fwd,
 							  /*plusp*/true,/*genestrand*/0,
-							  genomebits,nmismatches_allowed_3)) != 0) {
+							  genomebits,localdb_nmismatches_allowed)) != 0) {
 	qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					    univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					    /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_fwd,
 					   univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					   /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	debug11(printf("(1,2) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - univdiagonal,qstart,qend));
-	auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	pathstore_mate = Pathstore_new(pathstorepool);
+	if (qstart < qend) {
+	  debug11(printf("(1,2) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - univdiagonal,qstart,qend));
+	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	  pathstore_mate = Pathstore_new(pathstorepool);
+	} else {
+	  debug11(printf("(1,2) qstart %d >= qend %d\n",qstart,qend));
+	}
       }
 
       if (auxinfo_mate != NULL) {
@@ -5576,12 +6088,12 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				     queryseq5,/*queryptr*/queryuc_ptr_5,queryuc_ptr_5,queryrc5,querylength5,
 				     this5,knownsplicing,knownindels,
 				     
-				     mismatch_positions_alloc_5,
+				     mismatch_positions_alloc_5,streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+
 				     /*query_compress*/query5_compress_fwd,
-				     query5_compress_fwd,query5_compress_rev,
-				     
-				     nmismatches_allowed_5,/*genestrand*/0,
+				     query5_compress_fwd,query5_compress_rev,/*genestrand*/0,
 				     auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen5,/*plusp*/true,/*first_read_p*/true,/*lowp*/true,
@@ -5601,9 +6113,12 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				       /*query_compress*/query3_compress_fwd,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/true,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5668,20 +6183,25 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 		 querylength3 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		 (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							   novel_diagonals_alloc,localdb_alloc,this3,
+							   streamspace_max_alloc,streamspace_alloc,
 							   /*queryptr*/queryrc3,querylength3,
 							   low_univdiagonal,/*high_univdiagonal*/univdiagonal,
 							   /*query_compress*/query3_compress_rev,
 							   /*plusp*/false,/*genestrand*/0,
-							   genomebits,nmismatches_allowed_3)) != 0) {
+							   genomebits,localdb_nmismatches_allowed)) != 0) {
 	qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					    univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					    /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query3_compress_rev,
 					   univdiagonal_mate,querylength3,/*pos5*/0,/*pos3*/querylength3,
 					   /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	debug11(printf("(3,4) highest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal - univdiagonal_mate,qstart,qend));
-	auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	pathstore_mate = Pathstore_new(pathstorepool);
+	if (qstart < qend) {
+	  debug11(printf("(3,4) highest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal - univdiagonal_mate,qstart,qend));
+	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	  pathstore_mate = Pathstore_new(pathstorepool);
+	} else {
+	  debug11(printf("(3,4) qstart %d >= qend %d\n",qstart,qend));
+	}
       }
 	
       if (auxinfo_mate != NULL) {
@@ -5693,12 +6213,12 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				     queryseq5,/*queryptr*/queryrc5,queryuc_ptr_5,queryrc5,querylength5,
 				     this5,knownsplicing,knownindels,
 				 
-				     mismatch_positions_alloc_5,
+				     mismatch_positions_alloc_5,streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+
 				     /*query_compress*/query5_compress_rev,
-				     query5_compress_fwd,query5_compress_rev,
-				 
-				     nmismatches_allowed_5,/*genestrand*/0,
+				     query5_compress_fwd,query5_compress_rev,/*genestrand*/0,
 				     auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen5,/*plusp*/false,/*first_read_p*/true,/*lowp*/false,
@@ -5717,9 +6237,12 @@ univdiagonals5_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				       /*query_compress*/query3_compress_rev,
 				       query3_compress_fwd,query3_compress_rev,
 				       /*plusp*/false,querylength3,mismatch_positions_alloc_3,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this3,knownsplicing,knownindels,
-				       nmismatches_allowed_3,/*paired_end_p*/true,/*first_read_p*/false,
+				       localdb_nmismatches_allowed,
+				       
+				       this3,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/false,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -5904,20 +6427,25 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 		 querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE && 
 		 (univdiagonal_mate = Localdb_get_one_high(novel_univdiags_alloc,localdb,
 							   novel_diagonals_alloc,localdb_alloc,this5,
+							   streamspace_max_alloc,streamspace_alloc,
 							   /*queryptr*/queryuc_ptr_5,querylength5,
 							   low_univdiagonal,/*high_univdiagonal*/univdiagonal,
 							   /*query_compress*/query5_compress_fwd,
 							   /*plusp*/true,/*genestrand*/0,
-							   genomebits,nmismatches_allowed_5)) != 0) {
+							   genomebits,localdb_nmismatches_allowed)) != 0) {
 	qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					    univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					    /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_fwd,
 					   univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					   /*plusp*/true,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	debug11(printf("(5) highest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal - univdiagonal_mate,qstart,qend));
-	auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	pathstore_mate = Pathstore_new(pathstorepool);
+	if (qstart < qend) {
+	  debug11(printf("(5,6) highest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal - univdiagonal_mate,qstart,qend));
+	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	  pathstore_mate = Pathstore_new(pathstorepool);
+	} else {
+	  debug11(printf("(5,6) qstart %d >= qend %d\n",qstart,qend));
+	}
       }
 	
       if (auxinfo_mate != NULL) {
@@ -5929,12 +6457,12 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				     queryseq3,/*queryptr*/queryuc_ptr_3,queryuc_ptr_3,queryrc3,querylength3,
 				     this3,knownsplicing,knownindels,
 				 
-				     mismatch_positions_alloc_3,
+				     mismatch_positions_alloc_3,streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+				     
 				     /*query_compress*/query3_compress_fwd,
-				     query3_compress_fwd,query3_compress_rev,
-				 
-				     nmismatches_allowed_3,/*genestrand*/0,
+				     query3_compress_fwd,query3_compress_rev,/*genestrand*/0,
 				     auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 				     spliceendsgen3,/*plusp*/true,/*first_read_p*/false,/*lowp*/false,
@@ -5953,9 +6481,12 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				       /*query_compress*/query5_compress_fwd,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/true,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+				       
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6020,20 +6551,25 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 		 querylength5 < QUERYLENGTH_FOR_LOCALDB_MATE &&
 		 (univdiagonal_mate = Localdb_get_one_low(novel_univdiags_alloc,localdb,
 							  novel_diagonals_alloc,localdb_alloc,this5,
+							  streamspace_max_alloc,streamspace_alloc,
 							  /*queryptr*/queryrc5,querylength5,
 							  /*low_univdiagonal*/univdiagonal,high_univdiagonal,
 							  /*query_compress*/query5_compress_rev,
 							  /*plusp*/false,/*genestrand*/0,
-							  genomebits,nmismatches_allowed_5)) != 0) {
+							  genomebits,localdb_nmismatches_allowed)) != 0) {
 	qstart = Genomebits_first_kmer_left(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					    univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					    /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
 	qend = Genomebits_first_kmer_right(&ignore,genomebits,/*query_compress*/query5_compress_rev,
 					   univdiagonal_mate,querylength5,/*pos5*/0,/*pos3*/querylength5,
 					   /*plusp*/false,/*genestrand*/0,/*query_unk_mismatch_p*/true,/*kmer*/4);
-	debug11(printf("(7,8) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - univdiagonal,qstart,qend));
-	auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
-	pathstore_mate = Pathstore_new(pathstorepool);
+	if (qstart < qend) {
+	  debug11(printf("(7,8) lowest mate: %u %u %d..%d\n",univdiagonal_mate,univdiagonal_mate - univdiagonal,qstart,qend));
+	  auxinfo_mate = Auxinfo_new(LOCAL_MATE,qstart,qend,auxinfopool);
+	  pathstore_mate = Pathstore_new(pathstorepool);
+	} else {
+	  debug11(printf("(7,8) qstart %d >= qend %d\n",qstart,qend));
+	}
       }
 	
       if (auxinfo_mate != NULL) {
@@ -6045,12 +6581,12 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				     queryseq3,/*queryptr*/queryrc3,queryuc_ptr_3,queryrc3,querylength3,
 				     this3,knownsplicing,knownindels,
 				 
-				     mismatch_positions_alloc_3,
+				     mismatch_positions_alloc_3,streamspace_max_alloc,streamspace_alloc,
 				     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				     localdb_nmismatches_allowed,
+				     
 				     /*query_compress*/query3_compress_rev,
-				     query3_compress_fwd,query3_compress_rev,
-				 
-				     nmismatches_allowed_3,/*genestrand*/0,
+				     query3_compress_fwd,query3_compress_rev,/*genestrand*/0,
 				 
 				     auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 				     listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6070,9 +6606,12 @@ univdiagonals3_mates (int *found_score_paired, int *found_score_5, int *found_sc
 				       /*query_compress*/query5_compress_rev,
 				       query5_compress_fwd,query5_compress_rev,
 				       /*plusp*/false,querylength5,mismatch_positions_alloc_5,
+
+				       streamspace_max_alloc,streamspace_alloc,
 				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       this5,knownsplicing,knownindels,
-				       nmismatches_allowed_5,/*paired_end_p*/true,/*first_read_p*/true,
+				       localdb_nmismatches_allowed,
+				       
+				       this5,knownsplicing,knownindels,/*paired_end_p*/true,/*first_read_p*/true,
 				       /*chrnum*/pathstore->chrnum,/*chroffset*/pathstore->chroffset,/*chrhigh*/pathstore->chrhigh,
 				       intlistpool,uintlistpool,univcoordlistpool,
 				       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6108,11 +6647,14 @@ solve_all (bool *completep, int *found_score, Shortread_T queryseq,
 	   char *queryuc_ptr, char *queryrc, int querylength,
 	   T this, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 		  
-	   int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
+	   int *mismatch_positions_alloc,
+	   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	   Univdiag_T *novel_univdiags_alloc,
 	   Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	   int localdb_nmismatches_allowed, 
 	   
 	   Compress_T query_compress_fwd, Compress_T query_compress_rev,
-	   int nmismatches_allowed, bool first_read_p,
+	   bool first_read_p,
 
 	   Auxinfopool_T auxinfopool,
 	   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -6138,12 +6680,12 @@ solve_all (bool *completep, int *found_score, Shortread_T queryseq,
 			       queryseq,/*queryptr*/queryuc_ptr,queryuc_ptr,queryrc,querylength,
 			       this,knownsplicing,knownindels,
 				 
-			       mismatch_positions_alloc,
+			       this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
 			       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			       localdb_nmismatches_allowed,
+
 			       /*query_compress*/query_compress_fwd,
-			       query_compress_fwd,query_compress_rev,
-				 
-			       nmismatches_allowed,/*genestrand*/0,
+			       query_compress_fwd,query_compress_rev,/*genestrand*/0,
 			       auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 			       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
 			       hitlistpool,spliceendsgen,/*plusp*/true,first_read_p,lowp,
@@ -6164,12 +6706,12 @@ solve_all (bool *completep, int *found_score, Shortread_T queryseq,
 			       queryseq,/*queryptr*/queryrc,queryuc_ptr,queryrc,querylength,
 			       this,knownsplicing,knownindels,
 
-			       mismatch_positions_alloc,
+			       this->mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
 			       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			       localdb_nmismatches_allowed,
+
 			       /*query_compress*/query_compress_rev,
-			       query_compress_fwd,query_compress_rev,
-			       
-			       nmismatches_allowed,/*genestrand*/0,
+			       query_compress_fwd,query_compress_rev,/*genestrand*/0,
 			       auxinfopool,intlistpool,uintlistpool,univcoordlistpool,
 			       listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
 			       hitlistpool,spliceendsgen,/*plusp*/false,first_read_p,lowp,
@@ -6262,17 +6804,23 @@ Pathpair_T *
 Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq, Pairtype_T *final_pairtype,
 		    Path_T **patharray5, int *npaths5_primary, int *npaths5_altloc, int *first_absmq5, int *second_absmq5,
 		    Path_T **patharray3, int *npaths3_primary, int *npaths3_altloc, int *first_absmq3, int *second_absmq3,
-		    Shortread_T queryseq5, Shortread_T queryseq3, EF64_T repetitive_ef64,
+		    T this5, T this3, Shortread_T queryseq5, Shortread_T queryseq3, EF64_T repetitive_ef64,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels, Chrpos_T pairmax_linear,
+
+		    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int localdb_nmismatches_allowed,
+
 		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 		    Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		    Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
-		    Trpathpool_T trpathpool, Pathpool_T pathpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
-		    Transcriptpool_T transcriptpool,
+		    Trpathpool_T trpathpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+		    Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool,
 		    Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3, Pass_T pass) {
   Pathpair_T *pathpairarray;
-  List_T pathpairs = NULL, unresolved_pathpairs = NULL, unresolved_pathpairs_from_exhaustive = NULL;
+  List_T pathpairs = NULL, unextended_pathpairs = NULL,
+    unresolved_pathpairs = NULL, unresolved_pathpairs_from_exhaustive = NULL;
   Method_T last_method_5, last_method_3;
 
   List_T sense_paths5 = NULL, antisense_paths5 = NULL, sense_paths3 = NULL, antisense_paths3 = NULL;
@@ -6304,11 +6852,8 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   int nmismatches_allowed_5, nmismatches_allowed_3;
   char *queryuc_ptr_5, *queryuc_ptr_3, *queryrc5, *queryrc3;
   int *mismatch_positions_alloc_5, *mismatch_positions_alloc_3;
-  Univdiag_T *novel_univdiags_alloc;
-  Univcoord_T *novel_diagonals_alloc;
-  unsigned short *localdb_alloc;
+  Univcoord_T univdiagonal_L, univdiagonal_H;
   Compress_T query5_compress_fwd, query5_compress_rev, query3_compress_fwd, query3_compress_rev;
-  T this5, this3;
 
 
   if ((querylength5 = Shortread_fulllength(queryseq5)) < index1part + index1interval - 1 ||
@@ -6321,8 +6866,10 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   queryrc5 = Shortread_queryrc(queryseq5);
   queryrc3 = Shortread_queryrc(queryseq3);
 
+#if 0
   this5 = Stage1_new(queryuc_ptr_5,querylength5,/*first_read_p*/true);
   this3 = Stage1_new(queryuc_ptr_3,querylength3,/*first_read_p*/false);
+#endif
 
   found_score_5 = querylength5;
   found_score_3 = querylength3;
@@ -6357,13 +6904,9 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     mincoverage_filter_5 = mincoverage_filter_3 = (int) user_mincoverage_filter_float;
   }
 
-  mismatch_positions_alloc_5 = (int *) MALLOC((querylength5+MISMATCH_EXTRA)*sizeof(int));
-  mismatch_positions_alloc_3 = (int *) MALLOC((querylength3+MISMATCH_EXTRA)*sizeof(int));
-
-  /* Intersection indices are paired */
-  novel_univdiags_alloc = Univdiag_new_array(2 * max_nintersections);
-  novel_diagonals_alloc = (Univcoord_T *) MALLOC(2 * max_nintersections * sizeof(Univcoord_T));
-  MALLOC_ALIGN(localdb_alloc,max_nintersections * sizeof(unsigned short));
+  /* Now allocated in Stage1hr_new */
+  /* mismatch_positions_alloc_5 = (int *) MALLOC((querylength5+MISMATCH_EXTRA)*sizeof(int)); */
+  /* mismatch_positions_alloc_3 = (int *) MALLOC((querylength3+MISMATCH_EXTRA)*sizeof(int)); */
 
   query5_compress_fwd = Compress_new_fwd(queryuc_ptr_5,querylength5);
   query5_compress_rev = Compress_new_rev(queryuc_ptr_5,querylength5);
@@ -6382,7 +6925,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     geneplus_pathpairs = paired_read(&geneplus_abort_pairing_p,&geneplus_hits5,&geneplus_hits3,
 				     &geneplus_samechr,&geneplus_conc_transloc,
 				     queryuc_ptr_5,queryrc5,querylength5,queryuc_ptr_3,queryrc3,querylength3,
-				     knownsplicing,knownindels,mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+				     knownsplicing,knownindels,this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
 				     novel_diagonals_alloc,localdb_alloc,this5,this3,
 				     query5_compress_fwd,query5_compress_rev,
 				     query3_compress_fwd,query3_compress_rev,
@@ -6399,7 +6942,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     geneminus_pathpairs = paired_read(&geneminus_abort_pairing_p,&geneminus_hits5,&geneminus_hits3,
 				      &geneminus_samechr,&geneminus_conc_transloc,
 				      queryuc_ptr_5,queryrc5,querylength5,queryuc_ptr_3,queryrc3,querylength3,
-				      knownsplicing,knownindels,mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+				      knownsplicing,knownindels,this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
 				      novel_diagonals_alloc,localdb_alloc,this5,this3,
 				      query5_compress_fwd,query5_compress_rev,
 				      query3_compress_fwd,query3_compress_rev,
@@ -6427,7 +6970,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				   sufficient_score_5,sufficient_score_3,
 				   
 				   queryseq5,queryseq3,querylength5,querylength3,/*genestrand*/0,
-				   mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+				   this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
 				   this5,this3,knownsplicing,
 				   query5_compress_fwd,query5_compress_rev,
 				   query3_compress_fwd,query3_compress_rev,
@@ -6436,6 +6979,10 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				   nmismatches_filter_5,nmismatches_filter_3,
 				   mincoverage_filter_5,mincoverage_filter_3,
 
+				   streamspace_max_alloc,streamspace_alloc,
+				   novel_univdiags_alloc,novel_diagonals_alloc,
+				   localdb_alloc,localdb,localdb_nmismatches_allowed,
+
 				   trdiagpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool);
@@ -6443,6 +6990,34 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
     if (genome_align_p == true) {
       last_method_5 = last_method_3 = METHOD_INIT;
+#if 0
+      /* NEW */
+      /* Strange: Calling this can result in missing an EXACT1 alignment */
+      pathpairs =
+	paired_search_exact(&complete5_p,&complete3_p,
+			    &found_score_paired,&found_score_5,&found_score_3,
+			    &last_method_5,&last_method_3,
+			    &any_imperfect_ends5_p,&any_imperfect_ends3_p,
+				      
+			    &unextended_pathpairs,pathpairs,this5,this3,queryseq5,queryseq3,
+			    queryuc_ptr_5,queryrc5,querylength5,queryuc_ptr_3,queryrc3,querylength3,
+			    knownsplicing,knownindels,this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+			    streamspace_max_alloc,streamspace_alloc,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
+
+			    query5_compress_fwd,query5_compress_rev,
+			    query3_compress_fwd,query3_compress_rev,
+			    sufficient_score_5,sufficient_score_3,/*genestrand*/0,
+				      
+			    nmismatches_filter_5,nmismatches_filter_3,
+			    mincoverage_filter_5,mincoverage_filter_3,
+				      
+			    repetitive_ef64,auxinfopool,pathstorepool,univdiagpool,
+			    intlistpool,uintlistpool,univcoordlistpool,listpool,
+			    pathpool,transcriptpool,vectorpool,hitlistpool,
+			    spliceendsgen5,spliceendsgen3,/*method_goal*/KMER_EXACT1,pass);
+#endif
+
       /* Comparing found_score_paired against found_score_5 +
 	 found_score_3 tells us whether we have missed any good
 	 ends */
@@ -6459,11 +7034,13 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				      
 				      &unresolved_pathpairs,pathpairs,this5,this3,queryseq5,queryseq3,
 				      queryuc_ptr_5,queryrc5,querylength5,queryuc_ptr_3,queryrc3,querylength3,
-				      knownsplicing,knownindels,mismatch_positions_alloc_5,mismatch_positions_alloc_3,
-				      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				      knownsplicing,knownindels,this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+				      streamspace_max_alloc,streamspace_alloc,
+				      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
+
 				      query5_compress_fwd,query5_compress_rev,
 				      query3_compress_fwd,query3_compress_rev,
-				      nmismatches_allowed_5,nmismatches_allowed_3,/*genestrand*/0,
+				      sufficient_score_5,sufficient_score_3,/*genestrand*/0,
 				      
 				      nmismatches_filter_5,nmismatches_filter_3,
 				      mincoverage_filter_5,mincoverage_filter_3,
@@ -6471,7 +7048,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				      repetitive_ef64,auxinfopool,pathstorepool,univdiagpool,
 				      intlistpool,uintlistpool,univcoordlistpool,listpool,
 				      pathpool,transcriptpool,vectorpool,hitlistpool,
-				      spliceendsgen5,spliceendsgen3);
+				      spliceendsgen5,spliceendsgen3,/*method_goal*/SEGMENT1);
 	debug(printf("found_score_paired %d, found_score_5 %d, found_score_3 %d\n",
 		     found_score_paired,found_score_5,found_score_3));
       }
@@ -6490,10 +7067,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 			     
 			     pathpairs,queryseq5,queryseq3,
 			     queryuc_ptr_3,queryrc3,querylength3,
-			     knownsplicing,knownindels,mismatch_positions_alloc_3,
+			     knownsplicing,knownindels,this3->mismatch_positions_alloc,
+			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_nmismatches_allowed,
+
 			     this5,this3,query3_compress_fwd,query3_compress_rev,
-			     nmismatches_allowed_3,
 
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
@@ -6507,10 +7086,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				     
 			     pathpairs,queryseq5,queryseq3,
 			     queryuc_ptr_5,queryrc5,querylength5,
-			     knownsplicing,knownindels,mismatch_positions_alloc_5,
+			     knownsplicing,knownindels,this5->mismatch_positions_alloc,
+			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_nmismatches_allowed,
+
 			     this5,this3,query5_compress_fwd,query5_compress_rev,
-			     nmismatches_allowed_5,
 
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
@@ -6550,11 +7131,14 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 			   queryuc_ptr_5,queryrc5,querylength5,
 			   queryuc_ptr_3,queryrc3,querylength3,
 			   knownsplicing,knownindels,
-			   mismatch_positions_alloc_5,mismatch_positions_alloc_3,
-			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,this5,this3,
+			   this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+			   streamspace_max_alloc,streamspace_alloc,
+			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			   localdb_nmismatches_allowed,
+
+			   this5,this3,
 			   query5_compress_fwd,query5_compress_rev,
 			   query3_compress_fwd,query3_compress_rev,
-			   nmismatches_allowed_5,nmismatches_allowed_3,
 
 			   nmismatches_filter_5,nmismatches_filter_3,
 			   mincoverage_filter_5,mincoverage_filter_3,
@@ -6570,7 +7154,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 			   queryuc_ptr_5,queryrc5,querylength5,
 			   queryuc_ptr_3,queryrc3,querylength3,
 			   knownsplicing,knownindels,
-			   mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+			   this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
 			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,this5,this3,
 			   query5_compress_fwd,query5_compress_rev,
 			   query3_compress_fwd,query3_compress_rev,
@@ -6604,11 +7188,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
 					 query5_compress_fwd,query5_compress_rev,
 					 query3_compress_fwd,query3_compress_rev,
-					 mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					 this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+					 streamspace_max_alloc,streamspace_alloc,
 					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					 
+					 localdb_nmismatches_allowed,
+
 					 this5,this3,knownsplicing,knownindels,
-					 nmismatches_allowed_5,nmismatches_allowed_3,
 
 					 nmismatches_filter_5,nmismatches_filter_3,
 					 mincoverage_filter_5,mincoverage_filter_3,
@@ -6627,11 +7212,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
 					 query5_compress_fwd,query5_compress_rev,
 					 query3_compress_fwd,query3_compress_rev,
-					 mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+					 this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+					 streamspace_max_alloc,streamspace_alloc,
 					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					 localdb_nmismatches_allowed,
 					 
 					 this5,this3,knownsplicing,knownindels,
-					 nmismatches_allowed_5,nmismatches_allowed_3,
 
 					 nmismatches_filter_5,nmismatches_filter_3,
 					 mincoverage_filter_5,mincoverage_filter_3,
@@ -6664,11 +7250,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
     /* Solve all 5' solutions and find mates locally */
     solve_all(&complete5_p,&found_score_5,queryseq5,queryuc_ptr_5,queryrc5,querylength5,
-	      this5,knownsplicing,knownindels,mismatch_positions_alloc_5,
+	      this5,knownsplicing,knownindels,this5->mismatch_positions_alloc,
+	      streamspace_max_alloc,streamspace_alloc,
 	      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-		
-	      query5_compress_fwd,query5_compress_rev,
-	      nmismatches_allowed_5,/*first_read_p*/true,
+	      localdb_nmismatches_allowed,
+	      
+	      query5_compress_fwd,query5_compress_rev,/*first_read_p*/true,
 		
 	      auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 	      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6678,10 +7265,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				     
 			     pathpairs,queryseq5,queryseq3,
 			     queryuc_ptr_3,queryrc3,querylength3,
-			     knownsplicing,knownindels,mismatch_positions_alloc_3,
+			     knownsplicing,knownindels,this3->mismatch_positions_alloc,
+			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_nmismatches_allowed,
+
 			     this5,this3,query3_compress_fwd,query3_compress_rev,
-			     nmismatches_allowed_3,
 				     
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
@@ -6693,11 +7282,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
     /* Solve all 3' solutions and find mates locally */
     solve_all(&complete3_p,&found_score_3,queryseq3,queryuc_ptr_3,queryrc3,querylength3,
-	      this3,knownsplicing,knownindels,mismatch_positions_alloc_3,
+	      this3,knownsplicing,knownindels,this3->mismatch_positions_alloc,
+	      streamspace_max_alloc,streamspace_alloc,
 	      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+	      localdb_nmismatches_allowed,
 		
-	      query3_compress_fwd,query3_compress_rev,
-	      nmismatches_allowed_3,/*first_read_p*/false,
+	      query3_compress_fwd,query3_compress_rev,/*first_read_p*/false,
 		
 	      auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 	      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6707,10 +7297,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 				     
 			     pathpairs,queryseq5,queryseq3,
 			     queryuc_ptr_5,queryrc5,querylength5,
-			     knownsplicing,knownindels,mismatch_positions_alloc_5,
+			     knownsplicing,knownindels,this5->mismatch_positions_alloc,
+			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_nmismatches_allowed,
+
 			     this5,this3,query5_compress_fwd,query5_compress_rev,
-			     nmismatches_allowed_5,
 			     
 			     nmismatches_filter_5,nmismatches_filter_3,
 			     mincoverage_filter_5,mincoverage_filter_3,
@@ -6751,11 +7343,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     } else {
       debug(printf("Calling solve_all on 5' end\n"));
       solve_all(&complete5_p,&found_score_5,queryseq5,queryuc_ptr_5,queryrc5,querylength5,
-		this5,knownsplicing,knownindels,mismatch_positions_alloc_5,
+		this5,knownsplicing,knownindels,this5->mismatch_positions_alloc,
+		streamspace_max_alloc,streamspace_alloc,
 		novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		localdb_nmismatches_allowed,
 		
-		query5_compress_fwd,query5_compress_rev,
-		nmismatches_allowed_5,/*first_read_p*/true,
+		query5_compress_fwd,query5_compress_rev,/*first_read_p*/true,
 		
 		auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 		pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6764,11 +7357,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 
       debug(printf("Calling solve_all on 3' end\n"));
       solve_all(&complete3_p,&found_score_3,queryseq3,queryuc_ptr_3,queryrc3,querylength3,
-		this3,knownsplicing,knownindels,mismatch_positions_alloc_3,
+		this3,knownsplicing,knownindels,this3->mismatch_positions_alloc,
+		streamspace_max_alloc,streamspace_alloc,
 		novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-		
-		query3_compress_fwd,query3_compress_rev,
-		nmismatches_allowed_3,/*first_read_p*/false,
+		localdb_nmismatches_allowed,
+
+		query3_compress_fwd,query3_compress_rev,/*first_read_p*/false,
 		
 		auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 		pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6851,11 +7445,13 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 					   queryuc_ptr_5,queryrc5,queryuc_ptr_3,queryrc3,
 					   /*quality_string_5*/Shortread_quality_string(queryseq5),
 					   /*quality_string_3*/Shortread_quality_string(queryseq3),
-					   mismatch_positions_alloc_5,mismatch_positions_alloc_3,
+
+					   this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+					   streamspace_max_alloc,streamspace_alloc,
 					   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					   localdb_nmismatches_allowed,
+
 					   knownsplicing,knownindels,
-					   
-					   nmismatches_allowed_5,nmismatches_allowed_3,
 					   nmismatches_filter_5,nmismatches_filter_3,
 					   mincoverage_filter_5,mincoverage_filter_3,
 					   querylength5,querylength3,
@@ -6882,22 +7478,24 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 	
       } else {
 	solve_all(&complete5_p,&found_score_5,queryseq5,queryuc_ptr_5,queryrc5,querylength5,
-		  this5,knownsplicing,knownindels,mismatch_positions_alloc_5,
+		  this5,knownsplicing,knownindels,this5->mismatch_positions_alloc,
+		  streamspace_max_alloc,streamspace_alloc,
 		  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-		  
-		  query5_compress_fwd,query5_compress_rev,
-		  nmismatches_allowed_5,/*first_read_p*/true,
+		  localdb_nmismatches_allowed,
+
+		  query5_compress_fwd,query5_compress_rev,/*first_read_p*/true,
 		  
 		  auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 		  pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
 		  spliceendsgen5);
 	
 	solve_all(&complete3_p,&found_score_3,queryseq3,queryuc_ptr_3,queryrc3,querylength3,
-		  this3,knownsplicing,knownindels,mismatch_positions_alloc_3,
+		  this3,knownsplicing,knownindels,this3->mismatch_positions_alloc,
+		  streamspace_max_alloc,streamspace_alloc,
 		  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-		  
-		  query3_compress_fwd,query3_compress_rev,
-		  nmismatches_allowed_3,/*first_read_p*/false,
+		  localdb_nmismatches_allowed,
+
+		  query3_compress_fwd,query3_compress_rev,/*first_read_p*/false,
 		  
 		  auxinfopool,intlistpool,uintlistpool,univcoordlistpool,listpool,
 		  pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
@@ -6931,12 +7529,12 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 			  queryseq5,queryseq3,
 			  queryuc_ptr_5,queryrc5,querylength5,queryuc_ptr_3,queryrc3,querylength3,
 			    
-			  knownsplicing,knownindels,novel_univdiags_alloc,novel_diagonals_alloc,
-			  localdb_alloc,this5,this3,
-			  mismatch_positions_alloc_5,mismatch_positions_alloc_3,
-			  query5_compress_fwd,query5_compress_rev,query3_compress_fwd,query3_compress_rev,
-			  
-			  nmismatches_allowed_5,nmismatches_allowed_3,
+			  knownsplicing,knownindels,
+			  this5->mismatch_positions_alloc,this3->mismatch_positions_alloc,
+			  streamspace_max_alloc,streamspace_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
+			  localdb_alloc,localdb_nmismatches_allowed,
+
+			  this5,this3,query5_compress_fwd,query5_compress_rev,query3_compress_fwd,query3_compress_rev,
 			  nmismatches_filter_5,nmismatches_filter_3,mincoverage_filter_5,mincoverage_filter_3,
 			  
 			  intlistpool,uintlistpool,univcoordlistpool,listpool,univdiagpool,pathpool,vectorpool,
@@ -6957,23 +7555,6 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
   Compress_free(&query5_compress_rev);
   Compress_free(&query5_compress_fwd);
 
-  FREE_ALIGN(localdb_alloc);
-  FREE(novel_diagonals_alloc);
-  FREE(novel_univdiags_alloc[0]);
-  FREE(novel_univdiags_alloc);
-
-  FREE(mismatch_positions_alloc_3);
-  FREE(mismatch_positions_alloc_5);
-
-  Stage1_free(&this3,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
-	      intlistpool,uintlistpool,univcoordlistpool,
-	      listpool,pathpool,trpathpool,transcriptpool,hitlistpool,
-	      /*free_paths_p*/true);
-  Stage1_free(&this5,trdiagpool,univdiagpool,auxinfopool,pathstorepool,
-	      intlistpool,uintlistpool,univcoordlistpool,
-	      listpool,pathpool,trpathpool,transcriptpool,hitlistpool,
-	      /*free_paths_p*/true);
-
   /* FREE(queryrc3); -- Taken from Shortread */
   /* FREE(queryrc5); -- Taken from Shortread */
 
@@ -6987,7 +7568,7 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 void
 Stage1hr_paired_setup (Mode_T mode_in, int index1part_in, int index1interval_in, int index1part_tr_in,
 		       Transcriptome_T transcriptome_in, bool genome_align_p_in, bool transcriptome_align_p_in,
-		       Genomebits_T genomebits_in, Localdb_T localdb_in, EF64_T chromosome_ef64_in,
+		       Genomebits_T genomebits_in, EF64_T chromosome_ef64_in,
 		       double user_nmismatches_filter_float_in, double user_mincoverage_filter_float_in,
 		       int max_deletionlen, int max_insertlength, Chrpos_T shortsplicedist, bool splicingp_in,
 		       int maxpaths_search_in, int maxpaths_report_in,
@@ -7003,7 +7584,7 @@ Stage1hr_paired_setup (Mode_T mode_in, int index1part_in, int index1interval_in,
   transcriptome_align_p = transcriptome_align_p_in;
 
   genomebits = genomebits_in;
-  localdb = localdb_in;
+  localdb = (Localdb_T) NULL;
 
   chromosome_ef64 = chromosome_ef64_in;
 
@@ -7030,6 +7611,12 @@ Stage1hr_paired_pass2_setup (int max_insertlength, Chrpos_T shortsplicedist) {
 
   concordance_distance = (Chrpos_T) max_insertlength + shortsplicedist;
 
+  return;
+}
+
+void
+Stage1hr_paired_localdb_setup (Localdb_T localdb_in) {
+  localdb = localdb_in;
   return;
 }
 

@@ -1,4 +1,3 @@
-/* $Id: indexdb.h 224940 2022-10-08 19:11:11Z twu $ */
 #ifndef INDEXDB_INCLUDED
 #define INDEXDB_INCLUDED
 #ifdef HAVE_CONFIG_H

@@ -1,4 +1,3 @@
-/* $Id: result.h 218147 2019-01-16 21:28:41Z twu $ */
 #ifndef RESULT_INCLUDED
 #define RESULT_INCLUDED
 

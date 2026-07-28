@@ -1,4 +1,4 @@
-/* $Id: a3a18f3e8a033468b959ecf7b207946f09539f83 $ */
+/* $Id: 6519d258556b3c6ee31ded26454d440fafa4602c $ */
 #ifndef EXTENSION_SEARCH_INCLUDED
 #define EXTENSION_SEARCH_INCLUDED
 
@@ -59,7 +59,7 @@ Extension_search_setup (Mode_T mode,
 			int max_insertionlen, int max_deletionlen, Chrpos_T shortsplicedist);
 
 extern void
-Elt_gc (List_T *set, Listpool_T listpool, Univdiagpool_T univdiagpool);
+Elt_gc (List_T *set, Listpool_T listpool);
 
 extern void
 Extension_search (Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,

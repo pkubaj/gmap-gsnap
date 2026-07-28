@@ -1,4 +1,4 @@
-/* $Id: 4ccc5a7d7c13c68a7636bcf1f9b676e160845773 $ */
+/* $Id: 54f0ad3e1cd222a84798316000428b44bd9842a6 $ */
 #ifndef ALTSPLICE_INCLUDED
 #define ALTSPLICE_INCLUDED
 
@@ -19,6 +19,7 @@ struct T {
 
   bool boundedp;
   bool innerp;
+  bool nmismatches_known_p;
 
   /* Because of combine_leftright_paths, the medial_nmismatches might not be valid for the combined path */
   int splice_qpos;
@@ -84,31 +85,37 @@ extern T
 Altsplice_copy (T old, Pathpool_T pathpool, Vectorpool_T vectorpool);
 
 extern Univcoord_T
-Altsplice_qstart_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
+Altsplice_qstart_best (int *distal_trimpos, int splice_qpos, int querylength,
+		       Univcoord_T medial_univdiagonal,
 		       double medial_prob, int medial_support, int medial_nmismatches,
 		       int *distal_support, Univdiag_T *distal_univdiags,
-		       double *distal_probs, int npartners, bool innerp);
+		       double *distal_probs, int npartners,
+		       bool plusp, bool sense_forward_p, bool innerp);
 
 extern Univcoord_T
-Altsplice_qend_best (int *distal_trimpos, Univcoord_T medial_univdiagonal,
+Altsplice_qend_best (int *distal_trimpos, int splice_qpos, int querylength,
+		     Univcoord_T medial_univdiagonal,
 		     double medial_prob, int medial_support, int medial_nmismatches,
 		     int *distal_support, Univdiag_T *distal_univdiags,
-		     double *distal_probs, int npartners, bool innerp);
+		     double *distal_probs, int npartners,
+		     bool plusp, bool sense_forward_p, bool innerp);
 
 extern T
-Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos,
+Altsplice_qstart_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos, int querylength,
 		      Univcoord_T medial_univdiagonal, int medial_nmismatches,
 		      double medial_prob, int medial_support, Univcoord_T *distal_positions,
 		      int *distal_support, Univdiag_T *distal_univdiags,
-		      double *distal_probs, int *order_medial_qpos, int npartners, bool innerp,
+		      double *distal_probs, int *order_medial_qpos, int npartners,
+		      bool plusp, bool sense_forward_p, bool innerp,
 		      Pathpool_T pathpool, Vectorpool_T vectorpool, bool sort_bydistal_p);
 
 extern T
-Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos,
+Altsplice_qend_new (int *endpoint, bool boundedp, int splice_qpos, int anchor_qpos, int querylength,
 		    Univcoord_T medial_univdiagonal, int medial_nmismatches,
 		    double medial_prob, int medial_support, Univcoord_T *distal_positions,
 		    int *distal_support, Univdiag_T *distal_univdiags,
-		    double *distal_probs, int *order_medial_qpos, int npartners, bool innerp,
+		    double *distal_probs, int *order_medial_qpos, int npartners,
+		    bool plusp, bool sense_forward_p, bool innerp,
 		    Pathpool_T pathpool, Vectorpool_T vectorpool, bool sort_bydistal_p);
 
 extern Univcoord_T
@@ -128,13 +135,15 @@ Altsplice_resolve_qend (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
 			int *medial_nmismatches_L, int *distal_nmismatches_L, 
 			double *medial_prob_L, double *distal_prob_L,
 			T this, int anchor_qpos_L, int querylengthL, int querylengthH,
-			Univcoord_T genomicstartH, Compress_T query_compress, bool plusp, int genestrand);
+			Univcoord_T genomicstartH, Compress_T query_compress,
+			bool plusp, int genestrand, bool sense_forward_p);
 extern bool
 Altsplice_resolve_qstart (Univcoord_T *univdiagonal_H, int *splice_qpos_H, int *distal_trimpos_H,
 			  int *medial_nmismatches_L, int *distal_nmismatches_H,
 			  double *medial_prob_H, double *distal_prob_H,
 			  T this, int anchor_qpos_H, int querylengthL, int querylengthH,
-			  Univcoord_T genomicendL, Compress_T query_compress, bool plusp, int genestrand);
+			  Univcoord_T genomicendL, Compress_T query_compress,
+			  bool plusp, int genestrand, bool sense_forward_p);
 extern bool
 Altsplice_resolve_both (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *distal_trimpos_L,
 			int *medial_nmismatches_L, int *distal_nmismatches_L,
@@ -147,7 +156,7 @@ Altsplice_resolve_both (Univcoord_T *univdiagonal_L, int *splice_qpos_L, int *di
 			T thisL, int anchor_qpos_L, T thisH, int anchor_qpos_H,
 			int querylengthL, int querylengthH,
 			Compress_T query_compress_L, Compress_T query_compress_H,
-			bool plusp, int genestrand);
+			bool plusp, int genestrand, bool sense_forward_p);
 
 extern int
 Altsplice_select_qend (T this, int querylength, Compress_T query_compress, bool plusp, int genestrand);

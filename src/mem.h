@@ -1,4 +1,3 @@
-/* $Id: 9bf89de2d61db39e1d1b261a3882a0b34d0e8bab $ */
 #ifndef MEM_INCLUDED
 #define MEM_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -50,7 +49,9 @@ Mem_usage_std_stack_add (long int x, const char *file, int line);
 extern void
 Mem_usage_std_stack_subtract (const char *file, int line);
 extern void
-Mem_usage_std_heap_add (long int x);
+Mem_usage_std_heap_add (long int x, const char *file, int line);
+extern void
+Mem_usage_std_heap_subtract (const char *file, int line);
 extern long int
 Mem_usage_report_std_stack ();
 extern long int
@@ -69,7 +70,9 @@ Mem_usage_report_out ();
 
 
 extern void *Mem_alloc (size_t nbytes, const char *file, int line);
+extern void *Mem_alloc_aligned (size_t nbytes, const char *file, int line);
 extern void *Mem_alloc_keep (size_t nbytes, const char *file, int line);
+extern void *Mem_alloc_keep_aligned (size_t nbytes, const char *file, int line);
 extern void *Mem_alloc_in (size_t nbytes, const char *file, int line);
 extern void *Mem_alloc_out (size_t nbytes, const char *file, int line);
 extern void *Mem_alloc_no_exception (size_t nbytes,
@@ -81,7 +84,9 @@ extern void *Mem_calloc_out (size_t count, size_t nbytes, const char *file, int 
 extern void *Mem_calloc_no_exception (size_t count, size_t nbytes,
 				      const char *file, int line);
 extern void Mem_free (void *ptr, const char *file, int line);
+extern void Mem_free_aligned (void *ptr, const char *file, int line);
 extern void Mem_free_keep (void *ptr, const char *file, int line);
+extern void Mem_free_keep_aligned (void *ptr, const char *file, int line);
 extern void Mem_free_in (void *ptr, const char *file, int line);
 extern void Mem_free_out (void *ptr, const char *file, int line);
 extern void *Mem_resize (void *ptr, size_t nbytes,
@@ -92,8 +97,12 @@ extern void *Mem_resize (void *ptr, size_t nbytes,
 
 
 #define MALLOC(nbytes) Mem_alloc((nbytes), __FILE__, __LINE__)
+#define MALLOC_ALIGN(nbytes) Mem_alloc_aligned((nbytes),__FILE__,__LINE__)
+
 #define CALLOC(count, nbytes) Mem_calloc((count), (nbytes), __FILE__, __LINE__)
 #define FREE(ptr) ((void)(Mem_free((ptr),__FILE__, __LINE__), (ptr) = 0))
+#define FREE_ALIGN(ptr) ((void)(Mem_free_aligned((ptr),__FILE__, __LINE__), (ptr) = 0))
+
 
 #ifdef HAVE_ALLOCA
 /* Use stack.  Need macros and not a function containing alloca, since the memory would be freed when the function returns */
@@ -127,44 +136,26 @@ extern void *Mem_resize (void *ptr, size_t nbytes,
 #endif
 
 #ifdef HAVE_ARM
-#define MALLOC_ALIGN(new,x) posix_memalign((void **) &(new),16,x)
-#ifdef DEBUG_ALIGN
-#define FREE_ALIGN(x) printf("Freeing %p in standard pool at %s:%d\n",x,__FILE__,__LINE__); FREE(x)
-#else
-#define FREE_ALIGN(x) FREE(x)
-#endif
 #define CHECK_ALIGN(x) assert((unsigned long) x % 16 == 0)
 #define PAD_UINT8(x) (x)
 #define PAD_UINT4(x) (((x + 3)/4) * 4)
 
 #elif defined(HAVE_AVX512)
-#define MALLOC_ALIGN(new,x) new = _mm_malloc(x,64)
-#define FREE_ALIGN(x) _mm_free(x)
 #define CHECK_ALIGN(x) assert((unsigned long) x % 64 == 0)
 #define PAD_UINT8(x) (((x + 7)/8) * 8)
 #define PAD_UINT4(x) (((x + 15)/16) * 16)
 
 #elif defined(HAVE_AVX2)
-#define MALLOC_ALIGN(new,x) new = _mm_malloc(x,32);
-#define FREE_ALIGN(x) _mm_free(x)
 #define CHECK_ALIGN(x) assert((unsigned long) x % 32 == 0)
 #define PAD_UINT8(x) (((x + 3)/4) * 4)
 #define PAD_UINT4(x) (((x + 7)/8) * 8)
 
 #elif defined(HAVE_SSE4_1)
-#define MALLOC_ALIGN(new,x) new = _mm_malloc(x,16);
-#ifdef DEBUG_ALIGN
-#define FREE_ALIGN(x) printf("Freeing %p in standard pool at %s:%d\n",x,__FILE__,__LINE__); _mm_free(x)
-#else
-#define FREE_ALIGN(x) _mm_free(x)
-#endif
 #define CHECK_ALIGN(x) assert((unsigned long) x % 16 == 0)
 #define PAD_UINT8(x) (x)
 #define PAD_UINT4(x) (((x + 3)/4) * 4)
 
 #else
-#define MALLOC_ALIGN(new,x) new = MALLOC(x)
-#define FREE_ALIGN(x) FREE(x)
 #define CHECK_ALIGN(x)
 #define PAD_UINT8(x) (x)
 #define PAD_UINT4(x) (x)
@@ -174,6 +165,7 @@ extern void *Mem_resize (void *ptr, size_t nbytes,
 
 #ifdef MEMUSAGE
 #define MALLOC_KEEP(nbytes) Mem_alloc_keep((nbytes), __FILE__, __LINE__)
+#define MALLOC_KEEP_ALIGN(nbytes) Mem_alloc_keep_aligned((nbytes),__FILE__,__LINE__)
 #define MALLOC_IN(nbytes) Mem_alloc_in((nbytes), __FILE__, __LINE__)
 #define MALLOC_OUT(nbytes) Mem_alloc_out((nbytes), __FILE__, __LINE__)
 
@@ -182,12 +174,14 @@ extern void *Mem_resize (void *ptr, size_t nbytes,
 #define CALLOC_OUT(count, nbytes) Mem_calloc_out((count), (nbytes), __FILE__, __LINE__)
 
 #define FREE_KEEP(ptr) ((void)(Mem_free_keep((ptr),__FILE__, __LINE__), (ptr) = 0))
+#define FREE_KEEP_ALIGN(ptr) ((void)(Mem_free_keep_aligned((ptr),__FILE__, __LINE__), (ptr) = 0))
 #define FREE_IN(ptr) ((void)(Mem_free_in((ptr),__FILE__, __LINE__), (ptr) = 0))
 #define FREE_OUT(ptr) ((void)(Mem_free_out((ptr),__FILE__, __LINE__), (ptr) = 0))
 
 #else
 
 #define MALLOC_KEEP(nbytes) Mem_alloc((nbytes), __FILE__, __LINE__)
+#define MALLOC_KEEP_ALIGN(nbytes) Mem_alloc_aligned((nbytes), __FILE__, __LINE__)
 #define MALLOC_IN(nbytes) Mem_alloc((nbytes), __FILE__, __LINE__)
 #define MALLOC_OUT(nbytes) Mem_alloc((nbytes), __FILE__, __LINE__)
 
@@ -196,6 +190,7 @@ extern void *Mem_resize (void *ptr, size_t nbytes,
 #define CALLOC_OUT(count, nbytes) Mem_calloc((count), (nbytes), __FILE__, __LINE__)
 
 #define FREE_KEEP(ptr) ((void)(Mem_free((ptr),__FILE__, __LINE__), (ptr) = 0))
+#define FREE_KEEP_ALIGN(ptr) ((void)(Mem_free_aligned((ptr),__FILE__, __LINE__), (ptr) = 0))
 #define FREE_IN(ptr) ((void)(Mem_free((ptr),__FILE__, __LINE__), (ptr) = 0))
 #define FREE_OUT(ptr) ((void)(Mem_free((ptr),__FILE__, __LINE__), (ptr) = 0))
 

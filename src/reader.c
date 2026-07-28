@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 94f18e0b16a35445bdb1dac509ef39e35ca02bb1 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -59,27 +58,37 @@ Reader_reset_ends (T this) {
 }
 
 
-
+/* Although it points to a sequence, its memory size does not depend
+   on querylength, so it can be reused across queries */
 T
-Reader_new (char *sequence, int querystart, int queryend, int oligosize) {
+Reader_new (int oligosize) {
   T new = (T) MALLOC(sizeof(*new));
 
   new->oligosize = oligosize;
 
-  new->querystart_save = new->querystart = querystart;
-  new->queryend_save = new->queryend = queryend;
-
-  new->startinit = sequence;
-  new->startbound = new->startptr = &(sequence[querystart]);
-  new->endbound = new->endptr = &(sequence[queryend-1]);
   return new;
 }
 
+/* For a new sequence, querystart is 0, and queryend is querylength */
+void
+Reader_set_sequence (T this, char *sequence, int querystart, int queryend) {
+
+  this->querystart_save = this->querystart = querystart;
+  this->queryend_save = this->queryend = queryend;
+
+  this->startinit = sequence;
+  this->startbound = this->startptr = &(sequence[querystart]);
+  this->endbound = this->endptr = &(sequence[queryend-1]);
+
+  return;
+}
+
+
 void
 Reader_free (T *old) {
-  if (*old) {
-    FREE(*old);
-  }
+
+  FREE(*old);
+
   return;
 }
 

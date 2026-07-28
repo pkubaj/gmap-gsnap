@@ -1,4 +1,3 @@
-/* $Id: f0a4b3d9981d94329a82763e0d32fbb9c5f862f8 $ */
 #ifndef UNIVCOORD_INCLUDED
 #define UNIVCOORD_INCLUDED
 #ifdef HAVE_CONFIG_H
@@ -20,7 +19,9 @@ typedef Uint8list_T Univcoordlist_T;
 #define Univcoordlist_next Uint8list_next
 #define Univcoordlist_head Uint8list_head
 #define Univcoordlist_head_set Uint8list_head_set
+#define Univcoordlist_second_value Uint8list_second_value
 #define Univcoordlist_last_value Uint8list_last_value
+#define Univcoordlist_last_elt Uint8list_last_elt
 #define Univcoordlist_free Uint8list_free
 #define Univcoordlist_keep_one Uint8list_keep_one
 #define Univcoordlist_min Uint8list_min
@@ -68,6 +69,16 @@ typedef Uint8tableuint_T Univcoordtableuint_T;
 #define Univcoordtableuint_length Uint8tableuint_length
 #define Univcoordtableuint_keys Uint8tableuint_keys
 
+#include "uint8pairtable.h"
+typedef Uint8pairtable_T Univcoordpairtable_T;
+#define Univcoordpairtable_new Uint8pairtable_new
+#define Univcoordpairtable_free Uint8pairtable_free
+#define Univcoordpairtable_put Uint8pairtable_put
+#define Univcoordpairtable_get Uint8pairtable_get
+#define Univcoordpairtable_length Uint8pairtable_length
+#define Univcoordpairtable_keys Uint8pairtable_keys
+#define Univcoordpairtable_values Uint8pairtable_values
+
 #else
 /* GMAPL */
 /* Previously implemented a faster version of uinttable, but specific to GMAP */
@@ -95,7 +106,9 @@ typedef Uintlist_T Univcoordlist_T;
 #define Univcoordlist_next Uintlist_next
 #define Univcoordlist_head Uintlist_head
 #define Univcoordlist_head_set Uintlist_head_set
+#define Univcoordlist_second_value Uintlist_second_value
 #define Univcoordlist_last_value Uintlist_last_value
+#define Univcoordlist_last_elt Uintlist_last_elt
 #define Univcoordlist_free Uintlist_free
 #define Univcoordlist_keep_one Uintlist_keep_one
 #define Univcoordlist_min Uintlist_min
@@ -141,6 +154,16 @@ typedef Uinttableuint_T Univcoordtableuint_T;
 #define Univcoordtableuint_get Uinttableuint_get
 #define Univcoordtableuint_length Uinttableuint_length
 #define Univcoordtableuint_keys Uinttableuint_keys
+
+#include "uintpairtable.h"
+typedef Uintpairtable_T Univcoordpairtable_T;
+#define Univcoordpairtable_new Uintpairtable_new
+#define Univcoordpairtable_free Uintpairtable_free
+#define Univcoordpairtable_put Uintpairtable_put
+#define Univcoordpairtable_get Uintpairtable_get
+#define Univcoordpairtable_length Uintpairtable_length
+#define Univcoordpairtable_keys Uintpairtable_keys
+#define Univcoordpairtable_values Uintpairtable_values
 
 #else
 /* GMAP */

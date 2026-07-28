@@ -1,4 +1,3 @@
-/* $Id: bzip2.h 157221 2015-01-22 18:38:57Z twu $ */
 #ifndef BZIP2_INCLUDED
 #define BZIP2_INCLUDED
 

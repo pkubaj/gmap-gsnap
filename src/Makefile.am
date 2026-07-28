@@ -436,7 +436,8 @@ GSNAP_FILES = simd.h \
  genomebits_trim.c genomebits_trim.h \
  dinucl_bits.c dinucl_bits.h genome_sites.c genome_sites.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
- mergeinfo.c mergeinfo.h \
+ mergeinfo.c mergeinfo.h merge-method.h \
+ merge-diagonals-heap-uint4.c merge-diagonals-heap-uint4.h \
  merge-uint4.c merge-uint4.h merge-diagonals-simd-uint4.c merge-diagonals-simd-uint4.h \
  record.h \
  filesuffix.h indexdbdef.h indexdb.c indexdb.h \
@@ -493,6 +494,7 @@ GSNAP_FILES = simd.h \
  tableuint.c tableuint.h single-cell.c single-cell.h \
  request.c request.h resulthr.c resulthr.h outputtype.h output.c output.h \
  inbuffer.c inbuffer.h samheader.c samheader.h printbuffer.c printbuffer.h outbuffer.c outbuffer.h \
+ uintpairtable.c uintpairtable.h splice-count.c splice-count.h support.c support.h \
  datadir.c datadir.h pass.h mode.h parserange.c parserange.h \
  getline.c getline.h getopt.c getopt1.c getopt.h gsnap.c
 
@@ -576,9 +578,10 @@ GSNAPL_FILES = simd.h \
  genomebits_trim.c genomebits_trim.h \
  dinucl_bits.c dinucl_bits.h genome_sites.c genome_sites.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
- mergeinfo.c mergeinfo.h \
- merge-diagonals-heap.c merge-diagonals-heap.h \
+ mergeinfo.c mergeinfo.h merge-method.h \
+ merge-diagonals-heap-uint8.c merge-diagonals-heap-uint8.h \
  merge-uint8.c merge-uint8.h merge-diagonals-simd-uint8.c merge-diagonals-simd-uint8.h \
+ merge-diagonals-heap-uint4.c merge-diagonals-heap-uint4.h \
  merge-uint4.c merge-uint4.h merge-diagonals-simd-uint4.c merge-diagonals-simd-uint4.h \
  record.h \
  filesuffix.h indexdbdef.h indexdb.c indexdb.h \
@@ -638,6 +641,7 @@ GSNAPL_FILES = simd.h \
  tableuint.c tableuint.h single-cell.c single-cell.h \
  request.c request.h resulthr.c resulthr.h outputtype.h output.c output.h \
  inbuffer.c inbuffer.h samheader.c samheader.h printbuffer.c printbuffer.h outbuffer.c outbuffer.h \
+ uint8pairtable.c uint8pairtable.h splice-count.c splice-count.h support.c support.h \
  datadir.c datadir.h pass.h mode.h parserange.c parserange.h \
  getline.c getline.h getopt.c getopt1.c getopt.h gsnap.c
 

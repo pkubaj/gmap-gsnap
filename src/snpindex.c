@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: snpindex.c 225258 2022-11-06 06:00:30Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -100,6 +99,13 @@ static char rcsid[] = "$Id: snpindex.c 225258 2022-11-06 06:00:30Z twu $";
 #define debug1(x)
 #endif
 
+/* Generation of oligomers */
+#ifdef DEBUG2
+#define debug2(x) x
+#else
+#define debug2(x)
+#endif
+
 #ifdef CHECK
 #define check(x) x
 #else
@@ -121,6 +127,7 @@ static char *dbversion = NULL;
 static int circular_typeint = -1;
 
 static char *snps_root = NULL;
+static bool make_atsnps_p = false; /* If true, makes an atsnps db with ref+snp, which can then be used by GFILTER */
 static bool show_warnings_p = true;
 static int max_warnings = -1;
 
@@ -133,6 +140,7 @@ static struct option long_options[] = {
   {"sampling", required_argument, 0, 'q'},  /* required_interval */
   {"destdir", required_argument, 0, 'V'},	/* user_destdir */
   {"snpsdb", required_argument, 0, 'v'}, /* snps_root */
+  {"atsnps", no_argument, 0, 0}, /* make_atsnps_p */
 
   /* Output options */
   {"max-warnings", required_argument, 0, 'w'}, /* max_warnings */
@@ -284,16 +292,24 @@ Labeled_interval_cmp (const void *a, const void *b) {
 
 
 
-/* Same procedure used for writing offsets and writing positions, depending on whether positions4/positions8 is NULL */
+/* Same procedure used for writing offsets and writing positions,
+   depending on whether positions4/positions8 is NULL.  In the first
+   pass, we write offsets by setting positions4/positions8 to be NULL
+   (and snponly_offsetsmeta and snponly_offsetsstrm can be NULL */
 static int
-process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
-		   UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, UINT4 *countermeta, UINT4 *counterstrm,
-		   UINT4 *positions4, UINT8 *positions8, Labeled_interval_T *intervals, int nintervals,
+process_snp_block (int *nwarnings,
+
+		   char *snponly_packsizes, UINT4 **snponly_bitpacks,
+		   UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm,
+		   UINT4 *snponly_countermeta, UINT4 *snponly_counterstrm,
+		   UINT4 *snponly_positions4, UINT8 *snponly_positions8,
+
+		   Labeled_interval_T *intervals, int nintervals,
 		   Univcoord_T chroffset, Genome_T genome,
 		   Genomecomp_T *snp_blocks, char *divstring,
 		   IIT_T snps_iit, int index1part, bool coord_values_8p) {
   int nerrors = 0;
-  bool *snpp;
+  bool *snpp, centerp;
   char *refstring;
   char *altstring;
 #ifdef DEBUG1
@@ -329,6 +345,7 @@ process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
 	 }
 	 );
 
+  /* (startposition..endposition) defines a region with index1part surrounding the SNPs */
   if (first_snppos < (Univcoord_T) (index1part - 1)) {
     startposition = chroffset;
   } else {
@@ -499,12 +516,15 @@ process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
   
   for (starti = 0, position = startposition, chrpos = startposition - chroffset; 
        position <= endposition-index1part+1U; starti++, position++, chrpos++) {
+
     if (chrpos % index1interval == 0) {
       /* chrpos % 3 == 0 is same as the condition in indexdb.c for storing a position */
       nsnps = 0;
+      /* centerp = false; */
       badcharp = false;
-      for (k = starti; k < starti + index1part; k++) {
+      for (k = starti, i = 0; k < starti + index1part; k++, i++) {
 	if (snpp[k] == true) {
+	  /* if (i == index1part/2) { centerp = true; } */
 	  nsnps++;
 	}
 	if (refstring[k] != 'A' && refstring[k] != 'C' && refstring[k] != 'G' && refstring[k] != 'T') {
@@ -518,7 +538,13 @@ process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
 	/* too many snps */
       } else if (badcharp == true) {
 	/* bad reference char */
+#if 0
+      } else if (make_atsnps_p == true && centerp == false) {
+	/* Atsnps dbs include only the kmers with a SNP in the middle */
+#endif
       } else {
+	/* Construct all combinations of SNPs */
+	debug2(printf("Constructing oligomers for k %d..%d\n",starti,starti+index1part));
 	oligomers = Uintlist_push(NULL,0U);
 	for (k = starti, i = 0; k < starti + index1part; k++, i++) {
 	  newoligomers = NULL;
@@ -528,12 +554,14 @@ process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
 	    }
 	    
 	  } else if (altstring[k] != 'N') {
+	    /* Handle the given SNP alternate allele */
 	    for (p = oligomers; p != NULL; p = Uintlist_next(p)) {
 	      newoligomers = Uintlist_push(newoligomers,revise_oligomer(Uintlist_head(p),refstring[k]));
 	      newoligomers = Uintlist_push(newoligomers,revise_oligomer(Uintlist_head(p),altstring[k]));
 	    }
 
 	  } else {
+	    /* Handle all 4 nucleotide possibilities */
 	    for (p = oligomers; p != NULL; p = Uintlist_next(p)) {
 	      newoligomers = Uintlist_push(newoligomers,revise_oligomer(Uintlist_head(p),refstring[k]));
 	      if (refstring[k] != 'A') {
@@ -568,46 +596,68 @@ process_snp_block (int *nwarnings, char *packsizes, UINT4 **bitpacks,
 	}
 #endif	
 
-	/* Ignore the first element in oligomers, which is all reference */
-	if (positions4 == NULL && positions8 == NULL) {
-	  /* writing offsets */
-	  for (p = Uintlist_next(oligomers); p != NULL; p = Uintlist_next(p)) {
+	if (snponly_positions4 == NULL && snponly_positions8 == NULL) {
+	  /* Computing offsets (stored in packsizes and bitpacks) */
+
+	  if (make_atsnps_p == true) {
+	    /* Include first (reference) oligomer, since we are not merging reference indexdb */
+	    p = oligomers;
+
+	  } else {
+	    /* Exclude first (reference) oligomer to avoid overlap with reference indexdb */
+	    p = Uintlist_next(oligomers);
+	  }
+
+	  while (p != NULL) {
 	    oligo = Uintlist_head(p);
 	    /* offsets[oligo + 1U] += 1; */
 	    bmer = oligo/BLOCKSIZE;
-	    if (Bitpack64_access_filledp(oligo,(int) packsizes[bmer],bitpacks[bmer]) == true) {
-	      bitpacks[bmer] = Bitpack64_realloc_one((int) packsizes[bmer],bitpacks[bmer]);
-	      packsizes[bmer] += 2;
+	    if (Bitpack64_access_filledp(oligo,(int) snponly_packsizes[bmer],snponly_bitpacks[bmer]) == true) {
+	      snponly_bitpacks[bmer] = Bitpack64_realloc_one((int) snponly_packsizes[bmer],snponly_bitpacks[bmer]);
+	      snponly_packsizes[bmer] += 2;
 	    }
-	    Bitpack64_incr_bitpack(oligo,(int) packsizes[bmer],bitpacks[bmer]);
+	    Bitpack64_incr_bitpack(oligo,(int) snponly_packsizes[bmer],snponly_bitpacks[bmer]);
 	    debug1(nt = shortoligo_nt(oligo,index1part);
 		   printf("Storing %s at %llu (%s:%u)\n",nt,(unsigned long long) position,divstring,chrpos+1U);
 		   FREE(nt));
+	    p = Uintlist_next(p);
 	  }
 
 	} else {
-	  /* writing positions */
-	  if (coord_values_8p == true) {
-	    for (p = Uintlist_next(oligomers); p != NULL; p = Uintlist_next(p)) {
-	      oligo = Uintlist_head(p);
-	      offset = Bitpack64_read_one(oligo,snponly_offsetsmeta,snponly_offsetsstrm) + Bitpack64_incr(oligo,countermeta,counterstrm);
-	      positions8[offset] = position;
-	      debug1(nt = shortoligo_nt(oligo,index1part);
-		     printf("Storing %s at %llu (%s:%u)\n",nt,(unsigned long long) position,divstring,chrpos+1U);
-		     FREE(nt));
-	    }
-	    
+	  /* Computing positions */
+
+	  if (make_atsnps_p == true) {
+	    /* Include first (reference) oligomer, since we are not merging reference indexdb */
+	    p = oligomers;
+
 	  } else {
-	    for (p = Uintlist_next(oligomers); p != NULL; p = Uintlist_next(p)) {
+	    /* Exclude first (reference) oligomer to avoid overlap with reference indexdb */
+	    p = Uintlist_next(oligomers);
+	  }
+
+	  if (coord_values_8p == true) {
+	    while (p != NULL) {
 	      oligo = Uintlist_head(p);
-	      offset = Bitpack64_read_one(oligo,snponly_offsetsmeta,snponly_offsetsstrm) + Bitpack64_incr(oligo,countermeta,counterstrm);
-	      positions4[offset] = (UINT4) position;
+	      offset = Bitpack64_read_one(oligo,snponly_offsetsmeta,snponly_offsetsstrm) + Bitpack64_incr(oligo,snponly_countermeta,snponly_counterstrm);
+	      snponly_positions8[offset] = position;
 	      debug1(nt = shortoligo_nt(oligo,index1part);
 		     printf("Storing %s at %llu (%s:%u)\n",nt,(unsigned long long) position,divstring,chrpos+1U);
 		     FREE(nt));
+	      p = Uintlist_next(p);
+	    }
+	  } else {
+	    while (p != NULL) {
+	      oligo = Uintlist_head(p);
+	      offset = Bitpack64_read_one(oligo,snponly_offsetsmeta,snponly_offsetsstrm) + Bitpack64_incr(oligo,snponly_countermeta,snponly_counterstrm);
+	      snponly_positions4[offset] = (UINT4) position;
+	      debug1(nt = shortoligo_nt(oligo,index1part);
+		     printf("Storing %s at %llu (%s:%u)\n",nt,(unsigned long long) position,divstring,chrpos+1U);
+		     FREE(nt));
+	      p = Uintlist_next(p);
 	    }
 	  }
 	}
+
 	Uintlist_free(&oligomers);
       }
     }
@@ -636,18 +686,19 @@ compute_ascending (UINT4 *ascending, UINT4 *counts) {
 
 
 static void
-write_offsets (char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
-	       char *snp_offsetsmetafile, char *snp_offsetsstrmfile, IIT_T snps_iit,
-	       UINT4 *ref_offsetsmeta, UINT4 *ref_offsetsstrm,
+write_offsets (char *output_offsetsmetafile, char *output_offsetsstrmfile,
+	       char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
+
+	       IIT_T snps_iit, UINT4 *ref_offsetsmeta, UINT4 *ref_offsetsstrm,
 	       Univ_IIT_T chromosome_iit, Genome_T genome,
 	       Genomecomp_T *snp_blocks, Oligospace_T oligospace, int index1part) {
-  char *packsizes;
-  UINT4 **bitpacks;
+  char *snponly_packsizes;
+  UINT4 **snponly_bitpacks;
 
   Labeled_interval_T *intervals;
   int origindex;
   Interval_T interval, copy;
-  int nintervals, nintervals_alias, nerrors, divno, i, j;
+  int nintervals, nintervals_alias, nerrors, divno, ii, i, j;
   Oligospace_T bmerspace, bmer, oligoi;
   char *divstring;
   Chrnum_T chrnum;
@@ -655,7 +706,7 @@ write_offsets (char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
   Chrpos_T chrlength;
   int nwarnings = 0;
 
-  FILE *ptrs_fp, *comp_fp;
+  FILE *ptrs_fp, *strm_fp;
   UINT4 *ptrs, nregisters;
   UINT4 totalcount;
   UINT4 ptri;
@@ -666,13 +717,13 @@ write_offsets (char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
   int buffer_size = BUFFER_SIZE;
   int buffer_i;
 
-  UINT4 diffs[BLOCKSIZE], ascending[BLOCKSIZE+1], counts[BLOCKSIZE], offsets[BLOCKSIZE+1];
+  UINT4 diffs[BLOCKSIZE], ascending[BLOCKSIZE+1], snponly_counts[BLOCKSIZE], ref_offsets[BLOCKSIZE+1];
   int packsize;
 
 
   bmerspace = oligospace/BLOCKSIZE;
-  packsizes = (char *) CALLOC(bmerspace,sizeof(char));
-  bitpacks = (UINT4 **) CALLOC(bmerspace,sizeof(UINT4 *));
+  snponly_packsizes = (char *) CALLOC(bmerspace,sizeof(char));
+  snponly_bitpacks = (UINT4 **) CALLOC(bmerspace,sizeof(UINT4 *));
 
   for (divno = 1; divno < snps_iit->ndivs; divno++) {
     divstring = IIT_divstring(snps_iit,divno);
@@ -720,11 +771,15 @@ write_offsets (char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
 	while (j < nintervals_alias && Interval_low(intervals[j]->interval) < Interval_low(intervals[j-1]->interval) + index1part) {
 	  j++;
 	}
-	nerrors += process_snp_block(&nwarnings,packsizes,bitpacks,
-				     /*snponly_offsetsmeta*/NULL,/*snponly_offsetsstrm*/NULL,/*countermeta*/NULL,/*counterstrm*/NULL,
-				     /*positions4*/NULL,/*positions8*/NULL,&(intervals[i]),/*nintervals*/j-i,
-				     chroffset,genome,snp_blocks,
-				     divstring,snps_iit,index1part,
+	nerrors += process_snp_block(&nwarnings,
+
+				     snponly_packsizes,snponly_bitpacks,
+				     /*snponly_offsetsmeta*/NULL,/*snponly_offsetsstrm*/NULL,
+				     /*snponly_countermeta*/NULL,/*snponly_counterstrm*/NULL,
+				     /*snponly_positions4*/NULL,/*snponly_positions8*/NULL,
+
+				     &(intervals[i]),/*nintervals*/j-i,
+				     chroffset,genome,snp_blocks,divstring,snps_iit,index1part,
 				     /*coord_values_8p (irrelevant)*/false);
 	i = j;
       }
@@ -741,111 +796,129 @@ write_offsets (char *snponly_offsetsmetafile, char *snponly_offsetsstrmfile,
     }
   }
 
-  Bitpack64_write_differential_bitpacks(snponly_offsetsmetafile,snponly_offsetsstrmfile,packsizes,bitpacks,oligospace);
 
 
-  /* Code derived from Bitpack64_write_differential_bitpacks */
-  fprintf(stderr,"Computing combined ref+snp offsets");
-  if ((comp_fp = FOPEN_WRITE_BINARY(snp_offsetsstrmfile)) == NULL) {
-    fprintf(stderr,"Can't write to file %s\n",snp_offsetsstrmfile);
-    exit(9);
-  }
-
-  ptrs = (UINT4 *) CALLOC(((oligospace + BLOCKSIZE)/BLOCKSIZE + 1) * DIFFERENTIAL_METAINFO_SIZE,sizeof(UINT4));
-  ptri = 0;
-  buffer = (UINT4 *) CALLOC(buffer_size,sizeof(UINT4));
-  buffer_i = 0;
-  nregisters = 0;
-
-  totalcount = 0;
-  for (oligoi = 0, bmer = 0; oligoi + BLOCKSIZE <= oligospace; oligoi += BLOCKSIZE, bmer++) {
-    ptrs[ptri++] = nregisters;	/* In 128-bit registers */
-    ptrs[ptri++] = totalcount;
-    Bitpack64_extract_bitpack(counts,packsizes[bmer],bitpacks[bmer]);
-    Bitpack64_block_offsets(offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
-    for (i = 0; i < 64; i++) {
-      if ((oligoi + i) % MONITOR_INTERVAL == 0) {
-	fprintf(stderr,".");
-      }
-      counts[i] += (offsets[i+1] - offsets[i]);
-    }
-    totalcount += compute_ascending(ascending,counts);
-    packsize = Bitpack64_compute_q4_diffs_bidir(diffs,ascending); /* Note: This packsize may differ from packsizes[bmer] */
-    buffer_i = Bitpack64_write_columnar(comp_fp,buffer,buffer_size,buffer_i,diffs,packsize);
-
-    nregisters += packsize / 2;
-  }
-  fprintf(stderr,"done\n");
-
-  /* For nucleotides, expect a single final block where oligoi == oligospace */
-  if (oligoi <= oligospace) {
-    ptrs[ptri++] = nregisters;	/* In 128-bit registers */
-    ptrs[ptri++] = totalcount;
-
-    if (oligoi == oligospace) {
-      /* Don't have a bitpack at [bmerspace] */
-      Bitpack64_extract_bitpack(counts,/*packsize*/0,/*bitpack*/NULL);
-    } else {
-      Bitpack64_extract_bitpack(counts,packsizes[bmer],bitpacks[bmer]);
-    }
-
-    /* For differential, want <=.  For direct, want < */
-    for (i = 0; i <= (int) (oligospace - oligoi); i++) {
-      ptr = Bitpack64_read_two(&end,oligoi,ref_offsetsmeta,ref_offsetsstrm);
-      counts[i] += (end - ptr);
-    }
-    for ( ; i < BLOCKSIZE; i++) {
-      /* Copy last value for rest of block */
-      counts[i] = 0;
-    }
-
-    /* Pack block of < 64 diffs */
-    totalcount += compute_ascending(ascending,counts);
-    packsize = Bitpack64_compute_q4_diffs_bidir(diffs,ascending);
-    buffer_i = Bitpack64_write_columnar(comp_fp,buffer,buffer_size,buffer_i,diffs,packsize);
-
-    nregisters += packsize / 2;
-  }
-
-  /* Write the final pointers, which will point after the end of the file */
-  ptrs[ptri++] = nregisters;	/* In 128-bit registers */
-  ptrs[ptri++] = totalcount;
-
-  if ((ptrs_fp = FOPEN_WRITE_BINARY(snp_offsetsmetafile)) == NULL) {
-    fprintf(stderr,"Can't write to file %s\n",snp_offsetsmetafile);
-    exit(9);
+  if (make_atsnps_p == true) {
+    /* No need for merging.  snponly_packsizes and snponly_bitpacks include the all-ref kmer */
+    Bitpack64_write_differential_bitpacks(snponly_offsetsmetafile,snponly_offsetsstrmfile,snponly_packsizes,snponly_bitpacks,oligospace);
+    
   } else {
-    FWRITE_UINTS(ptrs,ptri,ptrs_fp);
+    /* Needed later for either atsnps offsets, or for merge_positions */
+    Bitpack64_write_differential_bitpacks(snponly_offsetsmetafile,snponly_offsetsstrmfile,snponly_packsizes,snponly_bitpacks,oligospace);
+
+    /* Merge between snponly (which excludes the all-ref kmer) and ref */
+    /* Code derived from Bitpack64_write_differential_bitpacks */
+
+    fprintf(stderr,"Computing combined ref+snp offsets");
+    if ((strm_fp = FOPEN_WRITE_BINARY(output_offsetsstrmfile)) == NULL) {
+      fprintf(stderr,"Can't write to file %s\n",output_offsetsstrmfile);
+      exit(9);
+    }
+
+    ptrs = (UINT4 *) CALLOC(((oligospace + BLOCKSIZE)/BLOCKSIZE + 1) * DIFFERENTIAL_METAINFO_SIZE,sizeof(UINT4));
+    ptri = 0;
+    buffer = (UINT4 *) CALLOC(buffer_size,sizeof(UINT4));
+    buffer_i = 0;
+    nregisters = 0;
+    
+    totalcount = 0;
+    for (oligoi = 0, bmer = 0; oligoi + BLOCKSIZE <= oligospace; oligoi += BLOCKSIZE, bmer++) {
+      ptrs[ptri++] = nregisters;	/* In 128-bit registers */
+      ptrs[ptri++] = totalcount;
+      
+      Bitpack64_extract_bitpack(snponly_counts,snponly_packsizes[bmer],snponly_bitpacks[bmer]);
+      Bitpack64_block_offsets(ref_offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
+      
+      for (ii = 0; ii < BLOCKSIZE; ii++) {
+	if ((oligoi + ii) % MONITOR_INTERVAL == 0) {
+	  fprintf(stderr,".");
+	}
+	/* Add ref counts.  No overlap between snponly positions and ref positions */
+	snponly_counts[ii] += (ref_offsets[ii+1] - ref_offsets[ii]);
+      }
+      totalcount += compute_ascending(ascending,snponly_counts);
+      packsize = Bitpack64_compute_q4_diffs_bidir(diffs,ascending); /* Note: This packsize may differ from packsizes[bmer] */
+      buffer_i = Bitpack64_write_columnar(strm_fp,buffer,buffer_size,buffer_i,diffs,packsize);
+      
+      nregisters += packsize / 2;
+    }
+    fprintf(stderr,"done\n");
+
+    /* For nucleotides, expect a single final block where oligoi == oligospace */
+    if (oligoi <= oligospace) {
+      ptrs[ptri++] = nregisters;	/* In 128-bit registers */
+      ptrs[ptri++] = totalcount;
+      
+      if (oligoi == oligospace) {
+	/* Don't have a bitpack at [bmerspace] */
+	Bitpack64_extract_bitpack(snponly_counts,/*packsize*/0,/*bitpack*/NULL);
+      } else {
+	Bitpack64_extract_bitpack(snponly_counts,snponly_packsizes[bmer],snponly_bitpacks[bmer]);
+      }
+      
+      /* For differential, want <=.  For direct, want < */
+      for (ii = 0; ii <= (int) (oligospace - oligoi); ii++) {
+	ptr = Bitpack64_read_two(&end,oligoi,ref_offsetsmeta,ref_offsetsstrm);
+	snponly_counts[ii] += (end - ptr);
+      }
+      for ( ; ii < BLOCKSIZE; ii++) {
+	/* Copy last value for rest of block */
+	snponly_counts[ii] = 0;
+      }
+      
+      /* Pack block of < 64 diffs */
+      totalcount += compute_ascending(ascending,snponly_counts);
+      packsize = Bitpack64_compute_q4_diffs_bidir(diffs,ascending);
+      buffer_i = Bitpack64_write_columnar(strm_fp,buffer,buffer_size,buffer_i,diffs,packsize);
+      
+      nregisters += packsize / 2;
+    }
+    
+    /* Write the final pointers, which will point after the end of the file */
+    ptrs[ptri++] = nregisters;	/* In 128-bit registers */
+    ptrs[ptri++] = totalcount;
+    
+    if ((ptrs_fp = FOPEN_WRITE_BINARY(output_offsetsmetafile)) == NULL) {
+      fprintf(stderr,"Can't write to file %s\n",output_offsetsmetafile);
+      exit(9);
+    } else {
+      FWRITE_UINTS(ptrs,ptri,ptrs_fp);
+      FREE(ptrs);
+      fclose(ptrs_fp);
+    }
+    
+    /* Empty buffer */
+    if (buffer_i > 0) {
+      FWRITE_UINTS(buffer,buffer_i,strm_fp);	
+      buffer_i = 0;
+    }
+    FREE(buffer);
+    fclose(strm_fp);
+    
+    /* Clean up */
     FREE(ptrs);
-    fclose(ptrs_fp);
   }
     
-  /* Empty buffer */
-  if (buffer_i > 0) {
-    FWRITE_UINTS(buffer,buffer_i,comp_fp);	
-    buffer_i = 0;
-  }
-  FREE(buffer);
-  fclose(comp_fp);
-
 
   /* Clean up */
-  FREE(ptrs);
   for (bmer = 0; bmer < bmerspace; bmer++) {
-    FREE(bitpacks[bmer]);
+    FREE(snponly_bitpacks[bmer]);
   }
-  FREE(bitpacks);
-  FREE(packsizes);
+  FREE(snponly_bitpacks);
+  FREE(snponly_packsizes);
+
 
   return;
 }
 
 
 static void *
-compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T snps_iit, Univ_IIT_T chromosome_iit,
+compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm,
+		   IIT_T snps_iit, Univ_IIT_T chromosome_iit,
 		   Genome_T genome, Oligospace_T oligospace, bool coord_values_8p) {
-  UINT4 *positions4 = NULL;
-  UINT8 *positions8 = NULL;
+  UINT4 *snponly_positions4;
+  UINT8 *snponly_positions8;
+
   UINT4 offsets[BLOCKSIZE+1];
 
   Labeled_interval_T *intervals;
@@ -858,9 +931,11 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
   Univcoord_T chroffset;
   Chrpos_T chrlength;
   Positionsptr_T totalcounts, npositions;
-  UINT4 *countermeta, *counterstrm;
+  UINT4 *snponly_countermeta, *snponly_counterstrm;
   int nwarnings = 0;
 
+
+  /* Allocate memory for snponly positions */
   totalcounts = Bitpack64_read_one(oligospace,snponly_offsetsmeta,snponly_offsetsstrm);
   if (totalcounts == 0) {
     fprintf(stderr,"Something is wrong with the SNP-only offsets.  Total counts is zero.\n");
@@ -872,9 +947,9 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
     exit(9);
   } else if (coord_values_8p == true) {
     fprintf(stderr,"Trying to allocate %u*%d bytes of memory...",totalcounts,(int) sizeof(UINT8));
-    positions4 = (UINT4 *) NULL;
-    positions8 = (UINT8 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT8));
-    if (positions8 == NULL) {
+    snponly_positions4 = (UINT4 *) NULL;
+    snponly_positions8 = (UINT8 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT8));
+    if (snponly_positions8 == NULL) {
       fprintf(stderr,"failed.  Need a computer with sufficient memory.\n");
       exit(9);
     } else {
@@ -882,19 +957,20 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
     }
   } else {
     fprintf(stderr,"Trying to allocate %u*%d bytes of memory...",totalcounts,(int) sizeof(UINT4));
-    positions8 = (UINT8 *) NULL;
-    positions4 = (UINT4 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT4));
-    if (positions4 == NULL) {
+    snponly_positions8 = (UINT8 *) NULL;
+    snponly_positions4 = (UINT4 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT4));
+    if (snponly_positions4 == NULL) {
       fprintf(stderr,"failed.  Need a computer with sufficient memory.\n");
       exit(9);
     } else {
       fprintf(stderr,"done\n");
     }
   }
+  
 
-  /* Prepare counter */
-  countermeta = Indexdb_bitpack_counter(&counterstrm,snponly_offsetsmeta,index1part);
-
+  /* Prepare counters */
+  snponly_countermeta = Indexdb_bitpack_counter(&snponly_counterstrm,snponly_offsetsmeta,index1part);
+  
   for (divno = 1; divno < snps_iit->ndivs; divno++) {
     divstring = IIT_divstring(snps_iit,divno);
     fprintf(stderr,"Processing positions for chromosome %s...",divstring);
@@ -905,7 +981,7 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
       chroffset = Univ_IIT_interval_low(chromosome_iit,chrnum);
       chrlength = Univ_IIT_length(chromosome_iit,chrnum);
       nintervals = IIT_nintervals(snps_iit,divno);
-
+      
       if (Univ_IIT_interval_type(chromosome_iit,chrnum) == circular_typeint) {
 	fprintf(stderr,"and is circular...");
 	nintervals_alias = 2*nintervals;
@@ -922,7 +998,7 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
 			      Interval_type(interval));
 	  intervals[i] = Labeled_interval_new(origindex,/*interval*/copy);
 	}
-
+	
       } else {
 	nintervals_alias = nintervals;
 	intervals = (Labeled_interval_T *) CALLOC(nintervals,sizeof(Labeled_interval_T));
@@ -931,19 +1007,23 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
 	  intervals[i] = Labeled_interval_new(origindex,/*interval*/&(snps_iit->intervals[divno][i]));
 	}
       }
-
+      
       qsort(intervals,nintervals,sizeof(Labeled_interval_T),Labeled_interval_cmp);
-
+      
       i = 0;
       while (i < nintervals_alias) {
 	j = i + 1;
 	while (j < nintervals_alias && Interval_low(intervals[j]->interval) < Interval_low(intervals[j-1]->interval) + index1part) {
 	  j++;
 	}
-	process_snp_block(&nwarnings,/*packsizes*/NULL,/*bitpacks*/NULL,
-			  snponly_offsetsmeta,snponly_offsetsstrm,countermeta,counterstrm,
-			  positions4,positions8,&(intervals[i]),/*nintervals*/j-i,
-			  chroffset,genome,/*snp_blocks*/NULL,
+	process_snp_block(&nwarnings,
+
+			  /*snponly_packsizes*/NULL,/*snponly_bitpacks*/NULL,
+			  snponly_offsetsmeta,snponly_offsetsstrm,
+			  snponly_countermeta,snponly_counterstrm,
+			  snponly_positions4,snponly_positions8,
+
+			  &(intervals[i]),/*nintervals*/j-i,chroffset,genome,/*snp_blocks*/NULL,
 			  divstring,snps_iit,index1part,coord_values_8p);
 	i = j;
       }
@@ -960,8 +1040,8 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
     }
   }
 
-  FREE(counterstrm);
-  FREE(countermeta);
+  FREE(snponly_counterstrm);
+  FREE(snponly_countermeta);
 
   /* Sort positions in each block */
   fprintf(stderr,"Sorting snp positions");
@@ -973,13 +1053,14 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
 	  fprintf(stderr,".");
 	}
 	if ((npositions = offsets[i+1] - offsets[i]) > 1) {
-	  qsort(&(positions8[offsets[i]]),npositions,sizeof(UINT8),UINT8_compare);
+	  qsort(&(snponly_positions8[offsets[i]]),npositions,sizeof(UINT8),UINT8_compare);
 	}
       }
     }
-    fprintf(stderr,"done\n");
-    return positions8;
 
+    fprintf(stderr,"done\n");
+    return snponly_positions8;
+    
   } else {
     for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
       Bitpack64_block_offsets(offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
@@ -988,13 +1069,48 @@ compute_positions (UINT4 *snponly_offsetsmeta, UINT4 *snponly_offsetsstrm, IIT_T
 	  fprintf(stderr,".");
 	}
 	if ((npositions = offsets[i+1] - offsets[i]) > 1) {
-	  qsort(&(positions4[offsets[i]]),npositions,sizeof(UINT4),UINT4_compare);
+	  qsort(&(snponly_positions4[offsets[i]]),npositions,sizeof(UINT4),UINT4_compare);
 	}
       }
     }
+
     fprintf(stderr,"done\n");
-    return positions4;
+    return snponly_positions4;
   }
+}
+
+
+static void
+write_positions8 (FILE *positions_high_fp, FILE *positions_fp, UINT8 *start1, UINT8 *end1) {
+  unsigned char position8_high;
+  UINT4 position8_low;
+  UINT8 *ptr1 = start1;
+#ifdef WORDS_BIGENDIAN
+  UINT8 position1;
+#endif
+
+#ifdef WORDS_BIGENDIAN
+  while (ptr1 < end1) {
+    position1 = Bigendian_convert_uint8(*ptr1);
+    position8_high = position1 >> POSITIONS8_HIGH_SHIFT;
+    position8_low = position1 & POSITIONS8_LOW_MASK;
+
+    FWRITE_CHAR(position8_high,positions_high_fp);
+    FWRITE_UINT(position8_low,positions_fp);
+    ptr1++;
+  }
+
+#else
+  while (ptr1 < end1) {
+    position8_high = *ptr1 >> POSITIONS8_HIGH_SHIFT;
+    position8_low = *ptr1 & POSITIONS8_LOW_MASK;
+    FWRITE_CHAR(position8_high,positions_high_fp);
+    FWRITE_UINT(position8_low,positions_fp);
+    ptr1++;
+  }
+#endif
+
+  return;
 }
 
 
@@ -1027,15 +1143,14 @@ merge_positions8 (FILE *positions_high_fp, FILE *positions_fp,
       FWRITE_UINT(position8_low,positions_fp);
       ptr2++;
     } else {
+      /* Not expecting any overlap between snponly and ref, or between snponly and overlap */
       nt = shortoligo_nt(oligo,index1part);
       fprintf(stderr,"Problem: saw duplicate positions %u in oligo %s\n",position1,nt);
       FREE(nt);
       abort();
-      /*
-      FWRITE_UINT8(*ptr1,positions_fp);
-      ptr1++;
-      ptr2++;
-      */
+      /* FWRITE_UINT8(*ptr1,positions_fp); */
+      /* ptr1++; */
+      /* ptr2++; */
     }
 
 #else
@@ -1052,15 +1167,14 @@ merge_positions8 (FILE *positions_high_fp, FILE *positions_fp,
       FWRITE_UINT(position8_low,positions_fp);
       ptr2++;
     } else {
+      /* Not expecting any overlap between snponly and ref, or between snponly and overlap */
       nt = shortoligo_nt(oligo,index1part);
       fprintf(stderr,"Problem: saw duplicate positions %llu in oligo %s\n",(unsigned long long) *ptr1,nt);
       FREE(nt);
       abort();
-      /*
-      FWRITE_UINT8(*ptr1,positions_fp);
-      ptr1++;
-      ptr2++;
-      */
+      /* FWRITE_UINT8(*ptr1,positions_fp); */
+      /* ptr1++; */
+      /* ptr2++; */
     }
 #endif
   }
@@ -1112,6 +1226,29 @@ merge_positions8 (FILE *positions_high_fp, FILE *positions_fp,
 
 
 static void
+write_positions4 (FILE *positions_fp, UINT4 *start1, UINT4 *end1) {
+  UINT4 *ptr1 = start1;
+#ifdef WORDS_BIGENDIAN
+  UINT4 position1;
+#endif
+
+#ifdef WORDS_BIGENDIAN
+  while (ptr1 < end1) {
+    position1 = Bigendian_convert_uint(*ptr1);
+    FWRITE_UINT(position1,positions_fp);
+    ptr1++;
+  }
+#else
+  if (ptr1 < end1) {
+    FWRITE_UINTS(ptr1,end1-ptr1,positions_fp);
+  }
+#endif
+
+  return;
+}
+
+
+static void
 merge_positions4 (FILE *positions_fp, UINT4 *start1, UINT4 *end1,
 		  UINT4 *start2, UINT4 *end2, Oligospace_T oligo, int index1part) {
   UINT4 *ptr1 = start1, *ptr2 = start2;
@@ -1131,15 +1268,14 @@ merge_positions4 (FILE *positions_fp, UINT4 *start1, UINT4 *end1,
       FWRITE_UINT(position2,positions_fp);
       ptr2++;
     } else {
+      /* Not expecting any overlap between snponly and ref, or between snponly and overlap */
       nt = shortoligo_nt(oligo,index1part);
       fprintf(stderr,"Problem: saw duplicate positions %u in oligo %s\n",*ptr1,nt);
       FREE(nt);
       abort();
-      /*
-      FWRITE_UINT(*ptr1,positions_fp);
-      ptr1++;
-      ptr2++;
-      */
+      /* FWRITE_UINT(*ptr1,positions_fp); */
+      /* ptr1++; */
+      /* ptr2++; */
     }
 
 #else
@@ -1151,15 +1287,14 @@ merge_positions4 (FILE *positions_fp, UINT4 *start1, UINT4 *end1,
       FWRITE_UINT(*ptr2,positions_fp);
       ptr2++;
     } else {
+      /* Not expecting any overlap between snponly and ref, or between snponly and overlap */
       nt = shortoligo_nt(oligo,index1part);
       fprintf(stderr,"Problem: saw duplicate positions %u in oligo %s\n",*ptr1,nt);
       FREE(nt);
       abort();
-      /*
-      FWRITE_UINT(*ptr1,positions_fp);
-      ptr1++;
-      ptr2++;
-      */
+      /* FWRITE_UINT(*ptr1,positions_fp); */
+      /* ptr1++; */
+      /* ptr2++; */
     }
 #endif
   }
@@ -1212,8 +1347,8 @@ main (int argc, char *argv[]) {
 
   unsigned char *ref_positions8_high;
   UINT4 *ref_positions8_low;
-  UINT8 *snp_positions8, *ref_positions8;
-  UINT4 *snp_positions4, *ref_positions4;
+  UINT8 *snponly_positions8, *ref_positions8;
+  UINT4 *snponly_positions4, *ref_positions4;
   Univcoord_T nuint4, genomelength;
   Genomecomp_T *snp_blocks;
   Oligospace_T oligospace, oligoi;
@@ -1226,7 +1361,8 @@ main (int argc, char *argv[]) {
   bool coord_values_8p;
   Indexdb_filenames_T indexdb_filenames;
   char *filename, *high_filename, *low_filename, *flags_filename,
-    *snp_offsetsmetafile, *snp_offsetsstrmfile, *snponly_offsetsmetafile, *snponly_offsetsstrmfile;
+    *output_offsetsmetafile, *output_offsetsstrmfile,
+    *snponly_offsetsmetafile, *snponly_offsetsstrmfile;
   FILE *genome_fp, *high_fp, *low_fp, *flags_fp, *positions_high_fp, *positions_fp;
   int ref_offsetsmeta_fd, ref_offsetsstrm_fd, ref_positions_high_fd, ref_positions_fd,
     snponly_offsetsmeta_fd, snponly_offsetsstrm_fd;
@@ -1248,9 +1384,14 @@ main (int argc, char *argv[]) {
       if (!strcmp(long_name,"version")) {
 	print_program_version();
 	exit(0);
+
       } else if (!strcmp(long_name,"help")) {
 	print_program_usage();
 	exit(0);
+
+      } else if (!strcmp(long_name,"atsnps")) {
+	make_atsnps_p = true;
+
       } else {
 	/* Shouldn't reach here */
 	fprintf(stderr,"Don't recognize option %s.  For usage, run 'snpindex --help'",long_name);
@@ -1367,93 +1508,132 @@ main (int argc, char *argv[]) {
   }
 
   oligospace = power(4,index1part);
-  indexdb_filenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,
-					    sourcedir,fileroot,IDX_FILESUFFIX,/*snps_root*/NULL,
-					    required_index1part,required_interval,
-					    /*offsets_only_p*/false);
 
-  /* Write offsets and compute snp_blocks */
+  if (make_atsnps_p == true) {
+    if (required_index1part == 0) {
+      index1part = 15;
+    } else {
+      index1part = required_index1part;
+    }
+
+    if (required_interval == 0) {
+      index1interval = 1;
+    } else {
+      index1interval = required_interval;
+    }
+
+    ref_offsetsmeta = (UINT4 *) NULL;
+    ref_offsetsstrm = (UINT4 *) NULL;
+
+    /* Use snponly files as output */
+    output_offsetsmetafile = (char *) NULL;
+    output_offsetsstrmfile = (char *) NULL;
+
+    snponly_offsetsmetafile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+strlen(".")+
+					      strlen(IDX_FILESUFFIX)+/*index1part*/2+/*index1interval*/1+
+					      strlen("offsets64meta.")+strlen(snps_root)+1,sizeof(char));
+    sprintf(snponly_offsetsmetafile,"%s/%s.%s%02d%doffsets64meta.%s",destdir,fileroot,IDX_FILESUFFIX,index1part,index1interval,snps_root);
+    snponly_offsetsstrmfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+strlen(".")+
+					      strlen(IDX_FILESUFFIX)+/*index1part*/2+/*index1interval*/1+
+					      strlen("offsets64strm.")+strlen(snps_root)+1,sizeof(char));
+    sprintf(snponly_offsetsstrmfile,"%s/%s.%s%02d%doffsets64strm.%s",destdir,fileroot,IDX_FILESUFFIX,index1part,index1interval,snps_root);
+
+  } else if ((indexdb_filenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,
+							sourcedir,fileroot,IDX_FILESUFFIX,/*snps_root*/NULL,
+							required_index1part,required_interval,
+							/*offsets_only_p*/false)) == NULL) {
+    fprintf(stderr,"Could not find reference indexdb matching the given requirements for -k and -q\n");
+    exit(9);
+
+  } else {
+    /* Need to merge snponly with reference */
 #ifdef HAVE_MMAP
-  ref_offsetsmeta = (UINT4 *) Access_mmap(&ref_offsetsmeta_fd,&ref_offsetsmeta_len,&seconds,indexdb_filenames->pointers_filename,/*randomp*/false);
-  ref_offsetsstrm = (UINT4 *) Access_mmap(&ref_offsetsstrm_fd,&ref_offsetsstrm_len,&seconds,indexdb_filenames->offsets_filename,/*randomp*/false);
+    ref_offsetsmeta = (UINT4 *) Access_mmap(&ref_offsetsmeta_fd,&ref_offsetsmeta_len,&seconds,indexdb_filenames->pointers_filename,/*randomp*/false);
+    ref_offsetsstrm = (UINT4 *) Access_mmap(&ref_offsetsstrm_fd,&ref_offsetsstrm_len,&seconds,indexdb_filenames->offsets_filename,/*randomp*/false);
 #else
-  ref_offsetsmeta = (UINT4 *) Access_allocate_private(&offsetsmeta_access,&ref_offsetsmeta_len,&seconds,indexdb_filenames->pointers_filename,sizeof(UINT4));
-  ref_offsetsstrm = (UINT4 *) Access_allocate_private(&offsetsstrm_access,&ref_offsetsstrm_len,&seconds,indexdb_filenames->offsets_filename,sizeof(UINT4));
+    ref_offsetsmeta = (UINT4 *) Access_allocate_private(&offsetsmeta_access,&ref_offsetsmeta_len,&seconds,indexdb_filenames->pointers_filename,sizeof(UINT4));
+    ref_offsetsstrm = (UINT4 *) Access_allocate_private(&offsetsstrm_access,&ref_offsetsstrm_len,&seconds,indexdb_filenames->offsets_filename,sizeof(UINT4));
 #endif
 
-  /* Write snponly and SNP offsets */
-  snp_offsetsmetafile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->pointers_basename_ptr)+
-					strlen(".")+strlen(snps_root)+1,sizeof(char));
-  sprintf(snp_offsetsmetafile,"%s/%s.%s",destdir,indexdb_filenames->pointers_basename_ptr,snps_root);
-  snp_offsetsstrmfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->offsets_basename_ptr)+
-					strlen(".")+strlen(snps_root)+1,sizeof(char));
-  sprintf(snp_offsetsstrmfile,"%s/%s.%s",destdir,indexdb_filenames->offsets_basename_ptr,snps_root);
+    output_offsetsmetafile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->pointers_basename_ptr)+
+					     strlen(".")+strlen(snps_root)+1,sizeof(char));
+    sprintf(output_offsetsmetafile,"%s/%s.%s",destdir,indexdb_filenames->pointers_basename_ptr,snps_root);
+    output_offsetsstrmfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->offsets_basename_ptr)+
+					     strlen(".")+strlen(snps_root)+1,sizeof(char));
+    sprintf(output_offsetsstrmfile,"%s/%s.%s",destdir,indexdb_filenames->offsets_basename_ptr,snps_root);
 
-  snponly_offsetsmetafile = (char *) CALLOC(strlen(snp_offsetsmetafile) + strlen(".only") + 1,sizeof(char));
-  sprintf(snponly_offsetsmetafile,"%s.only",snp_offsetsmetafile);
-  snponly_offsetsstrmfile = (char *) CALLOC(strlen(snp_offsetsstrmfile) + strlen(".only") + 1,sizeof(char));
-  sprintf(snponly_offsetsstrmfile,"%s.only",snp_offsetsstrmfile);
-
-  write_offsets(snponly_offsetsmetafile,snponly_offsetsstrmfile,snp_offsetsmetafile,snp_offsetsstrmfile,
-		snps_iit,ref_offsetsmeta,ref_offsetsstrm,chromosome_iit,genome,snp_blocks,oligospace,index1part);
-
-  FREE(snp_offsetsmetafile);
-  FREE(snp_offsetsstrmfile);
-
-
-  /* Write genomecomp */
-  filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-			     strlen(".genomecomp.")+strlen(snps_root)+1,sizeof(char));
-  sprintf(filename,"%s/%s.genomecomp.%s",destdir,fileroot,snps_root);
-  if ((genome_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for writing genome\n",filename);
-    exit(9);
+    /* Intermediate files */
+    snponly_offsetsmetafile = (char *) CALLOC(strlen(output_offsetsmetafile) + strlen(".snponly") + 1,sizeof(char));
+    sprintf(snponly_offsetsmetafile,"%s.snponly",output_offsetsmetafile);
+    snponly_offsetsstrmfile = (char *) CALLOC(strlen(output_offsetsstrmfile) + strlen(".snponly") + 1,sizeof(char));
+    sprintf(snponly_offsetsstrmfile,"%s.snponly",output_offsetsstrmfile);
   }
-  fprintf(stderr,"Writing genome file %s...",filename);
-  FWRITE_UINTS(snp_blocks,nuint4,genome_fp);
-  fclose(genome_fp);
-  FREE(snp_blocks);
-  fprintf(stderr,"done\n");
+
+  
+  write_offsets(output_offsetsmetafile,output_offsetsstrmfile,
+		snponly_offsetsmetafile,snponly_offsetsstrmfile,
+		snps_iit,ref_offsetsmeta,ref_offsetsstrm,chromosome_iit,
+		genome,snp_blocks,oligospace,index1part);
+
+  if (make_atsnps_p == true) {
+    FREE(snp_blocks);
+    
+  } else {
+    /* Write genomecomp */
+    filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+			       strlen(".genomecomp.")+strlen(snps_root)+1,sizeof(char));
+    sprintf(filename,"%s/%s.genomecomp.%s",destdir,fileroot,snps_root);
+    if ((genome_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for writing genome\n",filename);
+      exit(9);
+    }
+    fprintf(stderr,"Writing genome file %s...",filename);
+    FWRITE_UINTS(snp_blocks,nuint4,genome_fp);
+    fclose(genome_fp);
+    FREE(snp_blocks);
+    fprintf(stderr,"done\n");
 
 
-  /* Write genomebits */
-  if ((genome_fp = FOPEN_READ_BINARY(filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for genome\n",filename);
-    exit(9);
+    /* Write genomebits */
+    if ((genome_fp = FOPEN_READ_BINARY(filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for genome\n",filename);
+      exit(9);
+    } else {
+      FREE(filename);
+    }
+
+    high_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				    strlen(".genomebitsh.")+strlen(snps_root)+1,sizeof(char));
+    low_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				   strlen(".genomebitsl.")+strlen(snps_root)+1,sizeof(char));
+    flags_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				     strlen(".genomebitsf.")+strlen(snps_root)+1,sizeof(char));
+    
+    sprintf(high_filename,"%s/%s.genomefwdh.%s",destdir,fileroot,snps_root);
+    sprintf(low_filename,"%s/%s.genomefwdl.%s",destdir,fileroot,snps_root);
+    sprintf(flags_filename,"%s/%s.genomefwdf.%s",destdir,fileroot,snps_root);
+    
+    if ((high_fp = FOPEN_WRITE_BINARY(high_filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for writing genome\n",high_filename);
+      exit(9);
+    } else if ((low_fp = FOPEN_WRITE_BINARY(low_filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for writing genome\n",low_filename);
+      exit(9);
+    } else if ((flags_fp = FOPEN_WRITE_BINARY(flags_filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for writing genome\n",flags_filename);
+      exit(9);
+    }
+    fprintf(stderr,"Writing genomebits files...");
+    Compress_unshuffle_bits(high_fp,low_fp,flags_fp,/*in*/genome_fp);
+    fclose(flags_fp);
+    fclose(low_fp);
+    fclose(high_fp);
+    fclose(genome_fp);
+    FREE(flags_filename);
+    FREE(low_filename);
+    FREE(high_filename);
+    fprintf(stderr,"done\n");
   }
-  FREE(filename);
-
-  high_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				  strlen(".genomebitsh.")+strlen(snps_root)+1,sizeof(char));
-  low_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				  strlen(".genomebitsl.")+strlen(snps_root)+1,sizeof(char));
-  flags_filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				  strlen(".genomebitsf.")+strlen(snps_root)+1,sizeof(char));
-
-  sprintf(high_filename,"%s/%s.genomefwdh.%s",destdir,fileroot,snps_root);
-  sprintf(low_filename,"%s/%s.genomefwdl.%s",destdir,fileroot,snps_root);
-  sprintf(flags_filename,"%s/%s.genomefwdf.%s",destdir,fileroot,snps_root);
-
-  if ((high_fp = FOPEN_WRITE_BINARY(high_filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for writing genome\n",high_filename);
-    exit(9);
-  } else if ((low_fp = FOPEN_WRITE_BINARY(low_filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for writing genome\n",low_filename);
-    exit(9);
-  } else if ((flags_fp = FOPEN_WRITE_BINARY(flags_filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for writing genome\n",flags_filename);
-    exit(9);
-  }
-  fprintf(stderr,"Writing genomebits files...");
-  Compress_unshuffle_bits(high_fp,low_fp,flags_fp,/*in*/genome_fp);
-  fclose(flags_fp);
-  fclose(low_fp);
-  fclose(high_fp);
-  fclose(genome_fp);
-  FREE(flags_filename);
-  FREE(low_filename);
-  FREE(high_filename);
-  fprintf(stderr,"done\n");
 
 
   /* Compute snponly positions and keep in memory */
@@ -1466,143 +1646,191 @@ main (int argc, char *argv[]) {
   snponly_offsetsmeta = (UINT4 *) Access_allocate_private(&offsetsmeta_access,&snponly_offsetsmeta_len,&seconds,snponly_offsetsmetafile,sizeof(UINT4));
   snponly_offsetsstrm = (UINT4 *) Access_allocate_private(&offsetsstrm_access,&snponly_offsetsstrm_len,&seconds,snponly_offsetsstrmfile,sizeof(UINT4));
 #endif
-  if (coord_values_8p == true) {
-    snp_positions8 = compute_positions(snponly_offsetsmeta,snponly_offsetsstrm,snps_iit,chromosome_iit,genome,oligospace,/*coord_values_8p*/true);
-  } else {
-    snp_positions4 = compute_positions(snponly_offsetsmeta,snponly_offsetsstrm,snps_iit,chromosome_iit,genome,oligospace,/*coord_values_8p*/false);
-  }
 
-
-  /* Read reference positions and merge */
   if (coord_values_8p == true) {
-#ifdef HAVE_MMAP
-    ref_positions8_high = (unsigned char *) Access_mmap(&ref_positions_high_fd,&ref_positions_high_len,&seconds,
-							indexdb_filenames->positions_high_filename,/*randomp*/false);
-    ref_positions8_low = (UINT4 *) Access_mmap(&ref_positions_fd,&ref_positions_len,&seconds,
-					       indexdb_filenames->positions_filename,/*randomp*/false);
-#else
-    ref_positions8_high = (unsigned char *) Access_allocate_private(&positions_access,&ref_positions_high_len,&seconds,
-								    indexdb_filenames->positions_high_filename,sizeof(unsigned char));
-    ref_positions8_low = (UINT4 *) Access_allocate_private(&positions_access,&ref_positions_len,&seconds,
-							   indexdb_filenames->positions_filename,sizeof(UINT4));
-#endif
-    /* Unpack 8-byte positions into memory */
-    totalcounts = ref_positions_high_len/sizeof(unsigned char);
-    if (totalcounts > 4294967295) {
-      fprintf(stderr,"Program not yet designed to handle huge genomes\n");
-      abort();
-    }
-    ref_positions8 = (UINT8 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT8));
-    for (i = 0; i < totalcounts; i++) {
-      ref_positions8[i] = ((UINT8) ref_positions8_high[i] << 32) + ref_positions8_low[i];
-    }
-#ifdef HAVE_MMAP
-    munmap((void *) ref_positions8_high,ref_positions_high_len);
-    munmap((void *) ref_positions8_low,ref_positions_len);
-    close(ref_positions_high_fd);
-    close(ref_positions_fd);
-#else
-    FREE(ref_positions8_high);	/* Not using shared */
-    FREE(ref_positions8_low);	/* Not using shared */
-    /* Access_deallocate(ref_positions8_high,ref_positions_high_shmid,ref_positions_high_key); */
-    /* Access_deallocate(ref_positions8_low,ref_positions_shmid,ref_positions_key); */
-#endif
+    snponly_positions8 = (UINT8 *) compute_positions(snponly_offsetsmeta,snponly_offsetsstrm,
+						     snps_iit,chromosome_iit,genome,oligospace,/*coord_values_8p*/true);
 
   } else {
-#ifdef HAVE_MMAP
-    ref_positions4 = (UINT4 *) Access_mmap(&ref_positions_fd,&ref_positions_len,&seconds,
-					   indexdb_filenames->positions_filename,/*randomp*/false);
-#else
-    ref_positions4 = (UINT4 *) Access_allocate_private(&positions_access,&ref_positions_len,&seconds,
-						       indexdb_filenames->positions_filename,sizeof(UINT4));
-#endif
+    snponly_positions4 = (UINT4 *) compute_positions(snponly_offsetsmeta,snponly_offsetsstrm,
+						     snps_iit,chromosome_iit,genome,oligospace,/*coord_values_8p*/false);
+
   }
 
-
-  if (coord_values_8p == true) {
-    filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->positions_high_basename_ptr)+
-			       strlen(".")+strlen(snps_root)+1,sizeof(char));
-    sprintf(filename,"%s/%s.%s",destdir,indexdb_filenames->positions_high_basename_ptr,snps_root);
-    if ((positions_high_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
+  if (make_atsnps_p == true) {
+    filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+strlen(".")+
+			       strlen(IDX_FILESUFFIX)+/*index1part*/2+/*index1interval*/1+
+			       strlen("positions.")+strlen(snps_root)+1,sizeof(char));
+    sprintf(filename,"%s/%s.%s%02d%dpositions.%s",destdir,fileroot,IDX_FILESUFFIX,index1part,index1interval,snps_root);
+    if ((positions_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
       fprintf(stderr,"Can't open file %s for writing\n",filename);
       exit(9);
+    } else {
+      FREE(filename);
     }
-    FREE(filename);
-  }
 
-  filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->positions_basename_ptr)+
-			     strlen(".")+strlen(snps_root)+1,sizeof(char));
-  sprintf(filename,"%s/%s.%s",destdir,indexdb_filenames->positions_basename_ptr,snps_root);
-  if ((positions_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
-    fprintf(stderr,"Can't open file %s for writing\n",filename);
-    exit(9);
-  }
-  FREE(filename);
+    if (coord_values_8p == true) {
+      filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+strlen(".")+
+				 strlen(IDX_FILESUFFIX)+/*index1part*/2+/*index1interval*/1+
+				 strlen("positionsh.")+strlen(snps_root)+1,sizeof(char));
+      sprintf(filename,"%s/%s.%s%02d%dpositionsh.%s",destdir,fileroot,IDX_FILESUFFIX,index1part,index1interval,snps_root);
+      if ((positions_high_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
+	fprintf(stderr,"Can't open file %s for writing\n",filename);
+	exit(9);
+      } else {
+	FREE(filename);
+      }
 
-
-  fprintf(stderr,"Merging snp positions with reference positions");
-  if (coord_values_8p == true) {
-    for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-      Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
-      Bitpack64_block_offsets(ref_offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
-      for (ii = 0; ii < BLOCKSIZE; ii++) {
-	if ((oligoi + ii) % MONITOR_INTERVAL == 0) {
-	  fprintf(stderr,".");
+      for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
+	Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
+	for (ii = 0; ii < BLOCKSIZE; ii++) {
+	  write_positions8(positions_high_fp,positions_fp,
+			   &(snponly_positions8[snponly_offsets[ii]]),&(snponly_positions8[snponly_offsets[ii+1]]));
 	}
-	merge_positions8(positions_high_fp,positions_fp,
-			 &(snp_positions8[snponly_offsets[ii]]),&(snp_positions8[snponly_offsets[ii+1]]),
-			 &(ref_positions8[ref_offsets[ii]]),&(ref_positions8[ref_offsets[ii+1]]),oligoi + ii,index1part);
+      }
+
+    } else {
+      for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
+	Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
+	for (ii = 0; ii < BLOCKSIZE; ii++) {
+	  write_positions4(positions_fp,
+			   &(snponly_positions4[snponly_offsets[ii]]),&(snponly_positions4[snponly_offsets[ii+1]]));
+	}
       }
     }
+    
   } else {
-    for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-      Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
-      Bitpack64_block_offsets(ref_offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
-      for (ii = 0; ii < BLOCKSIZE; ii++) {
-	if ((oligoi + ii) % MONITOR_INTERVAL == 0) {
-	  fprintf(stderr,".");
-	}
-	merge_positions4(positions_fp,&(snp_positions4[snponly_offsets[ii]]),&(snp_positions4[snponly_offsets[ii+1]]),
-			 &(ref_positions4[ref_offsets[ii]]),&(ref_positions4[ref_offsets[ii+1]]),oligoi + ii,index1part);
-      }
+    filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->positions_basename_ptr)+
+			       strlen(".")+strlen(snps_root)+1,sizeof(char));
+    sprintf(filename,"%s/%s.%s",destdir,indexdb_filenames->positions_basename_ptr,snps_root);
+    if ((positions_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
+      fprintf(stderr,"Can't open file %s for writing\n",filename);
+      exit(9);
+    } else {
+      FREE(filename);
     }
+
+    /* Merge snponly with reference positions */
+    fprintf(stderr,"Merging snponly positions with reference positions");
+    if (coord_values_8p == true) {
+      filename = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(indexdb_filenames->positions_high_basename_ptr)+
+				 strlen(".")+strlen(snps_root)+1,sizeof(char));
+      sprintf(filename,"%s/%s.%s",destdir,indexdb_filenames->positions_high_basename_ptr,snps_root);
+      if ((positions_high_fp = FOPEN_WRITE_BINARY(filename)) == NULL) {
+	fprintf(stderr,"Can't open file %s for writing\n",filename);
+	exit(9);
+      } else {
+	FREE(filename);
+      }
+
+      /* Read reference positions and merge */
+#ifdef HAVE_MMAP
+      ref_positions8_high = (unsigned char *) Access_mmap(&ref_positions_high_fd,&ref_positions_high_len,&seconds,
+							  indexdb_filenames->positions_high_filename,/*randomp*/false);
+      ref_positions8_low = (UINT4 *) Access_mmap(&ref_positions_fd,&ref_positions_len,&seconds,
+						 indexdb_filenames->positions_filename,/*randomp*/false);
+#else
+      ref_positions8_high = (unsigned char *) Access_allocate_private(&positions_access,&ref_positions_high_len,&seconds,
+								      indexdb_filenames->positions_high_filename,sizeof(unsigned char));
+      ref_positions8_low = (UINT4 *) Access_allocate_private(&positions_access,&ref_positions_len,&seconds,
+							     indexdb_filenames->positions_filename,sizeof(UINT4));
+#endif
+      /* Unpack 8-byte positions into memory */
+      totalcounts = ref_positions_high_len/sizeof(unsigned char);
+      if (totalcounts > 4294967295) {
+	fprintf(stderr,"Program not yet designed to handle huge genomes\n");
+	abort();
+      }
+      ref_positions8 = (UINT8 *) CALLOC_NO_EXCEPTION(totalcounts,sizeof(UINT8));
+      for (i = 0; i < totalcounts; i++) {
+	ref_positions8[i] = ((UINT8) ref_positions8_high[i] << 32) + ref_positions8_low[i];
+      }
+#ifdef HAVE_MMAP
+      munmap((void *) ref_positions8_high,ref_positions_high_len);
+      munmap((void *) ref_positions8_low,ref_positions_len);
+      close(ref_positions_high_fd);
+      close(ref_positions_fd);
+#else
+      FREE(ref_positions8_high);	/* Not using shared */
+      FREE(ref_positions8_low);	/* Not using shared */
+      /* Access_deallocate(ref_positions8_high,ref_positions_high_shmid,ref_positions_high_key); */
+      /* Access_deallocate(ref_positions8_low,ref_positions_shmid,ref_positions_key); */
+#endif
+
+      for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
+	Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
+	Bitpack64_block_offsets(ref_offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
+	for (ii = 0; ii < BLOCKSIZE; ii++) {
+	  if ((oligoi + ii) % MONITOR_INTERVAL == 0) {
+	    fprintf(stderr,".");
+	  }
+	  merge_positions8(positions_high_fp,positions_fp,
+			   &(snponly_positions8[snponly_offsets[ii]]),&(snponly_positions8[snponly_offsets[ii+1]]),
+			   &(ref_positions8[ref_offsets[ii]]),&(ref_positions8[ref_offsets[ii+1]]),oligoi + ii,index1part);
+	}
+      }
+      
+      /* For both mmap and allocated, since we have already combined positions_high and positions */
+      FREE(ref_positions8);
+
+    } else {
+#ifdef HAVE_MMAP
+      ref_positions4 = (UINT4 *) Access_mmap(&ref_positions_fd,&ref_positions_len,&seconds,
+					     indexdb_filenames->positions_filename,/*randomp*/false);
+#else
+      ref_positions4 = (UINT4 *) Access_allocate_private(&positions_access,&ref_positions_len,&seconds,
+							 indexdb_filenames->positions_filename,sizeof(UINT4));
+#endif
+
+      for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
+	Bitpack64_block_offsets(snponly_offsets,oligoi,snponly_offsetsmeta,snponly_offsetsstrm);
+	Bitpack64_block_offsets(ref_offsets,oligoi,ref_offsetsmeta,ref_offsetsstrm);
+	for (ii = 0; ii < BLOCKSIZE; ii++) {
+	  if ((oligoi + ii) % MONITOR_INTERVAL == 0) {
+	    fprintf(stderr,".");
+	  }
+	  merge_positions4(positions_fp,&(snponly_positions4[snponly_offsets[ii]]),&(snponly_positions4[snponly_offsets[ii+1]]),
+			   &(ref_positions4[ref_offsets[ii]]),&(ref_positions4[ref_offsets[ii+1]]),oligoi + ii,index1part);
+	}
+      }
+
+#ifdef HAVE_MMAP
+      munmap((void *) ref_positions4,ref_positions_len);
+      close(ref_positions_fd);
+#else
+      FREE(ref_positions4);	/* Not using shared */
+      /* Access_deallocate(ref_positions4,ref_positions_shmid,ref_positions_key); */
+#endif
+    }
+
+    fprintf(stderr,"done\n");
+
+    /* Remove intermediate files */
+    remove(snponly_offsetsmetafile);
+    remove(snponly_offsetsstrmfile);
+
+#ifdef HAVE_MMAP
+    munmap((void *) ref_offsetsmeta,ref_offsetsmeta_len);
+    munmap((void *) ref_offsetsstrm,ref_offsetsstrm_len);
+    close(ref_offsetsmeta_fd);
+    close(ref_offsetsstrm_fd);
+#else
+    FREE(ref_offsetsmeta);
+    FREE(ref_offsetsstrm);
+#endif
+
+    Indexdb_filenames_free(&indexdb_filenames);
   }
-  fprintf(stderr,"done\n");
 
   fclose(positions_fp);
   if (coord_values_8p == true) {
     fclose(positions_high_fp);
   }
 
-
-  /* Clean up */
   if (coord_values_8p == true) {
-    /* For both mmap and allocated, since we have already combined positions_high and positions */
-    FREE(ref_positions8);
+    FREE(snponly_positions8);
   } else {
-#ifdef HAVE_MMAP
-    munmap((void *) ref_positions4,ref_positions_len);
-    close(ref_positions_fd);
-#else
-    FREE(ref_positions4);	/* Not using shared */
-    /* Access_deallocate(ref_positions4,ref_positions_shmid,ref_positions_key); */
-#endif
-  }
-
-#ifdef HAVE_MMAP
-  munmap((void *) ref_offsetsmeta,ref_offsetsmeta_len);
-  munmap((void *) ref_offsetsstrm,ref_offsetsstrm_len);
-  close(ref_offsetsmeta_fd);
-  close(ref_offsetsstrm_fd);
-#else
-  FREE(ref_offsetsmeta);
-  FREE(ref_offsetsstrm);
-#endif
-
-  if (coord_values_8p == true) {
-    FREE(snp_positions8);
-  } else {
-    FREE(snp_positions4);
+    FREE(snponly_positions4);
   }
 
 #ifdef HAVE_MMAP
@@ -1614,8 +1842,9 @@ main (int argc, char *argv[]) {
   FREE(snponly_offsetsmeta);
   FREE(snponly_offsetsstrm);
 #endif
-  remove(snponly_offsetsmetafile);
-  remove(snponly_offsetsstrmfile);
+
+  FREE(output_offsetsmetafile);
+  FREE(output_offsetsstrmfile);
   FREE(snponly_offsetsmetafile);
   FREE(snponly_offsetsstrmfile);
 
@@ -1623,8 +1852,6 @@ main (int argc, char *argv[]) {
   Genome_free(&genome);
   Univ_IIT_free(&chromosome_iit);
   IIT_free(&snps_iit);
-
-  Indexdb_filenames_free(&indexdb_filenames);
 
 
   if (argc <= 1) {
@@ -1642,6 +1869,9 @@ main (int argc, char *argv[]) {
     FREE(filename1);
     FREE(mapdir);
 #endif
+
+  } else if (make_atsnps_p == true) {
+    /* No need to install IIT file */
 
   } else {
     /* Install IIT file */
@@ -1710,6 +1940,8 @@ for <genome>.\n\
   -V, --destdir=directory        Directory where to write SNP index files (default is\n\
                                    GMAP genome directory specified at compile time)\n\
   -v, --snpsdb=STRING            Name of SNP database\n\
+  --atsnps                       Makes an atsnps indexdb, covering only kmers centered around snp positions\n\
+                                   Intended for use by GFILTER\n\
   -w, --max-warnings=INT         Maximum number of warnings to print to stderr about\n\
                                    inconsistencies relative to the reference genome.\n\
                                    A value of 0 turns off all warnings.  A negative value\n\

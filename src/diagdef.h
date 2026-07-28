@@ -1,4 +1,3 @@
-/* $Id: diagdef.h 157221 2015-01-22 18:38:57Z twu $ */
 #ifndef DIAGDEF_INCLUDED
 #define DIAGDEF_INCLUDED
 

@@ -1,4 +1,3 @@
-/* $Id: md5.h 155282 2014-12-12 19:42:54Z twu $ */
 #ifndef MD5_INCLUDED
 #define MD5_INCLUDED
 

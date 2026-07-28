@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 50ceb981edd1a50960517cebc97adb53ac1e129d $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -109,6 +108,8 @@ static char rcsid[] = "$Id: 50ceb981edd1a50960517cebc97adb53ac1e129d $";
 
 #include "getopt.h"
 
+
+#define SEED 31415926
 
 #define MAX_QUERYLENGTH_FOR_ALLOC    100000
 #define MAX_GENOMICLENGTH_FOR_ALLOC 1000000
@@ -307,6 +308,7 @@ static char *user_cmdline = NULL;
 static bool user_selfalign_p = false;
 static bool user_pairalign_p = false;
 
+static double skip_prob = 0.0;
 static unsigned int part_modulus = 0;
 static unsigned int part_interval = 1;
 
@@ -523,6 +525,7 @@ static struct option long_options[] = {
   {"selfalign", no_argument, 0, '1'}, /* user_selfalign_p */
   {"pairalign", no_argument, 0, '2'}, /* user_pairalign_p */
   {"cmdline", required_argument, 0, 0}, /* user_cmdline */
+  {"align-fraction", required_argument, 0, 0}, /* skip_prob */
   {"part", required_argument, 0, 'q'}, /* part_modulus, part_interval */
   {"input-buffer-size", required_argument, 0, 0}, /* input_buffer_size */
 
@@ -4835,7 +4838,7 @@ single_thread () {
   }
 
 #ifdef MEMUSAGE
-  Mem_usage_std_heap_add(memusage_constant);
+  Mem_usage_std_heap_add(memusage_constant,__FILE__,__LINE__);
 #endif
 
   /* Except_stack_destroy(); -- requires pthreads */
@@ -5001,7 +5004,7 @@ worker_thread (void *data) {
   }
 
 #ifdef MEMUSAGE
-  Mem_usage_std_heap_add(memusage_constant);
+  Mem_usage_std_heap_add(memusage_constant,__FILE__,__LINE__);
 #endif
 
   Except_stack_destroy();
@@ -5325,6 +5328,9 @@ parse_command_line (int argc, char *argv[], int optind) {
 
       } else if (!strcmp(long_name,"sampling")) {
 	required_index1interval = atoi(check_valid_int(optarg));
+
+      } else if (!strcmp(long_name,"align-fraction")) {
+	skip_prob = 1.0 - check_valid_float(optarg,long_name);
 
       } else if (!strcmp(long_name,"cmdline")) {
 	user_cmdline = optarg;
@@ -6082,7 +6088,7 @@ open_input_stream (int *nread, List_T user_genomes, int argc, char **argv) {
 
     /* Read in first batch of sequences */
     inbuffer = Inbuffer_new(nextchar,input,read_files_command,files,nfiles,input_buffer_size,
-			    user_pairalign_p,user_genomes,part_modulus,part_interval);
+			    user_pairalign_p,user_genomes,skip_prob,/*seed*/SEED,part_modulus,part_interval);
     *nread = Inbuffer_fill_init(inbuffer);
 
   } else {
@@ -6093,7 +6099,7 @@ open_input_stream (int *nread, List_T user_genomes, int argc, char **argv) {
 
     /* Read in first batch of sequences */
     inbuffer = Inbuffer_new(nextchar,input,read_files_command,files,nfiles,input_buffer_size,
-			    user_pairalign_p,user_genomes,part_modulus,part_interval);
+			    user_pairalign_p,user_genomes,skip_prob,/*seed*/SEED,part_modulus,part_interval);
     *nread = Inbuffer_fill_init(inbuffer);
   }
 
@@ -6832,6 +6838,8 @@ Usage: gmap [OPTIONS...] <FASTA files...>, or\n\
 \n\
   --cmdline=STRING,STRING        Align these two sequences provided on the command line,\n\
                                    first one being genomic and second one being cDNA\n\
+  --align-fraction=FLOAT         Process only the given fraction of reads, selected at random\n\
+                                   If --align-fraction and --part are given, --align-fraction takes precedence\n\
   -q, --part=INT/INT             Process only the i-th out of every n sequences\n\
                                    e.g., 0/100 or 99/100 (useful for distributing jobs\n\
                                    to a computer farm).\n\

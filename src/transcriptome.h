@@ -1,4 +1,3 @@
-/* $Id: 5b895138c91ecfce3c9aecff3ef590178cbd44da $ */
 #ifndef TRANSCRIPTOME_INCLUDED
 #define TRANSCRIPTOME_INCLUDED
 #include "bool.h"
@@ -11,7 +10,8 @@ typedef struct T *T;
 extern void
 Transcriptome_free (T *old);
 extern T
-Transcriptome_new (char *genomesubdir, char *genome_fileroot, char *transcriptome_fileroot,
+Transcriptome_new (char *genomesubdir, char *genome_fileroot,
+		   char *transcriptomesubdir, char *transcriptome_fileroot,
 		   bool sharedp);
 extern Chrnum_T
 Transcriptome_chrnum (int *transcript_genestrand, T this, int trnum);

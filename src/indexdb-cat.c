@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: indexdb-cat.c 224777 2021-12-17 22:27:38Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

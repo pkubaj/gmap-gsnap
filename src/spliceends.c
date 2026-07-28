@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 7360683aeb819a7d06c4373fedc07d2b0c715484 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -28,14 +27,19 @@ static char rcsid[] = "$Id: 7360683aeb819a7d06c4373fedc07d2b0c715484 $";
 #include "intersect-higher-small.h"
 #endif
 
-#ifndef LARGE_GENOMES
+#include "merge-method.h"
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint4.h"
+#elif defined(USE_SIMD_MERGE)
 #include "merge-diagonals-simd-uint4.h"
-#elif !defined(HAVE_AVX512) && !defined(HAVE_AVX2)
-#include "merge-diagonals-heap.h" /* For Merge_diagonals_large */
-#include "merge-diagonals-simd-uint4.h"
-#else
-#include "merge-diagonals-simd-uint8.h" /* For Merge_diagonals_large */
-#include "merge-diagonals-simd-uint4.h"
+#endif
+
+#ifdef LARGE_GENOMES
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint8.h"
+#elif defined(USE_SIMD_MERGE)
+#include "merge-diagonals-simd-uint8.h"
+#endif
 #endif
 
 
@@ -161,7 +165,7 @@ Spliceends_setup (bool *circularp_in,
 		  Univcoord_T genomelength_in, Indexdb_T indexdb_in,
 		  int index1part_in, int index1interval_in,
 		  int max_insertionlen_in, int max_deletionlen_in,
-		  Chrpos_T shortsplicedist_in, Localdb_T localdb_in, bool allow_soft_clips_p_in,
+		  Chrpos_T shortsplicedist_in, bool allow_soft_clips_p_in,
 		  bool novelsplicingp, bool knownsplicingp) {
 
   circularp = circularp_in;
@@ -173,7 +177,7 @@ Spliceends_setup (bool *circularp_in,
   index1part = index1part_in;
   index1interval = index1interval_in;
 
-  localdb = localdb_in;
+  localdb = (Localdb_T) NULL;
   shortsplicedist = shortsplicedist_in;
 
   max_insertionlen = max_insertionlen_in;
@@ -187,6 +191,13 @@ Spliceends_setup (bool *circularp_in,
     splicingp = false;
   }
 
+  return;
+}
+
+
+void
+Spliceends_localdb_setup (Localdb_T localdb_in) {
+  localdb = localdb_in;
   return;
 }
 
@@ -216,8 +227,7 @@ Spliceends_free (T *old) {
     FREE((*old)->distal_nmismatches);
 #endif
 #else
-    FREE((*old)->distal_univdiags[0]); /* structs */
-    FREE((*old)->distal_univdiags);  /* pointers */
+    Univdiag_free_array(&(*old)->distal_univdiags); /* pointers */
 #endif
 
 #ifdef USE_VECTORPOOL
@@ -339,7 +349,8 @@ make_unique (Univcoord_T *diagonals, int ndiagonals) {
 
 int
 Spliceends_middle_plus (Univcoord_T **diagonals,
-			Stage1_T stage1, int qstart, int qend, int querylength,
+			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			int qstart, int qend, int querylength,
 			Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			Compress_T query_compress, char *queryptr,
 			Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
@@ -410,9 +421,10 @@ Spliceends_middle_plus (Univcoord_T **diagonals,
     return 0;
 
   } else if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				       localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				       /*pos5*/qstart,/*pos3*/qend,querylength,
-				       low_univdiagonal,high_univdiagonal,
+				       localdb,diagonals_alloc,localdb_alloc,
+				       stage1,streamspace_max_alloc,streamspace_alloc,
+				       queryptr,/*pos5*/qstart,/*pos3*/qend,querylength,
+				       /*anchor_univdiagonal*/0,low_univdiagonal,high_univdiagonal,
 				       query_compress,/*plusp*/true,/*genestrand*/0,genomebits,localdb_nmismatches_allowed,
 				       /*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
     *diagonals = (Univcoord_T *) NULL;
@@ -430,7 +442,8 @@ Spliceends_middle_plus (Univcoord_T **diagonals,
 
 int
 Spliceends_middle_minus (Univcoord_T **diagonals,
-			 Stage1_T stage1, int qstart, int qend, int querylength,
+			 Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			 int qstart, int qend, int querylength,
 			 Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			 Compress_T query_compress, char *queryptr,
 			 Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
@@ -501,9 +514,10 @@ Spliceends_middle_minus (Univcoord_T **diagonals,
     return 0;
 
   } else if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				       localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				       /*pos5*/qstart,/*pos3*/qend,querylength,
-				       low_univdiagonal,high_univdiagonal,
+				       localdb,diagonals_alloc,localdb_alloc,
+				       stage1,streamspace_max_alloc,streamspace_alloc,
+				       queryptr,/*pos5*/qstart,/*pos3*/qend,querylength,
+				       /*anchor_univdiagonal*/0,low_univdiagonal,high_univdiagonal,
 				       query_compress,/*plusp*/false,/*genestrand*/0,genomebits,localdb_nmismatches_allowed,
 				       /*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
     *diagonals = (Univcoord_T *) NULL;
@@ -697,7 +711,8 @@ extend_trim5 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 
   } else {
     nunivdiags = List_length(univdiag_list);
-    *univdiags = (Univdiag_T *) List_to_array(univdiag_list,NULL);
+    *univdiags = Univdiag_new_array(nunivdiags);
+    Univdiag_transfer_list_to_array(*univdiags,univdiag_list);
     Univdiagpool_free_list(&univdiag_list,univdiagpool
 			   univdiagpool_trace(__FILE__,__LINE__));
     if (nunivdiags == 1) {
@@ -705,7 +720,7 @@ extend_trim5 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 
     } else {
       /* Merge univdiags.  Output in descending order */
-      qsort(*univdiags,nunivdiags,sizeof(Univdiag_T),Univdiag_diagonal_rev_cmp);
+      qsort((*univdiags)[0],nunivdiags,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_rev_cmp);
       
 #ifdef DEBUG9
       printf("Before merging: %d univdiags\n",nunivdiags);
@@ -723,12 +738,10 @@ extend_trim5 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 	j = i + 1;
 	while (j < nunivdiags && (*univdiags)[j]->univdiagonal == univdiag->univdiagonal) {
 	  univdiag->qend = (*univdiags)[j]->qend;
-	  Univdiagpool_free_univdiag(&((*univdiags)[j]),univdiagpool
-				     univdiagpool_trace(__FILE__,__LINE__));
 	  j++;
 	}
 
-	(*univdiags)[nmerged++] = univdiag;
+	Univdiag_transfer((*univdiags)[nmerged++],univdiag);
 	i = j;
       }
 
@@ -751,7 +764,8 @@ static Univdiag_T
 novel_trim5_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, int querylength,
 		   Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 		   Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		   Stage1_T stage1, bool plusp, int genestrand, int localdb_nmismatches_allowed) {
+		   Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		   bool plusp, int genestrand, int localdb_nmismatches_allowed) {
 
   Univdiag_T best_univdiag = NULL;
   Univcoord_T deletion_univdiagonal, insertion_univdiagonal;
@@ -773,8 +787,10 @@ novel_trim5_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, in
 
   debug9(printf("Testing indel_qpos %d for deletion\n",indel_qpos));
   if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				/*pos5*/0,/*pos3*/indel_qpos,querylength,
+				localdb,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				queryptr,/*pos5*/0,/*pos3*/indel_qpos,querylength,
+				/*anchor_univdiagonal*/univdiagonal,
 				/*low_univdiagonal*/deletion_univdiagonal,/*high_univdiagonal*/univdiagonal,
 				query_compress,plusp,genestrand,genomebits,localdb_nmismatches_allowed,
 				/*extend5p*/true,/*trim5p*/true,/*trim3p*/false)) == 0) {
@@ -819,8 +835,10 @@ novel_trim5_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, in
 
   debug9(printf("Testing indel_qpos %d for insertion\n",indel_qpos));
   if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				/*pos5*/0,/*pos3*/indel_qpos,querylength,
+				localdb,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				queryptr,/*pos5*/0,/*pos3*/indel_qpos,querylength,
+				/*anchor_univdiagonal*/univdiagonal,
 				/*low_univdiagonal*/univdiagonal,/*high_univdiagonal*/insertion_univdiagonal,
 				query_compress,plusp,genestrand,genomebits,localdb_nmismatches_allowed,
 				/*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
@@ -1057,40 +1075,41 @@ merge_known_novel (Univdiag_T **univdiags, bool **knownp,
     i = j = 0;
     k = 0;
 
-    *univdiags = (Univdiag_T *) MALLOC((known_nunivdiags + novel_nunivdiags) * sizeof(Univdiag_T));
+    /* *univdiags = (Univdiag_T *) MALLOC((known_nunivdiags + novel_nunivdiags) * sizeof(Univdiag_T)); */
+    *univdiags = Univdiag_new_array(known_nunivdiags + novel_nunivdiags);
     *knownp = (bool *) MALLOC((known_nunivdiags + novel_nunivdiags) * sizeof(bool));
 
     while (i < known_nunivdiags && j < novel_nunivdiags) {
       if (known_univdiags[i]->univdiagonal < novel_univdiags[j]->univdiagonal) {
-	(*univdiags)[k] = known_univdiags[i];
+	Univdiag_transfer((*univdiags)[k],known_univdiags[i]);
 	(*knownp)[k++] = true;
 	i++;
       } else if (novel_univdiags[j]->univdiagonal < known_univdiags[i]->univdiagonal) {
-	(*univdiags)[k] = novel_univdiags[j];
+	Univdiag_transfer((*univdiags)[k],novel_univdiags[j]);
 	(*knownp)[k++] = false;
 	j++;
       } else {
-	(*univdiags)[k] = known_univdiags[i];
+	Univdiag_transfer((*univdiags)[k],known_univdiags[i]);
 	(*knownp)[k++] = true;
 	i++; j++;
       }
     }
 
     while (i < known_nunivdiags) {
-      (*univdiags)[k] = known_univdiags[i];
+      Univdiag_transfer((*univdiags)[k],known_univdiags[i]);
       (*knownp)[k++] = true;
       i++;
     }
 
     while (j < novel_nunivdiags) {
-      (*univdiags)[k] = novel_univdiags[j];
+      Univdiag_transfer((*univdiags)[k],novel_univdiags[j]);
       (*knownp)[k++] = false;
       j++;
     }
 
 #if 0
     if (*allocp == true) {
-      FREE(novel_univdiags);
+      Univdiag_free_array(&novel_univdiags);
     }
 
     *allocp = true;
@@ -1114,8 +1133,8 @@ solve_trim5 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 			
 	     Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 	     Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-	     Stage1_T stage1, Univdiagpool_T univdiagpool,
-	     double medial_splicesite_prob, double distal_splicesite_prob,
+	     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 	     bool plusp, int genestrand, int localdb_nmismatches_allowed,
 	     bool search_localdb_p, bool innerp, int max_npartners, bool inwardp,
 	     bool medial_salvagep) {
@@ -1174,8 +1193,10 @@ solve_trim5 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	
     } else if (search_localdb_p == true &&
 	       (novel_nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-					       localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-					       pos5,/*pos3*/splice_qpos,querylength,
+					       localdb,diagonals_alloc,localdb_alloc,
+					       stage1,streamspace_max_alloc,streamspace_alloc,
+					       queryptr,pos5,/*pos3*/splice_qpos,querylength,
+					       /*anchor_univdiagonal*/univdiagonal,
 					       low_univdiagonal,high_univdiagonal,
 					       query_compress,plusp,genestrand,genomebits,
 					       localdb_nmismatches_allowed,/*extend5p*/true,
@@ -1299,12 +1320,16 @@ solve_trim5 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	      npartners++;
 	      *partnerp = true;
 
+	    } else if (localdb == NULL) {
+	      /* Skip */
+
 	    } else if ((indel_univdiag =
 			novel_trim5_indel(/*genomicpos*/univdiags[i]->univdiagonal - querylength + univdiags[i]->qstart,
 					  univdiags[i]->univdiagonal,querylength,
 					  query_compress,queryptr,chroffset,chrhigh,
 					  univdiags_alloc,diagonals_alloc,localdb_alloc,
-					  stage1,plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
+					  stage1,streamspace_max_alloc,streamspace_alloc,
+					  plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
 	      /* Skip: Non-extension without distal indel */
 	      debug1(printf("non-extension without distal indel\n"));
 
@@ -1424,12 +1449,16 @@ solve_trim5 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	    /* npartners++; */
 	    *partnerp = true;
 
+	  } else if (localdb == NULL) {
+	    /* Skip */
+
 	  } else if ((indel_univdiag =
 		      novel_trim5_indel(/*genomicpos*/univdiags[i]->univdiagonal - querylength + univdiags[i]->qstart,
 					univdiags[i]->univdiagonal,querylength,
 					query_compress,queryptr,chroffset,chrhigh,
 					univdiags_alloc,diagonals_alloc,localdb_alloc,
-					stage1,plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
 	    /* Skip: Non-extension without distal indel */
 	    debug1(printf("non-extension without distal indel\n"));
 
@@ -1480,13 +1509,13 @@ solve_trim5 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	Spliceends_reverse(this,kstart,k);
       }
 
-      FREE(univdiags);
+      Univdiag_free_array(&univdiags);
       FREE(knownp);
       (*nsites)++;
     }
 
     if (allocp == true) {
-      FREE(novel_univdiags);
+      Univdiag_free_array(&novel_univdiags);
     }
   }
 
@@ -1502,8 +1531,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 			Knownsplicing_T knownsplicing, int max_nconsecutive,
 			Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-			Stage1_T stage1, Univdiagpool_T univdiagpool,
-			double medial_splicesite_prob, double distal_splicesite_prob,
+			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 			bool plusp, int genestrand, int localdb_nmismatches_allowed,
 			bool search_localdb_p, bool innerp) {
   int nspliceends = 0, k, k_inward = 0, k_outward = 0;
@@ -1664,7 +1693,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 			       
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -1716,7 +1746,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -1752,7 +1783,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,/*known_nunivdiags*/0,
 			       
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -1768,7 +1800,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,/*known_nunivdiags*/0,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -1777,8 +1810,7 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -1879,7 +1911,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -1932,7 +1965,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -1968,7 +2002,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -1984,7 +2019,8 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -1993,8 +2029,7 @@ spliceends_trim5_sense (double *max_prob, bool *partnerp, T this_outward, T this
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -2107,8 +2142,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 		       Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 		       Knownsplicing_T knownsplicing, int max_nconsecutive,
 		       Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		       Stage1_T stage1, Univdiagpool_T univdiagpool,
-		       double medial_splicesite_prob, double distal_splicesite_prob,
+		       Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 		       bool plusp, int genestrand, int localdb_nmismatches_allowed,
 		       bool search_localdb_p, bool innerp) {
   int nspliceends = 0, k, k_inward = 0, k_outward = 0;
@@ -2268,7 +2303,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -2320,7 +2356,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -2356,7 +2393,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -2372,7 +2410,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -2381,8 +2420,7 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -2484,7 +2522,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -2536,7 +2575,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -2572,7 +2612,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -2588,7 +2629,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 				
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -2597,8 +2639,7 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -2708,7 +2749,8 @@ spliceends_trim5_anti (double *max_prob, bool *partnerp, T this_outward, T this_
    and mismatch prob, and if so, set splicedir to be SENSE_NULL */
 static T
 trim_5 (bool *partnerp, Compress_T query_compress, char *queryptr,
-	Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
+	Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	Knownsplicing_T knownsplicing, int try_sensedir,
 	Univcoord_T univdiagonal, int querylength,
 	int pos5, int qstart, int qend, int exon_origin, Univcoord_T chroffset, Univcoord_T chrhigh,
 	int *mismatch_positions, int total_nmismatches,
@@ -2823,7 +2865,8 @@ trim_5 (bool *partnerp, Compress_T query_compress, char *queryptr,
 					 query_compress,queryptr,chroffset,chrhigh,
 					 knownsplicing,max_nconsecutive,
 					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					 stage1,univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
+					 stage1,streamspace_max_alloc,streamspace_alloc,
+					 univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
 					 plusp,genestrand,localdb_nmismatches_allowed,
 					 search_localdb_p,innerp);
     found_sensedir = SENSE_FORWARD;
@@ -2835,7 +2878,8 @@ trim_5 (bool *partnerp, Compress_T query_compress, char *queryptr,
 					query_compress,queryptr,chroffset,chrhigh,
 					knownsplicing,max_nconsecutive,
 					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					stage1,univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
 					plusp,genestrand,localdb_nmismatches_allowed,
 					search_localdb_p,innerp);
     found_sensedir = SENSE_ANTI;
@@ -3024,7 +3068,8 @@ extend_trim3 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 
   } else {
     nunivdiags = List_length(univdiag_list);
-    *univdiags = (Univdiag_T *) List_to_array(univdiag_list,NULL);
+    *univdiags = Univdiag_new_array(nunivdiags);
+    Univdiag_transfer_list_to_array(*univdiags,univdiag_list);
     Univdiagpool_free_list(&univdiag_list,univdiagpool
 			   univdiagpool_trace(__FILE__,__LINE__));
 
@@ -3033,7 +3078,7 @@ extend_trim3 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 
     } else {
       /* Merge univdiags.  Output in ascending order */
-      qsort(*univdiags,nunivdiags,sizeof(Univdiag_T),Univdiag_diagonal_cmp);
+      qsort((*univdiags)[0],nunivdiags,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_fwd_cmp);
       
 #ifdef DEBUG9
       printf("Before merging: %d univdiags\n",nunivdiags);
@@ -3051,12 +3096,10 @@ extend_trim3 (Univdiag_T **univdiags, int start_qpos, Stage1_T stage1,
 	j = i + 1;
 	while (j < nunivdiags && (*univdiags)[j]->univdiagonal == univdiag->univdiagonal) {
 	  univdiag->qend = (*univdiags)[j]->qend;
-	  Univdiagpool_free_univdiag(&((*univdiags)[j]),univdiagpool
-				     univdiagpool_trace(__FILE__,__LINE__));
 	  j++;
 	}
 
-	(*univdiags)[nmerged++] = univdiag;
+	Univdiag_transfer((*univdiags)[nmerged++],univdiag);
 	i = j;
       }
 
@@ -3080,7 +3123,8 @@ static Univdiag_T
 novel_trim3_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, int querylength,
 		   Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 		   Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		   Stage1_T stage1, bool plusp, int genestrand, int localdb_nmismatches_allowed) {
+		   Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		   bool plusp, int genestrand, int localdb_nmismatches_allowed) {
 
   Univdiag_T best_univdiag = NULL;
   Univcoord_T deletion_univdiagonal, insertion_univdiagonal;
@@ -3102,8 +3146,10 @@ novel_trim3_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, in
 
   debug9(printf("Testing indel_qpos %d for deletion\n",indel_qpos));
   if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-				/*pos5*/indel_qpos,/*pos3*/querylength,querylength,
+				localdb,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
+				queryptr,/*pos5*/indel_qpos,/*pos3*/querylength,querylength,
+				/*anchor_univdiagonal*/univdiagonal,
 				/*low_univdiagonal*/univdiagonal,/*high_univdiagonal*/deletion_univdiagonal,
 				query_compress,plusp,genestrand,genomebits,localdb_nmismatches_allowed,
 				/*extend5p*/false,/*trim5p*/false,/*trim3p*/true)) == 0) {
@@ -3148,8 +3194,10 @@ novel_trim3_indel (Univcoord_T outbound_genomicpos, Univcoord_T univdiagonal, in
 
   debug9(printf("Testing indel_qpos %d for insertion\n",indel_qpos));
   if ((ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-				localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
+				localdb,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,queryptr,
 				/*pos5*/indel_qpos,/*pos3*/querylength,querylength,
+				/*anchor_univdiagonal*/univdiagonal,
 				/*low_univdiagonal*/insertion_univdiagonal,/*high_univdiagonal*/univdiagonal,
 				query_compress,plusp,genestrand,genomebits,localdb_nmismatches_allowed,
 				/*extend5p*/false,/*trim5p*/true,/*trim3p*/true)) == 0) {
@@ -3204,8 +3252,8 @@ solve_trim3 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 			
 	     Compress_T query_compress, char *queryptr, Univcoord_T chroffset, Univcoord_T chrhigh,
 	     Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-	     Stage1_T stage1, Univdiagpool_T univdiagpool,
-	     double medial_splicesite_prob, double distal_splicesite_prob,
+	     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 	     bool plusp, int genestrand, int localdb_nmismatches_allowed,
 	     bool search_localdb_p, bool innerp, int max_npartners, bool inwardp,
 	     bool medial_salvagep) {
@@ -3264,8 +3312,10 @@ solve_trim3 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 
     } else if (search_localdb_p == true &&
 	       (novel_nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&local_nmismatches,univdiags_alloc,
-					       localdb,diagonals_alloc,localdb_alloc,stage1,queryptr,
-					       /*pos5*/splice_qpos,pos3,querylength,
+					       localdb,diagonals_alloc,localdb_alloc,
+					       stage1,streamspace_max_alloc,streamspace_alloc,
+					       queryptr,/*pos5*/splice_qpos,pos3,querylength,
+					       /*anchor_univdiagonal*/univdiagonal,
 					       low_univdiagonal,high_univdiagonal,
 					       query_compress,plusp,genestrand,genomebits,
 					       localdb_nmismatches_allowed,/*extend5p*/false,
@@ -3389,12 +3439,16 @@ solve_trim3 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	      npartners++;
 	      *partnerp = true;
 
+	    } else if (localdb == NULL) {
+	      /* Skip */
+
 	    } else if ((indel_univdiag =
 			novel_trim3_indel(/*genomicpos*/univdiags[i]->univdiagonal - querylength + univdiags[i]->qend,
 					  univdiags[i]->univdiagonal,querylength,
 					  query_compress,queryptr,chroffset,chrhigh,
 					  univdiags_alloc,diagonals_alloc,localdb_alloc,
-					  stage1,plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
+					  stage1,streamspace_max_alloc,streamspace_alloc,
+					  plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
 	      /* Skip: Non-extension without distal indel */
 	      debug1(printf("non-extension without distal indel\n"));
 
@@ -3513,12 +3567,16 @@ solve_trim3 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	  /* npartners++; */
 	  *partnerp = true;
 
+	} else if (localdb == NULL) {
+	  /* Skip */
+
 	} else if ((indel_univdiag =
 		    novel_trim3_indel(/*genomicpos*/univdiags[i]->univdiagonal - querylength + univdiags[i]->qend,
 				      univdiags[i]->univdiagonal,querylength,
 				      query_compress,queryptr,chroffset,chrhigh,
 				      univdiags_alloc,diagonals_alloc,localdb_alloc,
-				      stage1,plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
+				      stage1,streamspace_max_alloc,streamspace_alloc,
+				      plusp,genestrand,localdb_nmismatches_allowed)) == (Univdiag_T) NULL) {
 	  /* Skip: Non-extension without distal indel */
 	  debug1(printf("non-extension without distal indel\n"));
 
@@ -3565,13 +3623,13 @@ solve_trim3 (int *min_nmismatches, double *max_prob, double *max_medial_prob, bo
 	Spliceends_reverse(this,kstart,k);
       }
 
-      FREE(univdiags);
+      Univdiag_free_array(&univdiags);
       FREE(knownp);
       (*nsites)++;
     }
 
     if (allocp == true) {
-      FREE(novel_univdiags);
+      Univdiag_free_array(&novel_univdiags);
     }
   }
 
@@ -3589,8 +3647,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			Univcoord_T chroffset, Univcoord_T chrhigh,
 			Knownsplicing_T knownsplicing, int max_nconsecutive,
 			Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-			Stage1_T stage1, Univdiagpool_T univdiagpool,
-			double medial_splicesite_prob, double distal_splicesite_prob,
+			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 			bool plusp, int genestrand, int localdb_nmismatches_allowed,
 			bool search_localdb_p, bool innerp) {
   int nspliceends = 0, k, k_inward = 0, k_outward = 0;
@@ -3753,7 +3811,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -3805,7 +3864,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -3841,7 +3901,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -3857,7 +3918,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -3866,8 +3928,7 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -3970,7 +4031,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4022,7 +4084,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4058,7 +4121,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4074,7 +4138,8 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4083,8 +4148,7 @@ spliceends_trim3_sense (double *max_prob, bool *partnerp, T this_outward, T this
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -4198,8 +4262,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 		       Univcoord_T chroffset, Univcoord_T chrhigh,
 		       Knownsplicing_T knownsplicing, int max_nconsecutive,
 		       Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		       Stage1_T stage1, Univdiagpool_T univdiagpool,
-		       double medial_splicesite_prob, double distal_splicesite_prob,
+		       Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiagpool_T univdiagpool, double medial_splicesite_prob, double distal_splicesite_prob,
 		       bool plusp, int genestrand, int localdb_nmismatches_allowed,
 		       bool search_localdb_p, bool innerp) {
   int nspliceends = 0, k, k_inward = 0, k_outward = 0;
@@ -4361,7 +4425,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4413,7 +4478,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4449,7 +4515,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 		      
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4465,7 +4532,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4474,8 +4542,7 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
     }
 	
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -4578,7 +4645,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 			       
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4630,7 +4698,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4666,7 +4735,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 			       known_univdiags_alloc,known_nunivdiags,
 			       
 			       query_compress,queryptr,chroffset,chrhigh,
-			       univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+			       univdiags_alloc,diagonals_alloc,localdb_alloc,
+			       stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 			       medial_splicesite_prob,distal_splicesite_prob,
 			       plusp,genestrand,localdb_nmismatches_allowed,
 			       search_localdb_p,innerp,max_npartners,/*inwardp*/true,
@@ -4682,7 +4752,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 				known_univdiags_alloc,known_nunivdiags,
 			
 				query_compress,queryptr,chroffset,chrhigh,
-				univdiags_alloc,diagonals_alloc,localdb_alloc,stage1,univdiagpool,
+				univdiags_alloc,diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,univdiagpool,
 				medial_splicesite_prob,distal_splicesite_prob,
 				plusp,genestrand,localdb_nmismatches_allowed,
 				search_localdb_p,innerp,max_npartners,/*inwardp*/false,
@@ -4691,8 +4762,7 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
     }
 
     if (knownsplicing != NULL && (n_inward > 0 || n_outward > 0)) {
-      FREE(known_univdiags_alloc[0]);
-      FREE(known_univdiags_alloc);
+      Univdiag_free_array(&known_univdiags_alloc);
     }
 
     FREE(sitep);
@@ -4799,7 +4869,8 @@ spliceends_trim3_anti (double *max_prob, bool *partnerp, T this_outward, T this_
 
 static T
 trim_3 (bool *partnerp, Compress_T query_compress, char *queryptr,
-	Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
+	Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	Knownsplicing_T knownsplicing, int try_sensedir,
 	Univcoord_T univdiagonal, int querylength,
 	int qstart, int qend, int pos3, int exon_origin,
 	Univcoord_T chroffset, Univcoord_T chrhigh,
@@ -4921,7 +4992,8 @@ trim_3 (bool *partnerp, Compress_T query_compress, char *queryptr,
 					 query_compress,queryptr,chroffset,chrhigh,
 					 knownsplicing,max_nconsecutive,
 					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					 stage1,univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
+					 stage1,streamspace_max_alloc,streamspace_alloc,
+					 univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
 					 plusp,genestrand,localdb_nmismatches_allowed,
 					 search_localdb_p,innerp);
     found_sensedir = SENSE_FORWARD;
@@ -4933,7 +5005,8 @@ trim_3 (bool *partnerp, Compress_T query_compress, char *queryptr,
 					query_compress,queryptr,chroffset,chrhigh,
 					knownsplicing,max_nconsecutive,
 					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					stage1,univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					univdiagpool,medial_splicesite_prob,distal_splicesite_prob,
 					plusp,genestrand,localdb_nmismatches_allowed,
 					search_localdb_p,innerp);
     found_sensedir = SENSE_ANTI;
@@ -5120,8 +5193,9 @@ Spliceends_indel_qstart (int nosplice_trimpos,
 			 Univcoord_T chroffset, Univcoord_T chrhigh,
 			 bool plusp, int genestrand, int localdb_nmismatches_allowed,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			 unsigned short *localdb_alloc, Stage1_T stage1, Univdiagpool_T univdiagpool,
-			 Compress_T query_compress, char *queryptr) {
+			 unsigned short *localdb_alloc, Stage1_T stage1,
+			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			 Univdiagpool_T univdiagpool, Compress_T query_compress, char *queryptr) {
 
   Univcoord_T indel_univdiagonal;
   Univdiag_T *univdiags, indel_univdiag;
@@ -5137,7 +5211,7 @@ Spliceends_indel_qstart (int nosplice_trimpos,
 				 /*slop*/max_deletionlen,
 				 /*insertion_slop*/max_insertionlen,univdiagpool)) > 0) {
     indel_univdiagonal = univdiags[nunivdiags - 1]->univdiagonal;
-    FREE(univdiags);
+    Univdiag_free_array(&univdiags);
     debug9(printf("Returning %u based on indexdb\n",indel_univdiagonal));
     return indel_univdiagonal;
 
@@ -5145,7 +5219,8 @@ Spliceends_indel_qstart (int nosplice_trimpos,
 	     (indel_univdiag =
 	      novel_trim5_indel(/*outbound_genomicpos*/univdiagonal - querylength + nosplice_trimpos,
 				univdiagonal,querylength,query_compress,queryptr,chroffset,chrhigh,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
 				plusp,genestrand,localdb_nmismatches_allowed)) != (Univdiag_T) NULL) {
     debug9(printf("Returning %u based on localdb\n",indel_univdiag->univdiagonal));
     return indel_univdiag->univdiagonal;
@@ -5169,7 +5244,8 @@ Spliceends_trimmed_qstarts (T *new, int *nosplice_trimpos, int *farsplice_trimpo
 			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			    bool plusp, int genestrand, int localdb_nmismatches_allowed, bool innerp, bool salvagep,
 			    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-			    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc, Stage1_T stage1,
+			    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			    Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			    Knownsplicing_T knownsplicing, Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
 			    Spliceendsgen_T spliceendsgen, Compress_T query_compress, char *queryptr,
 			    Genomebits_T genomebits, Genomebits_T genomebits_alt, bool find_splices_p) {
@@ -5237,7 +5313,7 @@ Spliceends_trimmed_qstarts (T *new, int *nosplice_trimpos, int *farsplice_trimpo
 					       /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
 					       univdiagonal,querylength,pos5,/*pos3*/qend,plusp,genestrand);
     if ((*new = trim_5(&partnerp,query_compress,queryptr,
-		       stage1,knownsplicing,try_sensedir,
+		       stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 		       univdiagonal,querylength,pos5,/*qstart*/*nosplice_trimpos,qend,
 		       exon_origin,chroffset,chrhigh,
 		       mismatch_positions_alloc,/*total_nmismatches*/pos5_nmismatches,
@@ -5278,7 +5354,8 @@ Spliceends_trimmed_qstarts (T *new, int *nosplice_trimpos, int *farsplice_trimpo
 bool
 Spliceends_qstart_trim (int *trimpos, int *nmismatches_to_trimpos,
 			int *found_sensedir, Splicetype_T *splicetype, double *ambig_prob_qstart,
-			Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
+			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			Knownsplicing_T knownsplicing, int try_sensedir,
 			Univcoord_T univdiagonal, int querylength, int pos3, int exon_origin,
 			Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			bool plusp, int genestrand, int *mismatch_positions_alloc,
@@ -5356,7 +5433,7 @@ Spliceends_qstart_trim (int *trimpos, int *nmismatches_to_trimpos,
   } else if (0 && *trimpos <= pos5 + ACCEPTABLE_TRIM) {
     debug8(printf("Accepting splice based on trim_5 on pos5 %d to pos3 %d\n",pos5,pos3));
     if ((spliceends = trim_5(&partnerp,query_compress,queryptr,
-			     stage1,knownsplicing,try_sensedir,
+			     stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 			     unifdiagonal,querylength,pos5,qstart,/*qend*/pos3,
 			     exon_origin,chroffset,chrhigh,
 			     mismatch_positions_alloc,total_nmismatches,
@@ -5393,7 +5470,7 @@ Spliceends_qstart_trim (int *trimpos, int *nmismatches_to_trimpos,
 					       /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
 					       univdiagonal,querylength,pos5,pos3,plusp,genestrand);
     if ((spliceends = trim_5(&partnerp,query_compress,queryptr,
-			     stage1,knownsplicing,try_sensedir,
+			     stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 			     univdiagonal,querylength,pos5,/*qstart*/(*trimpos),/*qend*/pos3,
 			     exon_origin,chroffset,chrhigh,
 			     mismatch_positions_alloc,total_nmismatches,
@@ -5556,8 +5633,9 @@ Spliceends_indel_qend (int nosplice_trimpos,
 		       Univcoord_T chroffset, Univcoord_T chrhigh,
 		       bool plusp, int genestrand, int localdb_nmismatches_allowed,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc, Stage1_T stage1, Univdiagpool_T univdiagpool,
-		       Compress_T query_compress, char *queryptr) {
+		       unsigned short *localdb_alloc, Stage1_T stage1,
+		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       Univdiagpool_T univdiagpool, Compress_T query_compress, char *queryptr) {
 
   Univcoord_T indel_univdiagonal;
   Univdiag_T *univdiags, indel_univdiag;
@@ -5573,7 +5651,7 @@ Spliceends_indel_qend (int nosplice_trimpos,
 				 /*slop*/max_deletionlen,
 				 /*insertion_slop*/max_insertionlen,univdiagpool)) > 0) {
     indel_univdiagonal = univdiags[0]->univdiagonal;
-    FREE(univdiags);
+    Univdiag_free_array(&univdiags);
     debug9(printf("Returning %u based on indexdb\n",indel_univdiagonal));
     return indel_univdiagonal;
 
@@ -5581,7 +5659,8 @@ Spliceends_indel_qend (int nosplice_trimpos,
 	     (indel_univdiag =
 	      novel_trim3_indel(/*outbound_genomicpos*/univdiagonal - querylength + nosplice_trimpos,
 				univdiagonal,querylength,query_compress,queryptr,chroffset,chrhigh,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,stage1,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				stage1,streamspace_max_alloc,streamspace_alloc,
 				plusp,genestrand,localdb_nmismatches_allowed)) != (Univdiag_T) NULL) {
     debug9(printf("Returning %u based on localdb\n",indel_univdiag->univdiagonal));
     return indel_univdiag->univdiagonal;
@@ -5603,7 +5682,8 @@ Spliceends_trimmed_qends (T *new, int *nosplice_trimpos, int *farsplice_trimpos,
 			  int qstart, int exon_origin, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			  bool plusp, int genestrand, int localdb_nmismatches_allowed, bool innerp, bool salvagep,
 			  int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-			  Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc, Stage1_T stage1,
+			  Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			  Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Knownsplicing_T knownsplicing, Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
 			  Spliceendsgen_T spliceendsgen, Compress_T query_compress, char *queryptr,
 			  Genomebits_T genomebits, Genomebits_T genomebits_alt, bool find_splices_p) {
@@ -5671,7 +5751,7 @@ Spliceends_trimmed_qends (T *new, int *nosplice_trimpos, int *farsplice_trimpos,
 					      /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
 					      univdiagonal,querylength,/*pos5*/qstart,pos3,plusp,genestrand);
     if ((*new = trim_3(&partnerp,query_compress,queryptr,
-		       stage1,knownsplicing,try_sensedir,
+		       stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 		       univdiagonal,querylength,
 		       qstart,/*qend*/*nosplice_trimpos,pos3,exon_origin,
 		       chroffset,chrhigh,mismatch_positions_alloc,/*total_nmismatches*/pos3_nmismatches,
@@ -5712,7 +5792,8 @@ Spliceends_trimmed_qends (T *new, int *nosplice_trimpos, int *farsplice_trimpos,
 bool
 Spliceends_qend_trim (int *trimpos, int *nmismatches_to_trimpos,
 		      int *found_sensedir, Splicetype_T *splicetype, double *ambig_prob_qend,
-		      Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
+		      Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      Knownsplicing_T knownsplicing, int try_sensedir,
 		      Univcoord_T univdiagonal, int querylength, int pos5,
 		      int exon_origin, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 		      bool plusp, int genestrand, int *mismatch_positions_alloc,
@@ -5789,7 +5870,7 @@ Spliceends_qend_trim (int *trimpos, int *nmismatches_to_trimpos,
   } else if (0 && *trimpos >= pos3 - ACCEPTABLE_TRIM) {
     debug8(printf("Accepting splice based on trim_3 from pos5 %d to pos3 %d\n",pos5,pos3));
     if ((spliceends = trim_3(&partnerp,query_compress,queryptr,
-			     stage1,knownsplicing,try_sensedir,
+			     stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 			     univdiagonal,querylength,/*qstart*/pos5,qend,pos3,exon_origin,
 			     chroffset,chrhigh,mismatch_positions_alloc,total_nmismatches,
 			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
@@ -5825,7 +5906,7 @@ Spliceends_qend_trim (int *trimpos, int *nmismatches_to_trimpos,
 					      /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
 					      univdiagonal,querylength,pos5,pos3,plusp,genestrand);
     if ((spliceends = trim_3(&partnerp,query_compress,queryptr,
-			     stage1,knownsplicing,try_sensedir,
+			     stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
 			     univdiagonal,querylength,
 			     /*qstart*/pos5,/*qend*/*trimpos,pos3,exon_origin,
 			     chroffset,chrhigh,mismatch_positions_alloc,total_nmismatches,
@@ -5879,7 +5960,8 @@ Spliceends_qstart_resolve (int *ndiagonals, int *local_nmismatches, int pos3, in
 			   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			   Compress_T query_compress, char *queryptr, bool plusp, int genestrand,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			   Stage1_T stage1, int localdb_nmismatches_allowed) {
+			   Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			   int localdb_nmismatches_allowed) {
   int i;
   int nmatches, matchlength;
   bool sortedp, trimmedp;
@@ -5904,7 +5986,9 @@ Spliceends_qstart_resolve (int *ndiagonals, int *local_nmismatches, int pos3, in
 
   } else if ((*ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&(*local_nmismatches),
 					novel_univdiags_alloc,localdb,novel_diagonals_alloc,localdb_alloc,
-					stage1,queryptr,/*pos5*/0,pos3,querylength,
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					queryptr,/*pos5*/0,pos3,querylength,
+					/*anchor_univdiagonal*/high_univdiagonal,
 					low_univdiagonal,high_univdiagonal - /*prevent continuation*/1,
 					query_compress,plusp,genestrand,genomebits,
 					localdb_nmismatches_allowed,/*extend5p*/true,
@@ -5951,7 +6035,8 @@ Spliceends_qend_resolve (int *ndiagonals, int *local_nmismatches, int pos5, int 
 			 Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			 Compress_T query_compress, char *queryptr, bool plusp, int genestrand,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			 Stage1_T stage1, int localdb_nmismatches_allowed) {
+			 Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			 int localdb_nmismatches_allowed) {
   int i;
   int nmatches, matchlength;
   bool sortedp, trimmedp;
@@ -5975,7 +6060,9 @@ Spliceends_qend_resolve (int *ndiagonals, int *local_nmismatches, int pos5, int 
 
   } else if ((*ndiagonals = Localdb_get(&sortedp,&trimmedp,&matchlength,&(*local_nmismatches),
 					novel_univdiags_alloc,localdb,novel_diagonals_alloc,localdb_alloc,
-					stage1,queryptr,pos5,/*pos3*/querylength,querylength,
+					stage1,streamspace_max_alloc,streamspace_alloc,
+					queryptr,pos5,/*pos3*/querylength,querylength,
+					/*anchor_univdiagonal*/low_univdiagonal,
 					low_univdiagonal + /*prevent continuation*/1,high_univdiagonal,
 					query_compress,plusp,genestrand,genomebits,
 					localdb_nmismatches_allowed,/*extend5p*/false,

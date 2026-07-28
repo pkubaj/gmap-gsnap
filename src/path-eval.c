@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: e7f61e0ccbcbcbee8c6dfc17d5225a1c092f4353 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -162,7 +161,8 @@ Path_eval_nmatches (int *found_score, T this, Compress_T query_compress_fwd, Com
       this->found_score += qstart;
       /* Does not affect score_within_trims */
 
-    } else if ((altsplice = this->qstart_alts) != NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+    } else if ((altsplice = this->qstart_alts) != NULL && altsplice->nmismatches_known_p == true &&
+	       (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
       this->nmatches += Altsplice_best_nmatches(this->qstart_alts); /* Not nmatches_to_trims, which is 0 for alts_substring */
       debug7(printf("Adding %d matches for qstart_alts => total %d\n",
 		    Altsplice_best_nmatches(this->qstart_alts),this->nmatches));
@@ -260,7 +260,8 @@ Path_eval_nmatches (int *found_score, T this, Compress_T query_compress_fwd, Com
       this->found_score += qstart;
       /* Does not affect score_within_trims */
 
-    } else if ((altsplice = this->qstart_alts )!= NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+    } else if ((altsplice = this->qstart_alts )!= NULL && altsplice->nmismatches_known_p == true &&
+	       (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
       this->nmatches += Altsplice_best_nmatches(this->qstart_alts); /* Not nmatches_to_trims, which is 0 for alts_substring */
       debug7(printf("Adding %d matches for qstart_alts => total %d\n",
 		    Altsplice_best_nmatches(this->qstart_alts),this->nmatches));
@@ -353,7 +354,8 @@ Path_eval_nmatches (int *found_score, T this, Compress_T query_compress_fwd, Com
     this->found_score += this->querylength - qend;
     /* Does not affect score_within_trims */
 
-  } else if ((altsplice = this->qend_alts) != NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+  } else if ((altsplice = this->qend_alts) != NULL && altsplice->nmismatches_known_p == true &&
+	     (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
     this->nmatches += Altsplice_best_nmatches(this->qend_alts); /* Not nmatches_to_trims, which is 0 for alts_substring */
     debug7(printf("Adding %d matches for qend_alts => total %d\n",
 		  Altsplice_best_nmatches(this->qend_alts),this->nmatches));
@@ -604,7 +606,8 @@ Path_eval_nmatches_chopped (T this) {
       /* Does not affect score_within_trims */
 
 #if 0
-    } else if ((altsplice = this->qstart_alts) != NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+    } else if ((altsplice = this->qstart_alts) != NULL && altsplice->nmismatches_known_p == true &&
+	       (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
       /* Not considering altsplices */
       nmatches += this->qstart_alts->best_distal_nmatches; /* Not nmatches_to_trims, which is 0 for alts_substring */
       debug6(printf("Adding %d matches for qstart_alts => total %d\n",this->qstart_alts->best_distal_nmatches,nmatches));
@@ -675,7 +678,8 @@ Path_eval_nmatches_chopped (T this) {
       /* Does not affect score_within_trims */
 
 #if 0
-    } else if ((altsplice = this->qstart_alts )!= NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+    } else if ((altsplice = this->qstart_alts )!= NULL && altsplice->nmismatches_known_p == true &&
+	       (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
       /* Not considering altsplices */
       nmatches += this->qstart_alts->best_distal_nmatches; /* Not nmatches_to_trims, which is 0 for alts_substring */
       ref_nmatches += this->qstart_alts->best_distal_nmatches; /* Not nmatches_to_trims, which is 0 for alts_substring */
@@ -743,7 +747,8 @@ Path_eval_nmatches_chopped (T this) {
     /* Does not affect score_within_trims */
 
 #if 0
-  } else if ((altsplice = this->qend_alts) != NULL && (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
+  } else if ((altsplice = this->qend_alts) != NULL && altsplice->nmismatches_known_p == true &&
+	     (altsplice->medial_prob > 0.9 || Altsplice_best_distal_prob(altsplice) > 0.9)) {
     /* Not considering altsplices */
     nmatches += this->qend_alts->best_distal_nmatches; /* Not nmatches_to_trims, which is 0 for alts_substring */
     ref_nmatches += this->qend_alts->best_distal_nmatches; /* Not nmatches_to_trims, which is 0 for alts_substring */
@@ -1445,6 +1450,7 @@ Path_eval_and_sort (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     best_end_sense_prob, best_end_antisense_prob, prob;
   /* int best_querystart, best_queryend, querystart, queryend; */
   int chop_qstart, chop_qend, qstart, qend;
+  int ignore_found_score;
 
 
   debug8(printf("Entered Path_eval_and_sort with patharray %p and npaths %d\n",patharray,npaths));
@@ -1458,18 +1464,30 @@ Path_eval_and_sort (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
     /* Have already called Path_extend */
     
     /* 0.  Unalias circular alignments and trim chrbounds */
+    k = 0;
     for (i = 0; i < npaths; i++) {
       path = patharray[i];
       if (circularp[path->chrnum] == true) {
-	Path_trim_circular_unalias(path);
+	if (path->plusp == true) {
+	  Path_trim_circular_unalias(path,query_compress_fwd);
+	} else {
+	  Path_trim_circular_unalias(path,query_compress_rev);
+	}
       }
-      Path_trim_chrbounds(path,query_compress_fwd,query_compress_rev,
-			  intlistpool,univcoordlistpool,listpool,pathpool,
-			  transcriptpool);
+      if (Path_trim_chrbounds(&ignore_found_score,path,query_compress_fwd,query_compress_rev,
+			      intlistpool,univcoordlistpool,listpool,pathpool,
+			      transcriptpool) == true) {
+	patharray[k++] = path;
+      } else {
+	debug8(printf("Eliminating due to chrbounds: ")); debug8(Path_print(path));
+	Path_free(&path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+      }
     }
 
 
     /* 1.  Sort by structure to remove duplicates */
+    npaths = k;
     if (npaths > 1) {
       qsort(patharray,npaths,sizeof(T),Path_structure_cmp);
 

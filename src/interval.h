@@ -1,4 +1,3 @@
-/* $Id: interval.h 207855 2017-06-29 20:34:17Z twu $ */
 #ifndef INTERVAL_INCLUDED
 #define INTERVAL_INCLUDED
 

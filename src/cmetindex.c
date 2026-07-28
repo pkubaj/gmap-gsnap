@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: cmetindex.c 225248 2022-11-06 05:10:30Z twu $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

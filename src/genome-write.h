@@ -1,4 +1,3 @@
-/* $Id: genome-write.h 224922 2022-10-08 13:23:45Z twu $ */
 #ifndef GENOME_WRITE_INCLUDED
 #define GENOME_WRITE_INCLUDED
 

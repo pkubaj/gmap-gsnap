@@ -1,4 +1,4 @@
-static char rcsid[] = "$Id: 264fa2f6d8d3060b6e1d13dd1f840ec1599c8685 $";
+static char rcsid[] = "$Id: d972939fbd31b0fca1498ac9afee370274e28c7c $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -105,7 +105,7 @@ Transcript_new (unsigned int num, int transcript_genestrand, int trstart, int tr
   bool allocp;
 #endif
 
-  assert(trstart < trend);
+  assert(trstart < trend + /*1-based*/1);
 
 #ifdef DEBUG0
   label = Univ_IIT_label(transcript_iit,num,&allocp);
@@ -126,7 +126,7 @@ Transcript_new (unsigned int num, int transcript_genestrand, int trstart, int tr
   new->trend_overhang = trend_overhang;
 
   new->exons = exons;
-  new->nexons = nexons;
+  new->nexons = nexons;		/* Total number of exons in transcript, not in read */
   new->trlength = trlength;
 
   new->velocity = -1;

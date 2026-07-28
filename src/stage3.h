@@ -1,4 +1,3 @@
-/* $Id: stage3.h 224675 2021-10-25 14:59:56Z twu $ */
 #ifndef STAGE3_INCLUDED
 #define STAGE3_INCLUDED
 

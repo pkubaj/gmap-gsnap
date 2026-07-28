@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: d1776cb9ba96b349f8139e43b5a0d03e7c04f452 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -44,15 +43,21 @@ static char rcsid[] = "$Id: d1776cb9ba96b349f8139e43b5a0d03e7c04f452 $";
 #include "path-solve.h"
 
 
-#ifndef LARGE_GENOMES
-#include "merge-diagonals-simd-uint4.h"
-#elif !defined(HAVE_AVX512) && !defined(HAVE_AVX2)
-#include "merge-diagonals-heap.h" /* For Merge_diagonals_large */
-#include "merge-diagonals-simd-uint4.h"
-#else
-#include "merge-diagonals-simd-uint8.h" /* For Merge_diagonals_large */
+#include "merge-method.h"
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint4.h"
+#elif defined(USE_SIMD_MERGE)
 #include "merge-diagonals-simd-uint4.h"
 #endif
+
+#ifdef LARGE_GENOMES
+#ifdef USE_HEAP_MERGE
+#include "merge-diagonals-heap-uint8.h"
+#elif defined(USE_SIMD_MERGE)
+#include "merge-diagonals-simd-uint8.h"
+#endif
+#endif
+
 
 #include "simd.h"
 
@@ -274,6 +279,7 @@ Kmer_exact1 (Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,
     }
   }
     
+  /* Only three streams, so SIMD merge might be faster than heap merge */
 #ifdef LARGE_GENOMES  
   *_univdiagonals_gplus = Merge_diagonals_uint8(&(*nunivdiagonals_gplus),
 						mod_univdiagonals_gplus,mod_nunivdiagonals_gplus,
@@ -471,7 +477,7 @@ compute_univdiagonals_auxinfo (Univcoord_T **_univdiagonals, Auxinfo_T **auxinfo
   debug9(printf("max_count is %d\n",max_count));
 
   /* Compute univdiagonals and auxinfo */
-  MALLOC_ALIGN(*_univdiagonals,nexhaustive*sizeof(Univcoord_T));
+  *_univdiagonals = (Univcoord_T *) MALLOC_ALIGN(nexhaustive*sizeof(Univcoord_T));
   *auxinfo = (Auxinfo_T *) MALLOC(nexhaustive*sizeof(Auxinfo_T));
   *pathstores = (Pathstore_T *) MALLOC(nexhaustive*sizeof(Pathstore_T));
 

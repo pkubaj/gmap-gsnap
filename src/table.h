@@ -1,4 +1,3 @@
-/* $Id: table.h 224358 2021-07-03 01:58:05Z twu $ */
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 

@@ -29,6 +29,12 @@
 
 #define T Path_T
 
+extern List_T
+Pathpair_uniq (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
+	       Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+	       Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+	       Hitlistpool_T hitlistpool);
+
 extern Pathpair_T *
 Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq,
@@ -39,11 +45,13 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			char *queryuc_ptr_5, char *queryrc5, char *queryuc_ptr_3, char *queryrc3, 
 			char *quality_string_5, char *quality_string_3,
 			int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
-			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			unsigned short *localdb_alloc, Knownsplicing_T knownsplicing,
-			Knownindels_T knownindels,
 
-			int nmismatches_allowed_5, int nmismatches_allowed_3,
+			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
+			unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+
+			Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+
 			int nmismatches_filter_5, int nmismatches_filter_3,
 			int mincoverage_filter_5, int mincoverage_filter_3,
 			int querylength5, int querylength3,

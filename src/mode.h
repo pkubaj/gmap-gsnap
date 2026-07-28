@@ -1,4 +1,3 @@
-/* $Id: mode.h 167592 2015-06-15 18:56:59Z twu $ */
 #ifndef MODE_INCLUDED
 #define MODE_INCLUDED
 
