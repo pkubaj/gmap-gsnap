@@ -1,4 +1,3 @@
-#define DEBUG1 1
 static char rcsid[] = "$Id: cd17908a7856ea455ccae738b96b631530d1523d $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
