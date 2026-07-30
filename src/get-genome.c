@@ -1165,11 +1165,14 @@ main (int argc, char *argv[]) {
 	  sprintf(iitfile,"%s/%s.iit",genomesubdir,map_iitfile);
 	  
 	  if (Access_file_exists_p(iitfile) == false) {
-	    fprintf(stderr,"Map file %s.iit not found in %s.  Available files:\n",map_iitfile,mapdir);
-	    Datadir_list_directory(stderr,mapdir);
-	    fprintf(stderr,"Either install file %s.iit or specify a full directory path\n",map_iitfile);
-	    fprintf(stderr,"using the -M flag to gmap.\n");
-	    exit(9);
+	    if (user_mapdir != NULL) {
+	      fprintf(stderr,"Map file %s.iit not found in %s\n",map_iitfile,user_mapdir);
+	    } else {
+	      Datadir_list_directory(stderr,mapdir);
+	      fprintf(stderr,"Either install file %s.iit or specify a full directory path\n",map_iitfile);
+	      fprintf(stderr,"using the -M flag to gmap.\n");
+	      exit(9);
+	    }
 	  }
 	}
 	FREE(mapdir);
@@ -1483,6 +1486,7 @@ main (int argc, char *argv[]) {
       fclose(fp);
     }
 
+
   } else if (argc > 1 && map_iitfile != NULL) {
     /* User is requesting multiple labels */
 
@@ -1757,8 +1761,60 @@ main (int argc, char *argv[]) {
       FREE(mapdir);
     }
 
+  } else if (map_iitfile != NULL && (sequencep == true || genome_sequence_p == true || exonsp == true)) {
+    /* User is requesting all sequences or exons in the map file */
+    mapdir = Datadir_find_mapdir(user_mapdir,genomesubdir,fileroot);
+    iitfile = (char *) CALLOC(strlen(mapdir)+strlen("/")+
+			      strlen(map_iitfile)+strlen(".iit")+1,sizeof(char));
+    sprintf(iitfile,"%s/%s.iit",mapdir,map_iitfile);
+
+    if ((map_iit = IIT_read(iitfile,/*name*/NULL,true,/*divread*/READ_ALL,/*divstring*/NULL,
+			    /*add_iit_p*/true)) == NULL) {
+      fprintf(stderr,"Cannot open IIT file %s\n",iitfile);
+      exit(9);
+      
+    } else {
+      FREE(iitfile);
+      
+      iitfile = (char *) CALLOC(strlen(genomesubdir)+strlen("/")+
+				strlen(fileroot)+strlen(".chromosome.iit")+1,sizeof(char));
+      sprintf(iitfile,"%s/%s.chromosome.iit",genomesubdir,fileroot);
+      chromosome_iit = Univ_IIT_read(iitfile,/*readonlyp*/true,/*add_iit_p*/false);
+      circular_typeint = Univ_IIT_typeint(chromosome_iit,"circular");
+      FREE(iitfile);
+      
+      genome = Genome_new(genomesubdir,fileroot,/*snps_root*/NULL,
+			  chromosome_iit,genome_access,/*sharedp*/false,/*revcompp*/false);
+      Genome_setup(circular_typeint);
+      
+      ndivs = IIT_ndivs(map_iit);
+      for (indx = 1; indx <= Univ_IIT_total_nintervals(chromosome_iit); indx++) {
+	chr = Univ_IIT_label(chromosome_iit,indx,&allocp);
+	chrlength = Univ_IIT_length(chromosome_iit,indx);
+	matches = IIT_get(&nmatches,map_iit,chr,/*coordstart*/0,/*coordend*/chrlength,/*sortp*/false);
+	for (i = 0; i < nmatches; i++) {
+	  print_interval(chr,matches[i],map_iit,ndivs,chromosome_iit,genome,/*fieldint*/-1);
+	}
+	FREE(matches);
+	if (allocp) {
+	  FREE(chr);
+	}
+      }
+      
+      Genome_free(&genome);
+      Univ_IIT_free(&chromosome_iit);
+      IIT_free(&map_iit);
+      FREE(dbversion);
+      FREE(genomesubdir);
+      FREE(fileroot);
+      FREE(dbroot);
+      
+      return 0;
+    }
+
   } else {
     /* argv == 0.  Read from stdin */
+    fprintf(stderr,"Reading from stdin\n");
 
     if (map_iitfile == NULL) {
       /* Skip */
