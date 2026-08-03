@@ -2,7 +2,7 @@
 #ifndef PATHPOOL_INCLUDED
 #define PATHPOOL_INCLUDED
 
-/* #define PATHPOOL_REUSE 1 */
+#define PATHPOOL_REUSE 1
 /* #define PATHPOOL_TRACE 1 */
 
 #ifdef PATHPOOL_TRACE
@@ -25,6 +25,11 @@ extern void
 Pathpool_free (T *old);
 extern T
 Pathpool_new (void);
+extern void
+Pathpool_nchunks (int *path_chunks, int *junction_chunks, int *altsplice_chunks,
+		  int *string_chunks, T this);
+extern void
+Pathpool_set_path_reuse (T this, bool reusep);
 
 #ifdef PATHPOOL_REUSE
 extern void

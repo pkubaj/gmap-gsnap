@@ -2008,20 +2008,23 @@ load_words (char *memory, T new) {
     new->labelpointers8 = (UINT8 *) memory;
     new->labelpointers_length = (size_t) ((new->total_nintervals+1)*sizeof(UINT8));
     memory += new->total_nintervals * sizeof(UINT8);
-    new->label_length = (size_t) * (UINT8 *) memory;
+    memcpy(&label_length8,memory,sizeof(label_length8));
+    new->label_length = (size_t) label_length8;
     memory += sizeof(UINT8);
   } else {
     new->labelpointers = (UINT4 *) memory;
     new->labelpointers_length = (size_t) ((new->total_nintervals+1)*sizeof(UINT4));
     memory += new->total_nintervals * sizeof(UINT4);
-    new->label_length = (size_t) * (UINT4 *) memory;
+    memcpy(&label_length,memory,sizeof(label_length));
+    new->label_length = (size_t) label_length;
     memory += sizeof(UINT4);
   }
 #else
   new->labelpointers = (UINT4 *) memory;
   new->labelpointers_length = (size_t) ((new->total_nintervals+1)*sizeof(UINT4));
   memory += new->total_nintervals * sizeof(UINT4);
-  new->label_length = (size_t) * (UINT4 *) memory;
+  memcpy(&label_length,memory,sizeof(label_length));
+  new->label_length = (size_t) label_length;
   memory += sizeof(UINT4);
 #endif
 

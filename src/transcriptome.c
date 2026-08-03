@@ -262,7 +262,7 @@ int
 Transcriptome_nexons (T this, int trnum) {
   UINT4 offset0, offset1;
 
-  offset0 = Bitpack64_read_two(&offset1,(Oligospace_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
+  offset0 = Bitpack64_read_two(&offset1,(Signature_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
   return (int) (offset1 - offset0);
 }
 
@@ -272,7 +272,7 @@ Transcriptome_exons (int **exonbounds, Chrpos_T **exonstarts, T this, Trnum_T tr
   int nexons;
   UINT4 offset0, offset1;
 
-  offset0 = Bitpack64_read_two(&offset1,(Oligospace_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
+  offset0 = Bitpack64_read_two(&offset1,(Signature_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
   nexons = (int) (offset1 - offset0);
   *exonbounds = &(((int *) this->exoninfo)[2*offset0]);
   *exonstarts = &(this->exoninfo[2*offset0 + nexons]);
@@ -300,7 +300,7 @@ Transcriptome_trnum (int *nexons, int **exonbounds, Chrpos_T **exonstarts, T thi
     return 0;
 
   } else {
-    offset0 = Bitpack64_read_two(&offset1,(Oligospace_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
+    offset0 = Bitpack64_read_two(&offset1,(Signature_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
     *nexons = (int) (offset1 - offset0);
     *exonbounds = &(((int *) this->exoninfo)[2*offset0]);
     *exonstarts = &(this->exoninfo[2*offset0 + (*nexons)]);
@@ -341,7 +341,7 @@ Transcriptome_genomic_bounded_p (int trnum, Chrnum_T chrbound, Chrpos_T lowbound
     }
   }
 
-  offset0 = Bitpack64_read_two(&offset1,(Oligospace_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
+  offset0 = Bitpack64_read_two(&offset1,(Signature_T) (trnum - 1),this->offsetsmeta,this->offsetsstrm);
   nexons = (int) (offset1 - offset0);
 
   exonbounds = &(((int *) this->exoninfo)[2*offset0]);

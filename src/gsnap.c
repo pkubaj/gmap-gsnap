@@ -69,9 +69,15 @@
 #include "pass.h"
 #include "mode.h"
 #include "shortread.h"		/* For Shortread_setup */
+#include "parameters.h"		/* For --tune / --max-read-length */
+#include "align-cascade.h"
 #include "stopwatch.h"
 #include "transcriptome.h"
 #include "transcript.h"		/* For Transcript_setup */
+
+#define DEFAULT_MIN_READ_LENGTH 36
+#define DEFAULT_MIN_READ_LENGTH_SBX 20
+#define DEFAULT_MIN_READ_LENGTH_LONGREAD 50
 
 #ifdef LARGE_GENOMES
 #include "intersect-approx-uint8.h" /* For Intersect_approx_uint4_setup */
@@ -121,12 +127,14 @@
 #include "splice.h"		/* For Splice_setup */
 #include "spliceends.h"		/* For Spliceends_setup */
 #include "oligo.h"		/* For Oligo_setup */
+#include "signature.h"		/* For Signature_setup */
 
 #include "intlistpool.h"
 #include "uintlistpool.h"
 #include "listpool.h"
 #include "trdiagpool.h"
 #include "univdiagpool.h"
+#include "segmenteltpool.h"
 #include "auxinfopool.h"
 #include "pathstorepool.h"
 #include "trpathpool.h"
@@ -154,17 +162,24 @@
 #include "trpath-convert.h"
 #include "transcriptome-search.h"
 #include "tr-extension-search.h"
+#include "tr-chain-search.h"
 #include "kmer-search.h"
+#include "minpure.h"
 #include "extension-search.h"
 /* #include "merge-search.h" */
 /* #include "segment-search.h" */
 #include "repetitive.h"
+#include "segmentelt.h"		/* For Segmentelt_setup */
+#include "singleelt.h"		/* For Singleelt_setup */
 
 #include "indel.h"		/* For Indel_setup */
 #include "pathstore.h"		/* For Pathstore_setup */
 #include "stage1hr.h"
 #include "stage1hr-single.h"
 #include "stage1hr-paired.h"
+#include "accel-profile-stats.h"
+#include "cascade-stage-probe.h"
+#include "debug_groups.h"
 #include "indexdb.h"
 #include "localdb-read.h"
 #include "resulthr.h"
@@ -215,6 +230,56 @@
 #define debug(x)
 #endif
 
+static unsigned long long
+request_cascade_stage_start (const char *stage, Shortread_T queryseq,
+			     const char *role, Univdiagpool_T univdiagpool) {
+  const char *qname = queryseq == NULL ? "unset" : Shortread_accession(queryseq);
+
+  GSNAP_univdiagpool_stage_probe_set(stage,qname,role);
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
+  int univdiag_chunks = 0, univdiag_list_chunks = 0;
+  if (univdiagpool != NULL) {
+    Univdiagpool_nchunks(&univdiag_chunks,&univdiag_list_chunks,univdiagpool);
+  }
+  fprintf(stderr,
+	  "cascade_stage\tbegin\tstage=%s\trole=%s\tqname=%s\tunivdiag_chunks=%d\tunivdiag_list_chunks=%d\n",
+	  stage,role,qname == NULL ? "unset" : qname,univdiag_chunks,univdiag_list_chunks);
+#endif
+  return Cascade_timing_now_us();
+}
+
+static unsigned long long
+request_cascade_stage_end (const char *stage, Shortread_T queryseq,
+			   const char *role, Univdiagpool_T univdiagpool,
+			   unsigned long long start_us) {
+  const char *qname = queryseq == NULL ? "unset" : Shortread_accession(queryseq);
+  unsigned long long elapsed_us = Cascade_timing_now_us() - start_us;
+
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
+  int univdiag_chunks = 0, univdiag_list_chunks = 0;
+  if (univdiagpool != NULL) {
+    Univdiagpool_nchunks(&univdiag_chunks,&univdiag_list_chunks,univdiagpool);
+  }
+  fprintf(stderr,
+	  "cascade_stage\tend\tstage=%s\trole=%s\tqname=%s\telapsed_us=%llu\tunivdiag_chunks=%d\tunivdiag_list_chunks=%d\n",
+	  stage,role,qname == NULL ? "unset" : qname,elapsed_us,
+	  univdiag_chunks,univdiag_list_chunks);
+#endif
+  GSNAP_univdiagpool_stage_probe_clear();
+  return elapsed_us;
+}
+
+#define REQUEST_CASCADE_STAGE_START(stage,queryseq,univdiagpool) \
+  request_cascade_stage_start((stage),(queryseq),"request",(univdiagpool))
+#define REQUEST_CASCADE_STAGE_ADD(timing,field,stage,queryseq,univdiagpool,start_us) \
+  do { \
+    unsigned long long _elapsed_us = \
+      request_cascade_stage_end((stage),(queryseq),"request",(univdiagpool),(start_us)); \
+    if ((timing) != NULL) { \
+      (timing)->field += _elapsed_us; \
+    } \
+  } while (0)
+
 
 /************************************************************************
  *   Global parameters
@@ -222,6 +287,10 @@
 
 static bool genome_align_p = true;
 static bool transcriptome_align_p = true;
+
+static Align_cascade_T align_cascade = ALIGN_CASCADE_DEFAULT;
+static bool align_cascade_requires_transcriptome_p = false;
+static char *align_cascade_spec = "ALL";
 
 /* Transcriptome */
 static Transcriptome_T transcriptome = NULL;
@@ -252,6 +321,7 @@ static Univcoord_T *alias_ends = NULL;
 static Indexdb_T indexdb = NULL;
 static Indexdb_T indexdb_nonstd = NULL; /* For cmet or atoi */
 static Indexdb_T tr_indexdb = NULL;
+static Indexdb_T tr_chain_rescue_indexdb = NULL;
 
 
 static bool two_pass_p = false;
@@ -344,6 +414,24 @@ static bool paired_end_p;	/* Determined by open_input_streams */
 /* Compute options */
 static bool chop_primers_p = false;
 
+/* If true, then results can be extended from a transcript, perhaps into an intron */
+static bool refine_partial_tr_p = false;
+static bool tr_chain_search_p = false;
+static bool tr_chain_search_explicit_p = false;
+static int tr_chain_seed_source = TR_CHAIN_SEED_K13;
+static int tr_chain_engine = TR_CHAIN_ENGINE_TRDIAG;
+static char *tr_chain_rescue_transcriptome_dbroot = NULL;
+static char *tr_chain_fm_prefix = NULL;
+static int tr_chain_fm_min_seed_len = 11;
+static int tr_chain_fm_max_occ = 1024;
+static int tr_chain_fm_max_sub_occ = 10;
+static Width_T tr_chain_rescue_index1part = 0;
+static int tr_chain_max_indel = 9;
+static double tr_chain_score_min_ratio = 0.75;
+static int tr_chain_frontier_cap = 1024;
+static int tr_chain_max_seed_occ = 65536;
+static int tr_chain_max_anchors = 16384;
+
 static bool query_unk_mismatch_p = false;
 static bool genome_unk_mismatch_p = true; /* Needs to be false for path-eval assertions, but needs to be true for circular alignments */
 static bool novelsplicingp = false;
@@ -383,6 +471,42 @@ static int expected_pairlength = 200;
 static int pairlength_deviation = 100;
 static int min_insertlength;	/* expected_pairlength - 5*pairlength_deviation if >= 0 */
 static int max_insertlength;	/* expected_pairlength + 5*pairlength_deviation */
+static int paired_terminal_anchor_min_score = SEGMENTELT_DEFAULT_TERMINAL_ANCHOR_MIN_SCORE;
+static int paired_terminal_anchor_rescue_min_score = PATHPAIR_DEFAULT_TERMINAL_ANCHOR_RESCUE_MIN_SCORE;
+static int paired_terminal_anchor_slop = SEGMENTELT_DEFAULT_TERMINAL_ANCHOR_SLOP;
+static int paired_segment_exact_max_mismatch_divisor =
+  STAGE1HR_PAIRED_DEFAULT_SEGMENT_EXACT_MAX_MISMATCH_DIVISOR;
+static bool paired_mate_rescue_gapped_p = false;
+static bool paired_preeval_ungapped_mate_p = false;
+static bool paired_preeval_rescue_skip_p = false;
+static bool paired_segment_stream_chains_p = true;
+static bool paired_solve_all_anchor_first_p = false;
+static bool paired_postsolve_reliable_anchors_first_p = false;
+static bool paired_seg1_exhaustive_concordance_p = false;
+static bool paired_duplicate_auxinfo_frontier_p = false;
+static unsigned int paired_mate_minpure_floor = 20U;
+static bool minpure_diagonal_debug_p = false;
+static bool pathpair_equal_coverage_diff_tiebreak_p = false;
+static bool paired_transcript_completion_p = false;
+static bool paired_tr_adjacent_indel_repair_p = false;
+static bool tr_score_ranker_p = true;
+static double score_match_reward = 2.0;
+static double score_mismatch_penalty = 4.0;
+static double score_indel_open_penalty = 4.0;
+static double score_indel_extend_penalty = 2.0;
+static double score_long_indel_open_penalty = 24.0;
+static double score_long_indel_extend_penalty = 1.0;
+static double score_splice_unannotated_penalty = 12.0;
+static double score_pair_transcript_discordance_penalty = 12.0;
+static double score_pair_margin = 0.02;
+static double score_min_read = 0.0;
+static double score_min_pair = 0.0;
+static double tr_score_match_reward = 1.0;
+static double tr_score_mismatch_penalty = 2.0;
+static double tr_score_indel_open_penalty = 2.0;
+static double tr_score_indel_extend_penalty = 2.0;
+static double tr_score_softclip_penalty = 2.0;
+static double tr_score_transcript_discordance_penalty = 0.0;
 
 
 #ifdef HAVE_PTHREAD
@@ -397,27 +521,114 @@ static int nthreads = 0;	/* (int) sysconf(_SC_NPROCESSORS_ONLN) */
 static int subopt_levels = 0;
 
 static int min_indel_end_matches = 4;
+static int max_recursive_ends = 2;
+static bool max_recursive_ends_explicit_p = false;
+static int min_support_indel = 6;
+static bool min_support_indel_explicit_p = false;
+static int indel_support_mismatch_penalty = 3;
+static bool indel_support_mismatch_penalty_explicit_p = false;
 
 /* If negative, then hasn't been specified by user.  If between 0 and
    1, then treated as a fraction of the querylength.  Else, treated as
    an integer */
 static double user_nmismatches_filter_float = -1.0;
 static double user_mincoverage_filter_float = 0.5;
+static bool single_end_split_paths_p = false;
+static int split_path_max_overlap = 20;
+static int split_path_min_segment = 100;
+static double split_path_min_combined_coverage_float = 0.5;
+static bool user_mincoverage_filter_float_explicit_p = false;
+static bool single_end_split_paths_explicit_p = false;
+static bool split_path_max_overlap_explicit_p = false;
+static bool split_path_min_segment_explicit_p = false;
+static bool split_path_min_combined_coverage_explicit_p = false;
+static bool se_ext_dedup_exact_chains_p = false;
+static bool se_ext_equiv_prev_prune_p = false;
+static bool se_keep_trpath_candidates_p = false;
+static bool se_materialize_equiv_splice_alts_p = false;
+static bool se_segment_stream_chains_p = false;
+static bool se_segment_dedup_exact_chains_p = false;
+static bool se_segment_prefix_skip_p = false;
+static bool se_segment_qstart_anchor_cache_p = false;
+static bool se_path_qend_local_cache_p = false;
+static bool se_emitted_path_dedup_p = false;
+static bool se_segment_equiv_prev_prune_p = false;
+static bool se_ext_equiv_prev_prune_explicit_p = false;
+static bool se_keep_trpath_candidates_explicit_p = false;
+static bool se_materialize_equiv_splice_alts_explicit_p = false;
+static bool se_segment_stream_chains_explicit_p = false;
+static bool se_segment_prefix_skip_explicit_p = false;
+static bool se_segment_qstart_anchor_cache_explicit_p = false;
+static bool se_path_qend_local_cache_explicit_p = false;
+static bool se_emitted_path_dedup_explicit_p = false;
+static bool se_segment_equiv_prev_prune_explicit_p = false;
+static bool se_segment_min_kmer_avg_quality_explicit_p = false;
+static bool se_segment_max_kmer_bad_bases_explicit_p = false;
+static bool se_segment_bad_base_quality_explicit_p = false;
+static bool fix_splice_boundary_indels_explicit_p = false;
+static bool segment_max_avg_kmer_positions_explicit_p = false;
+static bool segment_diagonal_algorithm_explicit_p = false;
+static bool adaptive_hybrid_floor_per_kmer_explicit_p = false;
+static bool adaptive_hybrid_budget_per_kmer_explicit_p = false;
+static bool adaptive_hybrid_hard_max_explicit_p = false;
+static bool adaptive_hybrid_weak_width_per_kmer_explicit_p = false;
+static bool adaptive_hybrid_weak_support_divisor_explicit_p = false;
+static bool adaptive_hybrid_strong_support_fraction_explicit_p = false;
+static bool stats_weak_support_fraction_explicit_p = false;
+static int se_segment_cache_threshold = 32;
+static int se_segment_max_window = 0;
+static double se_segment_min_kmer_avg_quality = 20.0;
+static int se_segment_max_kmer_bad_bases = 3;
+static int se_segment_bad_base_quality = 10;
+static int segment_max_avg_kmer_positions = 10000;
+static bool segment_repetitive_kmer_filter_p = true;
+static int segment_max_kmer_positions = 100000;
+static Segment_diagonal_algorithm_T segment_diagonal_algorithm = SEGMENT_DIAGONAL_ALGORITHM_WIDTH_OR_COUNT;
+static int adaptive_hybrid_floor_per_kmer = 2;
+static int adaptive_hybrid_budget_per_kmer = 12;
+static int adaptive_hybrid_hard_max = 0;
+static int adaptive_hybrid_weak_width_per_kmer = 6;
+static int adaptive_hybrid_weak_support_divisor = 8;
+static double adaptive_hybrid_strong_support_fraction = 0.10;
+static double stats_weak_support_fraction = 0.05;
+static double se_max_mismatches_filter_float = -1.0;
+static double se_max_softclip_filter_float = -1.0;
+static bool se_quality_ranker_p = false;
+static bool se_quality_ranker_explicit_p = false;
+static double se_quality_match_reward = 1.0;
+static double se_quality_mismatch_penalty = 2.0;
+static double se_quality_indel_penalty = 2.0;
+static double se_quality_softclip_penalty = 0.0;
+static double se_quality_error_rate_penalty = 0.0;
+static bool se_quality_error_rate_penalty_explicit_p = false;
+static double se_quality_rank_margin = 0.20;
+static bool se_quality_split_ranker_p = false;
+static bool se_quality_split_ranker_explicit_p = false;
+static double se_quality_split_gap_penalty = 0.0;
+static double se_quality_split_segment_penalty = 0.0;
+static bool se_quality_split_segment_penalty_explicit_p = false;
 static int localdb_nmismatches_allowed = 2;
 
 static int max_insertionlen = 6;
 static int max_deletionlen = 9;
+static bool max_deletionlen_explicit_p = false;
 static Chrpos_T shortsplicedist = 200000;
 /* static double min_spliceprob = 0.90; */
 
 static Width_T index1part = 15;
 static Width_T index1part_tr = 15;
 static Width_T required_index1part = 0;
+
+static Width_T msize = 0;
+static Width_T required_msize = 0;
+
 static Width_T index1interval;
-static Width_T min_querylength;
 static Width_T index1interval_tr;
 static Width_T required_index1interval = 0;
 
+static Width_T min_querylength;
+static bool user_min_read_length_explicit_p = false;
+static int user_min_read_length = DEFAULT_MIN_READ_LENGTH;
 static int indexdb_size_threshold;
 
 
@@ -530,6 +741,7 @@ static bool paired_flag_means_concordant_p = false;
 static bool quiet_if_excessive_p = false;
 static int maxpaths_search = 1000;
 static int maxpaths_report = 100;
+static int n_splice_paths = 1;
 static bool orderedp = false;
 static bool failsonlyp = false;
 static bool nofailsp = false;
@@ -558,14 +770,14 @@ static char *sam_read_group_library = NULL;
 static char *sam_read_group_platform = NULL;
 static bool force_xs_direction_p = false;
 static bool md_report_snps_p = false;
-static bool allow_soft_clips_p = true;
+static bool allow_soft_clips_start_p = true;
+static bool allow_soft_clips_end_p = true;
 static bool extend_soft_clips_p = false;
 static Cigar_action_T cigar_action = CIGAR_ACTION_WARNING;
 
 static bool only_concordant_p = false;
 static bool omit_concordant_uniq_p = false;
 static bool omit_concordant_mult_p = false;
-static bool omit_softclipped_p = false;
 static bool only_tr_consistent_p = false;
 
 
@@ -588,19 +800,26 @@ static struct option long_options[] = {
   /* Input options */
   {"transcriptdir", required_argument, 0, 'C'},	/* user_transcriptomedir */
   {"transcriptdb", required_argument, 0, 'c'}, /* transcriptome_dbroot */
-  {"transcriptome-mode", required_argument, 0, 0}, /* genome_align_p, transcriptome_align_p */
+  {"align-cascade", required_argument, 0, 0}, /* align_cascade */
   {"dir", required_argument, 0, 'D'},	/* user_genomedir */
   {"db", required_argument, 0, 'd'}, /* genome_dbroot */
   {"two-pass", no_argument, 0, 0},   /* two_pass_p */
   {"use-localdb", required_argument, 0, 0}, /* user_localdb_p, use_localdb_p */
   {"kmer", required_argument, 0, 'k'}, /* required_index1part, index1part */
   {"sampling", required_argument, 0, 0}, /* required_index1interval, index1interval */
+  {"minimizer", required_argument, 0, 'j'}, /* required_msize, msize */
   {"align-fraction", required_argument, 0, 0}, /* skip_prob */
   {"part", required_argument, 0, 'q'}, /* part_modulus, part_interval */
   {"orientation", required_argument, 0, 0}, /* single_cell_p, invert_first_p, invert_second_p */
   {"input-buffer-size", required_argument, 0, 0}, /* input_buffer_size */
   {"barcode-length", required_argument, 0, 0},	  /* barcode_length */
   {"endtrim-length", required_argument, 0, 0},	  /* endtrim_length */
+  {"tune", required_argument, 0, 0},		  /* Parameters_tune */
+  {"max-read-length", required_argument, 0, 0},	  /* Parameters_max_readlength */
+  {"min-read-length", required_argument, 0, 0},	  /* user_min_read_length */
+  {"fix-middle-exon", required_argument, 0, 0},	  /* Parameters_fix_middle_exon_p */
+  {"min-short-middle-exon", required_argument, 0, 0}, /* Parameters_min_short_middle_exon */
+  {"fix-splice-boundary-indels", required_argument, 0, 0}, /* Parameters_fix_splice_boundary_indels_p */
   {"fastq-id-start", required_argument, 0, 0},	  /* acc_fieldi_start */
   {"fastq-id-end", required_argument, 0, 0},	  /* acc_fieldi_end */
   {"force-single-end", no_argument, 0, 0},	  /* force_single_end_p */
@@ -627,13 +846,68 @@ static struct option long_options[] = {
 #ifdef HAVE_MMAP
   {"batch", required_argument, 0, 'B'}, /* offsetsstrm_access, positions_access, genome_access */
 #endif
+
   {"expand-offsets", required_argument, 0, 0}, /* expand_offsets_p */
+
+  {"refine-partial-tgga", no_argument, 0, 0}, /* refine_partial_tr_p */
+  {"tr-chain-search", required_argument, 0, 0}, /* tr_chain_search_p */
+  {"tr-chain-seed-source", required_argument, 0, 0}, /* tr_chain_seed_source */
+  {"tr-chain-engine", required_argument, 0, 0}, /* tr_chain_engine */
+  {"tr-chain-rescue-transcriptome", required_argument, 0, 0}, /* tr_chain_rescue_transcriptome_dbroot */
+  {"tr-chain-fm-prefix", required_argument, 0, 0}, /* tr_chain_fm_prefix */
+  {"tr-chain-fm-min-seed-len", required_argument, 0, 0}, /* tr_chain_fm_min_seed_len */
+  {"tr-chain-fm-max-occ", required_argument, 0, 0}, /* tr_chain_fm_max_occ */
+  {"tr-chain-fm-max-sub-occ", required_argument, 0, 0}, /* tr_chain_fm_max_sub_occ */
+  {"tr-chain-max-indel", required_argument, 0, 0}, /* tr_chain_max_indel */
+  {"tr-chain-score-min-ratio", required_argument, 0, 0}, /* tr_chain_score_min_ratio */
+  {"tr-chain-frontier-cap", required_argument, 0, 0}, /* tr_chain_frontier_cap */
+  {"tr-chain-max-seed-occ", required_argument, 0, 0}, /* tr_chain_max_seed_occ */
+  {"tr-chain-max-anchors", required_argument, 0, 0}, /* tr_chain_max_anchors */
+
   {"pairmax-dna", required_argument, 0, 0}, /* pairmax_dna */
   {"pairmax-rna", required_argument, 0, 0}, /* pairmax_rna */
 
-  {"resolve-inner", required_argument, 0, 0}, /* resolve_inner_p */
   {"pairexpect", required_argument, 0, 0},  /* expected_pairlength */
   {"pairdev", required_argument, 0, 0},  /* pairlength_deviation */
+  {"paired-terminal-anchor-min-score", required_argument, 0, 0}, /* paired_terminal_anchor_min_score */
+  {"paired-terminal-anchor-slop", required_argument, 0, 0}, /* paired_terminal_anchor_slop */
+  {"paired-segment-exact-max-mismatch-divisor", required_argument, 0, 0}, /* paired_segment_exact_max_mismatch_divisor */
+  {"paired-mate-rescue-gapped", required_argument, 0, 0}, /* paired_mate_rescue_gapped_p */
+  {"paired-preeval-ungapped-mate", required_argument, 0, 0}, /* paired_preeval_ungapped_mate_p */
+  {"paired-preeval-rescue-skip", required_argument, 0, 0}, /* paired_preeval_rescue_skip_p */
+  {"paired-segment-stream-chains", required_argument, 0, 0}, /* paired_segment_stream_chains_p */
+  {"paired-solve-all-anchor-first", required_argument, 0, 0}, /* paired_solve_all_anchor_first_p */
+  {"paired-postsolve-reliable-anchors-first", required_argument, 0, 0}, /* paired_postsolve_reliable_anchors_first_p */
+  {"paired-seg1-exhaustive-concordance", required_argument, 0, 0}, /* paired_seg1_exhaustive_concordance_p */
+  {"paired-duplicate-auxinfo-frontier", required_argument, 0, 0}, /* paired_duplicate_auxinfo_frontier_p */
+  {"paired-mate-minpure-floor", required_argument, 0, 0}, /* paired_mate_minpure_floor */
+  {"minpure-diagonal-debug", required_argument, 0, 0}, /* minpure_diagonal_debug_p */
+  {"pathpair-equal-coverage-diff-tiebreak", required_argument, 0, 0}, /* pathpair_equal_coverage_diff_tiebreak_p */
+  {"paired-transcript-completion", required_argument, 0, 0}, /* paired_transcript_completion_p */
+  {"paired-tr-adjacent-indel-repair", required_argument, 0, 0}, /* paired_tr_adjacent_indel_repair_p */
+  {"score-match", required_argument, 0, 0}, /* score_match_reward */
+  {"score-mismatch", required_argument, 0, 0}, /* score_mismatch_penalty */
+  {"score-indel-open", required_argument, 0, 0}, /* score_indel_open_penalty */
+  {"score-indel-extend", required_argument, 0, 0}, /* score_indel_extend_penalty */
+  {"score-long-indel-open", required_argument, 0, 0}, /* score_long_indel_open_penalty */
+  {"score-long-indel-extend", required_argument, 0, 0}, /* score_long_indel_extend_penalty */
+  {"score-splice-unannotated", required_argument, 0, 0}, /* score_splice_unannotated_penalty */
+  {"score-pair-transcript-discordance", required_argument, 0, 0}, /* score_pair_transcript_discordance_penalty */
+  {"score-pair-margin", required_argument, 0, 0}, /* score_pair_margin */
+  {"score-min-read", required_argument, 0, 0}, /* score_min_read */
+  {"score-min-pair", required_argument, 0, 0}, /* score_min_pair */
+  {"tr-score-ranker", required_argument, 0, 0}, /* tr_score_ranker_p */
+  {"tr-score-match-reward", required_argument, 0, 0}, /* tr_score_match_reward */
+  {"tr-score-mismatch-penalty", required_argument, 0, 0}, /* tr_score_mismatch_penalty */
+  {"tr-score-indel-open-penalty", required_argument, 0, 0}, /* tr_score_indel_open_penalty */
+  {"tr-score-indel-extend-penalty", required_argument, 0, 0}, /* tr_score_indel_extend_penalty */
+  {"tr-score-softclip-penalty", required_argument, 0, 0}, /* tr_score_softclip_penalty */
+  {"tr-score-transcript-discordance-penalty", required_argument, 0, 0}, /* tr_score_transcript_discordance_penalty */
+  {"tr-quality-ranker", required_argument, 0, 0}, /* alias for tr_score_ranker_p */
+  {"tr-quality-match-reward", required_argument, 0, 0}, /* alias for tr_score_match_reward */
+  {"tr-quality-mismatch-penalty", required_argument, 0, 0}, /* alias for tr_score_mismatch_penalty */
+  {"tr-quality-indel-penalty", required_argument, 0, 0}, /* alias: sets tr_score_indel_open/extend_penalty */
+  {"tr-quality-softclip-penalty", required_argument, 0, 0}, /* alias for tr_score_softclip_penalty */
 
   {"pass1-min-support", required_argument, 0, 0}, /* pass1_min_support */
 
@@ -649,8 +923,55 @@ static struct option long_options[] = {
 
   {"max-mismatches", required_argument, 0, 'm'}, /* user_nmismatches_filter_float */
   {"min-coverage", required_argument, 0, 0}, /* user_mincoverage_filter_float */
+  {"single-end-split-paths", required_argument, 0, 0}, /* single_end_split_paths_p */
+  {"split-path-max-overlap", required_argument, 0, 0}, /* split_path_max_overlap */
+  {"split-path-min-segment", required_argument, 0, 0}, /* split_path_min_segment */
+  {"split-path-min-combined-coverage", required_argument, 0, 0}, /* split_path_min_combined_coverage_float */
+  {"se-ext-dedup-exact-chains", required_argument, 0, 0}, /* se_ext_dedup_exact_chains_p */
+  {"se-ext-equiv-prev-prune", required_argument, 0, 0}, /* se_ext_equiv_prev_prune_p */
+  {"se-keep-trpath-candidates", required_argument, 0, 0}, /* se_keep_trpath_candidates_p */
+  {"se-materialize-equiv-splice-alts", required_argument, 0, 0}, /* se_materialize_equiv_splice_alts_p */
+  {"se-segment-stream-chains", required_argument, 0, 0}, /* se_segment_stream_chains_p */
+  {"se-segment-dedup-exact-chains", required_argument, 0, 0}, /* se_segment_dedup_exact_chains_p */
+  {"se-segment-prefix-skip", required_argument, 0, 0}, /* se_segment_prefix_skip_p */
+  {"se-segment-qstart-anchor-cache", required_argument, 0, 0}, /* se_segment_qstart_anchor_cache_p */
+  {"se-path-qend-local-cache", required_argument, 0, 0}, /* se_path_qend_local_cache_p */
+  {"se-emitted-path-dedup", required_argument, 0, 0}, /* se_emitted_path_dedup_p */
+  {"se-segment-equiv-prev-prune", required_argument, 0, 0}, /* se_segment_equiv_prev_prune_p */
+  {"se-segment-cache-threshold", required_argument, 0, 0}, /* se_segment_cache_threshold */
+  {"se-segment-max-window", required_argument, 0, 0}, /* se_segment_max_window */
+  {"se-segment-min-kmer-avg-quality", required_argument, 0, 0}, /* se_segment_min_kmer_avg_quality */
+  {"se-segment-max-kmer-bad-bases", required_argument, 0, 0}, /* se_segment_max_kmer_bad_bases */
+  {"se-segment-bad-base-quality", required_argument, 0, 0}, /* se_segment_bad_base_quality */
+  {"segment-max-avg-kmer-positions", required_argument, 0, 0}, /* segment_max_avg_kmer_positions */
+  {"se-segment-max-avg-kmer-positions", required_argument, 0, 0}, /* deprecated alias for segment_max_avg_kmer_positions */
+  {"segment-repetitive-kmer-filter", required_argument, 0, 0}, /* segment_repetitive_kmer_filter_p */
+  {"segment-max-kmer-positions", required_argument, 0, 0}, /* segment_max_kmer_positions */
+  {"segment-diagonal-algorithm", required_argument, 0, 0}, /* segment_diagonal_algorithm */
+  {"segment-diagonal-adaptive-hybrid-floor-per-kmer", required_argument, 0, 0}, /* adaptive_hybrid_floor_per_kmer */
+  {"segment-diagonal-adaptive-hybrid-budget-per-kmer", required_argument, 0, 0}, /* adaptive_hybrid_budget_per_kmer */
+  {"segment-diagonal-adaptive-hybrid-hard-max", required_argument, 0, 0}, /* adaptive_hybrid_hard_max */
+  {"segment-diagonal-adaptive-hybrid-weak-width-per-kmer", required_argument, 0, 0}, /* adaptive_hybrid_weak_width_per_kmer */
+  {"segment-diagonal-adaptive-hybrid-weak-support-divisor", required_argument, 0, 0}, /* adaptive_hybrid_weak_support_divisor */
+  {"segment-diagonal-adaptive-hybrid-strong-support-fraction", required_argument, 0, 0}, /* adaptive_hybrid_strong_support_fraction */
+  {"segment-diagonal-stats-weak-support-fraction", required_argument, 0, 0}, /* stats_weak_support_fraction */
+  {"se-max-mismatches", required_argument, 0, 0}, /* se_max_mismatches_filter_float */
+  {"se-max-softclip", required_argument, 0, 0}, /* se_max_softclip_filter_float */
+  {"se-quality-ranker", required_argument, 0, 0}, /* se_quality_ranker_p */
+  {"se-quality-match-reward", required_argument, 0, 0}, /* se_quality_match_reward */
+  {"se-quality-mismatch-penalty", required_argument, 0, 0}, /* se_quality_mismatch_penalty */
+  {"se-quality-indel-penalty", required_argument, 0, 0}, /* se_quality_indel_penalty */
+  {"se-quality-softclip-penalty", required_argument, 0, 0}, /* se_quality_softclip_penalty */
+  {"se-quality-error-rate-penalty", required_argument, 0, 0}, /* se_quality_error_rate_penalty */
+  {"se-quality-rank-margin", required_argument, 0, 0}, /* se_quality_rank_margin */
+  {"se-quality-split-ranker", required_argument, 0, 0}, /* se_quality_split_ranker_p */
+  {"se-quality-split-gap-penalty", required_argument, 0, 0}, /* se_quality_split_gap_penalty */
+  {"se-quality-split-segment-penalty", required_argument, 0, 0}, /* se_quality_split_segment_penalty */
 
   {"indel-endlength", required_argument, 0, 0}, /* min_indel_end_matches */
+  {"max-recursive-ends", required_argument, 0, 0}, /* max_recursive_ends */
+  {"min-support-indel", required_argument, 0, 0}, /* min_support_indel */
+  {"indel-support-mismatch-penalty", required_argument, 0, 0}, /* indel_support_mismatch_penalty */
 
   {"max-insertions", required_argument, 0, 0}, /* max_insertionlen */
   {"max-deletions", required_argument, 0, 0}, /* max_deletionlen */
@@ -689,8 +1010,8 @@ static struct option long_options[] = {
   {"format", required_argument, 0, 'A'}, /* output_type */
 
   {"quality-protocol", required_argument, 0, 0}, /* quality_score_adj, quality_shift */
-  {"quality-zero-score", required_argument, 0, 'J'}, /* quality_score_adj */
-  {"quality-print-shift", required_argument, 0, 'j'}, /* quality_shift */
+  {"quality-zero-score", required_argument, 0, 0}, /* quality_score_adj */
+  {"quality-print-shift", required_argument, 0, 0}, /* quality_shift */
   {"sam-headers-batch", required_argument, 0, 0},	/* sam_headers_batch */
   {"no-sam-headers", no_argument, 0, 0},	/* sam_headers_p */
   {"sam-hardclip-use-S", no_argument, 0, 0},		/* sam_hardclip_use_S_p */
@@ -704,7 +1025,9 @@ static struct option long_options[] = {
   {"read-group-platform", required_argument, 0, 0},	/* sam_read_group_platform */
   {"force-xs-dir", no_argument, 0, 0},			/* force_xs_direction_p */
   {"md-report-snps", no_argument, 0, 0},	    /* md_report_snps_p */
-  {"no-soft-clips", no_argument, 0, 0},	    /* allow_soft_clips_p */
+  {"no-soft-clips", no_argument, 0, 0},	    /* allow_soft_clips_start_p, allow_soft_clips_end_p */
+  {"no-soft-clips-start", no_argument, 0, 0},	    /* allow_soft_clips_start_p */
+  {"no-soft-clips-end", no_argument, 0, 0},	    /* allow_soft_clips_end_p */
   {"extend-soft-clips", no_argument, 0, 0},		/* extend_soft_clips_p */
   {"action-if-cigar-error", required_argument, 0, 0},	/* cigar_action */
 
@@ -712,6 +1035,7 @@ static struct option long_options[] = {
 
   {"maxsearch", required_argument, 0, 0}, /* maxpaths_search */
   {"npaths", required_argument, 0, 'n'}, /* maxpaths_report */
+  {"n-splice-paths", required_argument, 0, 0}, /* n_splice_paths */
 
   {"add-paired-nomappers", no_argument, 0, 0}, /* add_paired_nomappers_p */
   {"paired-flag-means-concordant", required_argument, 0, 0}, /* paired_flag_means_concordant_p */
@@ -740,7 +1064,6 @@ static struct option long_options[] = {
   {"only-concordant", no_argument, 0, 0}, /* only_concordant_p */
   {"omit-concordant-uniq", no_argument, 0, 0}, /* omit_concordant_uniq_p */
   {"omit-concordant-mult", no_argument, 0, 0}, /* omit_concordant_mult_p */
-  {"omit-softclipped", no_argument, 0, 0}, /* omit_softclipped_p */
   {"only-tr-consistent", no_argument, 0, 0}, /* only_tr_consistent_p */
 
   /* Diagnostic options */
@@ -972,17 +1295,30 @@ check_compiler_assumptions () {
 }
 
 
+static bool
+too_short_for_alignment_p (Shortread_T queryseq) {
+  int querylength = Shortread_fulllength(queryseq);
+
+  if (querylength < min_querylength) {
+    return true;
+  } else if (user_min_read_length > 0 && querylength < user_min_read_length) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 /************************************************************************/
 
 /* Pass1 updates the global list of intron info */
 static void
 process_request_pass1 (Request_T request,
 
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc,
+		       unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		       int max_nblocks,
 
-		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, 
+		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, Segmenteltpool_T segmenteltpool,
 		       Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		       Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
@@ -992,28 +1328,33 @@ process_request_pass1 (Request_T request,
 		       Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3) {
   Stage1_T stage1_5, stage1_3;
   Shortread_T queryseq1, queryseq2;
-  Path_T *patharray, *patharray5, *patharray3, path5, path3;
-  Pathpair_T *pathpairarray, pathpair;
+  Path_T *patharray = NULL, *patharray5 = NULL, *patharray3 = NULL, path5, path3;
+  Pathpair_T *pathpairarray = NULL, pathpair;
 
-  int npaths_primary, npaths_altloc, npaths5_primary, npaths5_altloc, npaths3_primary, npaths3_altloc, i;
-  int first_absmq, second_absmq, first_absmq5, second_absmq5, first_absmq3, second_absmq3;
-  Pairtype_T final_pairtype;
+  int npaths_primary = 0, npaths_altloc = 0, npaths5_primary = 0, npaths5_altloc = 0,
+    npaths3_primary = 0, npaths3_altloc = 0, i;
+  int first_absmq = 0, second_absmq = 0, first_absmq5 = 0, second_absmq5 = 0,
+    first_absmq3 = 0, second_absmq3 = 0;
+  Pairtype_T final_pairtype = UNSPECIFIED;
 
   queryseq1 = Request_queryseq1(request);
   queryseq2 = Request_queryseq2(request);
 
   if (single_cell_p == true) {
+    if (too_short_for_alignment_p(queryseq2)) {
+      return;
+    }
+
     Spliceendsgen_reset(spliceendsgen);
     stage1_3 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_3,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_3,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/true,/*first_read_p*/true,
@@ -1042,17 +1383,20 @@ process_request_pass1 (Request_T request,
 		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
 
   } else if (queryseq2 == NULL) {
+    if (too_short_for_alignment_p(queryseq1)) {
+      return;
+    }
+
     Spliceendsgen_reset(spliceendsgen);
     stage1_5 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_5,queryseq1,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_5,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_5,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
@@ -1081,23 +1425,22 @@ process_request_pass1 (Request_T request,
 		intlistpool,uintlistpool,univcoordlistpool,
 		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
 
-  } else if (Shortread_fulllength(queryseq1) < min_querylength &&
-	     Shortread_fulllength(queryseq2) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq1) &&
+	     too_short_for_alignment_p(queryseq2)) {
     /* Nothing to learn */
 
-  } else if (Shortread_fulllength(queryseq1) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq1)) {
     /* Solve only queryseq2 */
     Spliceendsgen_reset(spliceendsgen);
     stage1_3 = Stage1_new(/*first_read_p*/false);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_3,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_3,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/false,/*first_read_p*/false,
@@ -1126,19 +1469,18 @@ process_request_pass1 (Request_T request,
 		intlistpool,uintlistpool,univcoordlistpool,
 		listpool,pathpool,trpathpool,transcriptpool,hitlistpool);
 
-  } else if (Shortread_fulllength(queryseq2) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq2)) {
     /* Solve only queryseq1 */
     Spliceendsgen_reset(spliceendsgen);
     stage1_5 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_5,queryseq1,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_5,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_5,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
@@ -1177,18 +1519,27 @@ process_request_pass1 (Request_T request,
     stage1_3 = Stage1_new(/*first_read_p*/false);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
 
-    if ((pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
-					    &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
-					    &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-					    stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
-					    knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
-					    streamspace_max_alloc,streamspace_alloc,
-					    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
-					    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
-					    intlistpool,uintlistpool,univcoordlistpool,
-					    listpool,trpathpool,pathpool,vectorpool,hitlistpool,
-					    transcriptpool,spliceendsgen5,spliceendsgen3,
-					    /*pass*/PASS1)) != NULL) {
+    Accel_profile_pair_begin(Shortread_accession(queryseq1),
+			     Shortread_fulllength(queryseq1),Shortread_fulllength(queryseq2),
+			     /*pass*/PASS1);
+    pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
+				       &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
+				       &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
+				       stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
+				       knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
+				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				       localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
+				       trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
+				       intlistpool,uintlistpool,univcoordlistpool,
+				       listpool,trpathpool,pathpool,vectorpool,hitlistpool,
+			       transcriptpool,spliceendsgen5,spliceendsgen3,
+			       /*cascade_timing*/NULL,
+			       /*pass*/PASS1);
+    Accel_profile_pair_outcome(npaths_primary,npaths_altloc,
+			       npaths5_primary,npaths5_altloc,npaths3_primary,npaths3_altloc);
+    Accel_profile_pair_end();
+
+    if (pathpairarray != NULL) {
       /* Paired or concordant hits found */
       if (npaths_primary + npaths_altloc == 1) {
 	pathpair = pathpairarray[0];
@@ -1269,13 +1620,13 @@ process_request_pass1 (Request_T request,
 
 static Filestring_T
 process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
-		       double *worker_runtime, Request_T request,
+		       Request_T request,
 		       
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc,
+		       unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		       int max_nblocks,
 
-		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
+		       Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, Segmenteltpool_T segmenteltpool,
 		       Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		       Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
@@ -1287,15 +1638,22 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
   Filestring_T fp;
   Result_T result;
   int jobid;
+  double worker_runtime;
 
   Stage1_T stage1_5, stage1_3;
   Shortread_T queryseq1, queryseq2;
-  Path_T *patharray, *patharray5, *patharray3;
-  Pathpair_T *pathpairarray;
+  Path_T *patharray = NULL, *patharray5 = NULL, *patharray3 = NULL;
+  Pathpair_T *pathpairarray = NULL;
 
-  int npaths_primary, npaths_altloc, npaths5_primary, npaths5_altloc, npaths3_primary, npaths3_altloc;
-  int first_absmq, second_absmq, first_absmq5, second_absmq5, first_absmq3, second_absmq3;
-  Pairtype_T final_pairtype;
+  int npaths_primary = 0, npaths_altloc = 0, npaths5_primary = 0, npaths5_altloc = 0,
+    npaths3_primary = 0, npaths3_altloc = 0;
+  int first_absmq = 0, second_absmq = 0, first_absmq5 = 0, second_absmq5 = 0,
+    first_absmq3 = 0, second_absmq3 = 0;
+  Pairtype_T final_pairtype = UNSPECIFIED;
+  Cascade_Timing_T cascade_timing;
+  Cascade_Timing_T *cascade_timing_ptr = (Cascade_Timing_T *) NULL;
+  unsigned long long cascade_total_start_us = 0ULL;
+  unsigned long long cascade_stage_start_us = 0ULL;
 
   jobid = Request_id(request);
   queryseq1 = Request_queryseq1(request);
@@ -1305,20 +1663,37 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 
   if (worker_stopwatch != NULL) {
     Stopwatch_start(worker_stopwatch);
+    if (single_cell_p == false && queryseq2 != NULL) {
+      Cascade_timing_init(&cascade_timing);
+      cascade_timing_ptr = &cascade_timing;
+      cascade_total_start_us = REQUEST_CASCADE_STAGE_START("tot",queryseq1,univdiagpool);
+    }
   }
 
   if (single_cell_p == true) {
+    if (too_short_for_alignment_p(queryseq2)) {
+      patharray = (Path_T *) NULL;
+      npaths_primary = npaths_altloc = 0;
+      first_absmq = second_absmq = 0;
+      result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
+      worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
+					  result,request,worker_runtime,listpool);
+      Result_free(&result,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+      return fp;
+    }
+
     Spliceendsgen_reset(spliceendsgen);
     stage1_3 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_3,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_3,
 				   queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/true,/*first_read_p*/true,
@@ -1328,9 +1703,9 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
       Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
     }
     result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
 
@@ -1341,17 +1716,29 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
     return fp;
 
   } else if (queryseq2 == NULL) {
+    if (too_short_for_alignment_p(queryseq1)) {
+      patharray = (Path_T *) NULL;
+      npaths_primary = npaths_altloc = 0;
+      first_absmq = second_absmq = 0;
+      result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
+      worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+      fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
+					  result,request,worker_runtime,listpool);
+      Result_free(&result,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+      return fp;
+    }
+
     Spliceendsgen_reset(spliceendsgen);
     stage1_5 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_5,queryseq1,localdb);
 
-    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,
-				   stage1_5,streamspace_max_alloc,streamspace_alloc,
+    patharray = Stage1_single_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,stage1_5,
 				   queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
 				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   localdb_nmismatches_allowed,
+				   localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				   spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
@@ -1361,9 +1748,9 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
       Support_revise_single(support_tables,patharray,npaths_primary + npaths_altloc);
     }
     result = Result_single_read_new(jobid,(void **) patharray,npaths_primary,npaths_altloc,first_absmq,second_absmq);
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
 
@@ -1373,50 +1760,71 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 
     return fp;
 
-  } else if (Shortread_fulllength(queryseq1) < min_querylength &&
-	     Shortread_fulllength(queryseq2) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq1) &&
+	     too_short_for_alignment_p(queryseq2)) {
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("setup",queryseq1,univdiagpool);
     patharray3 = patharray5 = (Path_T *) NULL;
     /* No results for Support_revise */
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,setup_us,"setup",queryseq1,univdiagpool,cascade_stage_start_us);
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,/*npaths5_primary*/0,/*npaths5_altloc*/0,
 					  /*first_absmq5*/0,/*second_absmq5*/0,
 					  (void **) patharray3,/*npaths3_primary*/0,/*npaths3_altloc*/0,
 					  /*first_absmq3*/0,/*second_absmq3*/0);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+    if (cascade_timing_ptr != NULL) {
+      (void) request_cascade_stage_end("tot",queryseq1,"request",univdiagpool,cascade_total_start_us);
+      cascade_timing_ptr->total_us = (unsigned long long) (worker_runtime * 1000000.0 + 0.5);
+      Result_set_cascade_timing(result,cascade_timing_ptr);
+    }
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
     return fp;
 
-  } else if (Shortread_fulllength(queryseq1) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq1)) {
     /* Solve only queryseq2 */
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("setup",queryseq1,univdiagpool);
     Spliceendsgen_reset(spliceendsgen);
     stage1_3 = Stage1_new(/*first_read_p*/false);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,setup_us,"setup",queryseq1,univdiagpool,cascade_stage_start_us);
 
     patharray5 = (Path_T *) NULL;
-    patharray3 = Stage1_single_read(&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-				    stage1_3,streamspace_max_alloc,streamspace_alloc,
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("goth",queryseq2,univdiagpool);
+    patharray3 = Stage1_single_read(&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,stage1_3,
 				    queryseq2,repetitive_ef64,knownsplicing,knownindels,localdb,
 				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				    localdb_nmismatches_allowed,
+				    localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				    trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				    intlistpool,uintlistpool,univcoordlistpool,
 				    listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				    spliceendsgen,/*single_cell_p*/false,/*first_read_p*/false,
 				    /*pass*/PASS2);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,gen_other_us,"goth",queryseq2,univdiagpool,cascade_stage_start_us);
 
     if (support_tables != NULL) {
+      cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("support",queryseq2,univdiagpool);
       Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+      REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,support_revise_us,"support",queryseq2,univdiagpool,cascade_stage_start_us);
     }
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,/*npaths5_primary*/0,/*npaths5_altloc*/0,
 					  /*first_absmq5*/0,/*second_absmq5*/0,
 					  (void **) patharray3,npaths3_primary,npaths3_altloc,
 					  first_absmq3,second_absmq3);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+    if (cascade_timing_ptr != NULL) {
+      (void) request_cascade_stage_end("tot",queryseq1,"request",univdiagpool,cascade_total_start_us);
+      cascade_timing_ptr->total_us = (unsigned long long) (worker_runtime * 1000000.0 + 0.5);
+      Result_set_cascade_timing(result,cascade_timing_ptr);
+    }
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
 
@@ -1426,35 +1834,47 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 
     return fp;
 
-  } else if (Shortread_fulllength(queryseq2) < min_querylength) {
+  } else if (too_short_for_alignment_p(queryseq2)) {
     /* Solve only queryseq1 */
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("setup",queryseq1,univdiagpool);
     Spliceendsgen_reset(spliceendsgen);
     stage1_5 = Stage1_new(/*first_read_p*/true);
     Stage1_set_sequence(stage1_5,queryseq1,localdb);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,setup_us,"setup",queryseq1,univdiagpool,cascade_stage_start_us);
 
     patharray3 = (Path_T *) NULL;
-    patharray5 = Stage1_single_read(&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
-				    stage1_5,streamspace_max_alloc,streamspace_alloc,
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("goth",queryseq1,univdiagpool);
+    patharray5 = Stage1_single_read(&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,stage1_5,
 				    queryseq1,repetitive_ef64,knownsplicing,knownindels,localdb,
 				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				    localdb_nmismatches_allowed,
+				    localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
-				    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+				    trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				    intlistpool,uintlistpool,univcoordlistpool,
 				    listpool,trpathpool,pathpool,transcriptpool,vectorpool,hitlistpool,
 				    spliceendsgen,/*single_cell_p*/false,/*first_read_p*/true,
 				    /*pass*/PASS2);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,gen_other_us,"goth",queryseq1,univdiagpool,cascade_stage_start_us);
 
     if (support_tables != NULL) {
+      cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("support",queryseq1,univdiagpool);
       Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
+      REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,support_revise_us,"support",queryseq1,univdiagpool,cascade_stage_start_us);
     }
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
     result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,
 					  first_absmq5,second_absmq5,
 					  (void **) patharray3,/*npaths3_primary*/0,/*npaths3_altloc*/0,
 					  /*first_absmq3*/0,/*second_absmq3*/0);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+    if (cascade_timing_ptr != NULL) {
+      (void) request_cascade_stage_end("tot",queryseq1,"request",univdiagpool,cascade_total_start_us);
+      cascade_timing_ptr->total_us = (unsigned long long) (worker_runtime * 1000000.0 + 0.5);
+      Result_set_cascade_timing(result,cascade_timing_ptr);
+    }
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
 
@@ -1465,6 +1885,7 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
     return fp;
 
   } else {
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("setup",queryseq1,univdiagpool);
     Spliceendsgen_reset(spliceendsgen5);
     Spliceendsgen_reset(spliceendsgen3);
 
@@ -1474,25 +1895,41 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
     stage1_3 = Stage1_new(/*first_read_p*/false);
     Stage1_set_sequence(stage1_3,queryseq2,localdb);
 
-    if ((pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
-					    &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
-					    &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
-					    stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
-					    knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
-					    streamspace_max_alloc,streamspace_alloc,
-					    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
-					    trdiagpool,univdiagpool,auxinfopool,pathstorepool,
-					    intlistpool,uintlistpool,univcoordlistpool,
-					    listpool,trpathpool,pathpool,vectorpool,hitlistpool,
-					    transcriptpool,spliceendsgen5,spliceendsgen3,
-					    /*pass*/PASS2)) != NULL) {
+    Accel_profile_pair_begin(Shortread_accession(queryseq1),
+			     Shortread_fulllength(queryseq1),Shortread_fulllength(queryseq2),
+			     /*pass*/PASS2);
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,setup_us,"setup",queryseq1,univdiagpool,cascade_stage_start_us);
+    pathpairarray = Stage1_paired_read(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,&final_pairtype,
+				       &patharray5,&npaths5_primary,&npaths5_altloc,&first_absmq5,&second_absmq5,
+				       &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
+				       stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
+				       knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
+				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				       localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
+				       trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
+				       intlistpool,uintlistpool,univcoordlistpool,
+				       listpool,trpathpool,pathpool,vectorpool,hitlistpool,
+			       transcriptpool,spliceendsgen5,spliceendsgen3,
+			       cascade_timing_ptr,
+			       /*pass*/PASS2);
+    cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
+    Accel_profile_pair_outcome(npaths_primary,npaths_altloc,
+			       npaths5_primary,npaths5_altloc,npaths3_primary,npaths3_altloc);
+    Accel_profile_pair_end();
+    REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
+
+    if (pathpairarray != NULL) {
 
       /* Paired or concordant hits found */
       if (support_tables != NULL) {
+	cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("support",queryseq1,univdiagpool);
 	Support_revise_paired(support_tables,pathpairarray,npaths_primary + npaths_altloc);
+	REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,support_revise_us,"support",queryseq1,univdiagpool,cascade_stage_start_us);
       }
+      cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
       result = Result_paired_read_new(jobid,(void **) pathpairarray,npaths_primary,npaths_altloc,first_absmq,second_absmq,
 				      final_pairtype);
+      REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
 
 #if 0
     } else if (chop_primers_p == false || Shortread_chop_primers(queryseq1,queryseq2) == false) {
@@ -1527,9 +1964,9 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
 					      &patharray3,&npaths3_primary,&npaths3_altloc,&first_absmq3,&second_absmq3,
 					      stage1_5,stage1_3,queryseq1,queryseq2,repetitive_ef64,
 					      knownsplicing,knownindels,(Chrpos_T) pairmax_linear,
-					      streamspace_max_alloc,streamspace_alloc,
-					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb_nmismatches_allowed,
-					      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					      localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
+					      trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 					      intlistpool,uintlistpool,univcoordlistpool,
 					      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 					      transcriptpool,spliceendsgen5,spliceendsgen3,
@@ -1554,16 +1991,25 @@ process_request_pass2 (Filestring_T *fp_failedinput, Filestring_T *fp_failedinpu
       
     } else {
       if (support_tables != NULL) {
+	cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("support",queryseq1,univdiagpool);
 	Support_revise_single(support_tables,patharray5,npaths5_primary + npaths5_altloc);
 	Support_revise_single(support_tables,patharray3,npaths3_primary + npaths3_altloc);
+	REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,support_revise_us,"support",queryseq1,univdiagpool,cascade_stage_start_us);
       }
+      cascade_stage_start_us = REQUEST_CASCADE_STAGE_START("result",queryseq1,univdiagpool);
       result = Result_paired_as_singles_new(jobid,(void **) patharray5,npaths5_primary,npaths5_altloc,first_absmq5,second_absmq5,
 					    (void **) patharray3,npaths3_primary,npaths3_altloc,first_absmq3,second_absmq3);
+      REQUEST_CASCADE_STAGE_ADD(cascade_timing_ptr,result_build_us,"result",queryseq1,univdiagpool,cascade_stage_start_us);
     }
 
+    worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+    if (cascade_timing_ptr != NULL) {
+      (void) request_cascade_stage_end("tot",queryseq1,"request",univdiagpool,cascade_total_start_us);
+      cascade_timing_ptr->total_us = (unsigned long long) (worker_runtime * 1000000.0 + 0.5);
+      Result_set_cascade_timing(result,cascade_timing_ptr);
+    }
     fp = Output_filestring_fromresult(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				      result,request,listpool);
-    *worker_runtime = worker_stopwatch == NULL ? 0.00 : Stopwatch_stop(worker_stopwatch);
+				      result,request,worker_runtime,listpool);
     Result_free(&result,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
 
@@ -1661,11 +2107,13 @@ single_thread () {
   Chrpos_T positive_gap_distance;
   int max_nintersections, max_localdb_nregions;
 
-  int streamspace_max_alloc;
-  Univcoord_T *streamspace_alloc;
+  /* int streamspace_max_alloc; */
+  /* Univcoord_T *streamspace_alloc; */
   Univdiag_T *novel_univdiags_alloc;
   Univcoord_T *novel_diagonals_alloc;
   unsigned short *localdb_alloc;
+  int16_t *localdb_tally, *localdb_overflowp;
+  int max_nblocks, max_npositions;
 
   Filestring_T fp, fp_failedinput, fp_failedinput_1, fp_failedinput_2;
   Shortread_T queryseq1;
@@ -1676,6 +2124,7 @@ single_thread () {
   /* Dynprog_T dynprogL, dynprogM, dynprogR; */
   Trdiagpool_T trdiagpool;
   Univdiagpool_T univdiagpool;
+  Segmenteltpool_T segmenteltpool;
   Auxinfopool_T auxinfopool;
   Pathstorepool_T pathstorepool;
   Intlistpool_T intlistpool;
@@ -1689,7 +2138,6 @@ single_thread () {
   Vectorpool_T vectorpool;
   Spliceendsgen_T spliceendsgen, spliceendsgen5, spliceendsgen3;
   int jobid = 0;
-  double worker_runtime;
 
 #ifdef MEMUSAGE
   long int overall_max = 0, memusage_constant = 0, memusage;
@@ -1703,12 +2151,15 @@ single_thread () {
     max_localdb_nregions = 0;
     max_nintersections = 0;
 
-    streamspace_max_alloc = 0;
-    streamspace_alloc = (Univcoord_T *) NULL;
+    /* streamspace_max_alloc = 0; */
+    /* streamspace_alloc = (Univcoord_T *) NULL; */
 
     novel_univdiags_alloc = (Univdiag_T *) NULL;
     novel_diagonals_alloc = (Univcoord_T *) NULL;
     localdb_alloc = (unsigned short *) NULL;
+    localdb_tally = (int16_t *) NULL;
+    localdb_overflowp = (int16_t *) NULL;
+    max_nblocks = 0;
 
   } else {
     /* Used by Localdb_get */
@@ -1716,16 +2167,39 @@ single_thread () {
     max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
     max_nintersections = max_localdb_nregions * LOCALDB_REGION_SIZE;
 
-    streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; /* same as max_nintersections */
-    streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T));
+    /* streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; */ /* same as max_nintersections */
+    /* streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T)); */
 
     novel_univdiags_alloc = Univdiag_new_array_keep(2 * max_nintersections);
     novel_diagonals_alloc = (Univcoord_T *) MALLOC_KEEP(2 * max_nintersections * sizeof(Univcoord_T));
     localdb_alloc = (unsigned short *) MALLOC_KEEP_ALIGN(max_nintersections * sizeof(unsigned short));
+
+    max_npositions = positive_gap_distance + 1;
+#if !defined(HAVE_SSE2)
+    max_nblocks = max_npositions;
+    localdb_tally = (int16_t *) MALLOC_KEEP(max_nblocks * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP(max_nblocks * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX2)
+    max_nblocks = (max_npositions + 7)/8;
+    localdb_tally = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 8 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 8 * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX512)
+    max_nblocks = (max_npositions + 15)/16;
+    localdb_tally = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 16 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 16 * sizeof(int16_t));
+
+#else
+    max_nblocks = (max_npositions + 31)/32;
+    localdb_tally = (int16_t *) MALLOC_ALIGN(max_nblocks * 32 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_ALIGN(max_nblocks * 32 * sizeof(int16_t));
+#endif
   }
 
   trdiagpool = Trdiagpool_new(); Trdiagpool_init(trdiagpool);
   univdiagpool = Univdiagpool_new(); Univdiagpool_init(univdiagpool);
+  segmenteltpool = Segmenteltpool_new(); Segmenteltpool_init(segmenteltpool);
   auxinfopool = Auxinfopool_new(); Auxinfopool_init(auxinfopool);
   pathstorepool = Pathstorepool_new(); Pathstorepool_init(pathstorepool);
   intlistpool = Intlistpool_new(); Intlistpool_init(intlistpool);
@@ -1754,6 +2228,7 @@ single_thread () {
 
   while ((request = Inbuffer_get_request(inbuffer)) != NULL) {
     debug(printf("single_thread got request %d\n",Request_id(request)));
+    Localdb_cache_reset();
 
 #ifdef MEMUSAGE
     queryseq1 = Request_queryseq1(request);
@@ -1764,17 +2239,17 @@ single_thread () {
 
     TRY
       if (pass == PASS1) {
-	process_request_pass1(request,streamspace_max_alloc,streamspace_alloc,
-			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-			      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	process_request_pass1(request,novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,
+			      trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 			      intlistpool,uintlistpool,univcoordlistpool,
 			      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 			      transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3);
       } else if (pass == PASS2) {
-	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,&worker_runtime,
-				   request,streamspace_max_alloc,streamspace_alloc,
-				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,
+				   request,novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_tally,localdb_overflowp,max_nblocks,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 				   transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3,
@@ -1784,11 +2259,13 @@ single_thread () {
 	abort();
       }
 
+#if 0
       if (timingp == true) {
         queryseq1 = Request_queryseq1(request);
 	/* Report time in microseconds */
         fprintf(stderr,"%s\t%.6f\n",Shortread_accession(queryseq1),worker_runtime * 1e6);
       }
+#endif
 
     ELSE
       queryseq1 = Request_queryseq1(request);
@@ -1831,10 +2308,12 @@ single_thread () {
       }
       Outbuffer_print_filestrings(fp,fp_failedinput,fp_failedinput_1,fp_failedinput_2);
     }
+    Localdb_cache_reset();
 
     if (jobid % POOL_FREE_INTERVAL == 0) {
       Trdiagpool_reset_memory(trdiagpool);
       Univdiagpool_reset_memory(univdiagpool);
+      Segmenteltpool_reset_memory(segmenteltpool);
       Auxinfopool_reset_memory(auxinfopool);
       Pathstorepool_reset_memory(pathstorepool);
       Intlistpool_reset_memory(intlistpool);
@@ -1898,6 +2377,7 @@ single_thread () {
   if (worker_stopwatch != NULL) {
     Stopwatch_free(&worker_stopwatch);
   }
+  Localdb_cache_free();
 
   Spliceendsgen_free(&spliceendsgen3);
   Spliceendsgen_free(&spliceendsgen5);
@@ -1914,13 +2394,21 @@ single_thread () {
   Intlistpool_free(&intlistpool);
   Auxinfopool_free(&auxinfopool);
   Pathstorepool_free(&pathstorepool);
+  Segmenteltpool_free(&segmenteltpool);
   Univdiagpool_free(&univdiagpool);
   Trdiagpool_free(&trdiagpool);
 
+#if !defined(HAVE_SSE2)
+  FREE_KEEP(localdb_overflowp);
+  FREE_KEEP(localdb_tally);
+#else
+  FREE_KEEP_ALIGN(localdb_overflowp);
+  FREE_KEEP_ALIGN(localdb_tally);
+#endif
   FREE_KEEP_ALIGN(localdb_alloc);
   FREE_KEEP(novel_diagonals_alloc);
   Univdiag_free_array_keep(&novel_univdiags_alloc);
-  FREE_KEEP_ALIGN(streamspace_alloc);
+  /* FREE_KEEP_ALIGN(streamspace_alloc); */
 
 #ifdef MEMUSAGE
   Mem_usage_set_threadname("main");
@@ -1938,11 +2426,13 @@ worker_thread (void *data) {
   Chrpos_T positive_gap_distance;
   int max_nintersections, max_localdb_nregions;
 
-  int streamspace_max_alloc;
-  Univcoord_T *streamspace_alloc;
+  /* int streamspace_max_alloc; */
+  /* Univcoord_T *streamspace_alloc; */
   Univdiag_T *novel_univdiags_alloc;
   Univcoord_T *novel_diagonals_alloc;
   unsigned short *localdb_alloc;
+  int16_t *localdb_tally, *localdb_overflowp;
+  int max_nblocks, max_npositions;
 
   Filestring_T fp, fp_failedinput, fp_failedinput_1, fp_failedinput_2;
   Shortread_T queryseq1;
@@ -1950,6 +2440,7 @@ worker_thread (void *data) {
 
   Trdiagpool_T trdiagpool;
   Univdiagpool_T univdiagpool;
+  Segmenteltpool_T segmenteltpool;
   Auxinfopool_T auxinfopool;
   Pathstorepool_T pathstorepool;
   Intlistpool_T intlistpool;
@@ -1964,7 +2455,6 @@ worker_thread (void *data) {
   Spliceendsgen_T spliceendsgen, spliceendsgen5, spliceendsgen3;
 
   int worker_jobid = 0;
-  double worker_runtime;
 #if defined(DEBUG) || defined(MEMUSAGE)
   long int worker_id = (long int) data;
 #endif
@@ -1988,12 +2478,15 @@ worker_thread (void *data) {
     max_localdb_nregions = 0;
     max_nintersections = 0;
 
-    streamspace_max_alloc = 0;
-    streamspace_alloc = (Univcoord_T *) NULL;
+    /* streamspace_max_alloc = 0; */
+    /* streamspace_alloc = (Univcoord_T *) NULL; */
 
     novel_univdiags_alloc = (Univdiag_T *) NULL;
     novel_diagonals_alloc = (Univcoord_T *) NULL;
     localdb_alloc = (unsigned short *) NULL;
+    localdb_tally = (int16_t *) NULL;
+    localdb_overflowp = (int16_t *) NULL;
+    max_nblocks = 0;
 
   } else {
     /* Used by Localdb_get */
@@ -2001,16 +2494,39 @@ worker_thread (void *data) {
     max_localdb_nregions = (positive_gap_distance + LOCALDB_REGION_SIZE) / LOCALDB_REGION_SIZE + 1;
     max_nintersections = max_localdb_nregions * LOCALDB_REGION_SIZE;
 
-    streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; /* same as max_nintersections */
-    streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T));
+    /* streamspace_max_alloc = max_localdb_nregions * LOCALDB_REGION_SIZE; */ /* same as max_nintersections */
+    /* streamspace_alloc = (Univcoord_T *) MALLOC_KEEP_ALIGN(streamspace_max_alloc * sizeof(Univcoord_T)); */
 
     novel_univdiags_alloc = Univdiag_new_array_keep(2 * max_nintersections);
     novel_diagonals_alloc = (Univcoord_T *) MALLOC_KEEP(2 * max_nintersections * sizeof(Univcoord_T));
     localdb_alloc = (unsigned short *) MALLOC_KEEP_ALIGN(max_nintersections * sizeof(unsigned short));
+
+    max_npositions = positive_gap_distance + 1;
+#if !defined(HAVE_SSE2)
+    max_nblocks = max_npositions;
+    localdb_tally = (int16_t *) MALLOC_KEEP(max_nblocks * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP(max_nblocks * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX2)
+    max_nblocks = (max_npositions + 7)/8;
+    localdb_tally = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 8 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 8 * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX512)
+    max_nblocks = (max_npositions + 15)/16;
+    localdb_tally = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 16 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_KEEP_ALIGN(max_nblocks * 16 * sizeof(int16_t));
+
+#else
+    max_nblocks = (max_npositions + 31)/32;
+    localdb_tally = (int16_t *) MALLOC_ALIGN(max_nblocks * 32 * sizeof(int16_t));
+    localdb_overflowp = (int16_t *) MALLOC_ALIGN(max_nblocks * 32 * sizeof(int16_t));
+#endif
   }
 
   trdiagpool = Trdiagpool_new(); Trdiagpool_init(trdiagpool);
   univdiagpool = Univdiagpool_new(); Univdiagpool_init(univdiagpool);
+  segmenteltpool = Segmenteltpool_new(); Segmenteltpool_init(segmenteltpool);
   auxinfopool = Auxinfopool_new(); Auxinfopool_init(auxinfopool);
   pathstorepool = Pathstorepool_new(); Pathstorepool_init(pathstorepool);
   intlistpool = Intlistpool_new(); Intlistpool_init(intlistpool);
@@ -2039,6 +2555,7 @@ worker_thread (void *data) {
   while ((request = Inbuffer_get_request(inbuffer)) != NULL) {
     debug(fprintf(stderr,"worker_thread %ld starting request %d (%s)\n",
 		  worker_id,Request_id(request),Shortread_accession(Request_queryseq1(request))));
+    Localdb_cache_reset();
     pthread_setspecific(global_request_key,(void *) request);
 
 #ifdef MEMUSAGE
@@ -2050,17 +2567,17 @@ worker_thread (void *data) {
 
     TRY
       if (pass == PASS1) {
-	process_request_pass1(request,streamspace_max_alloc,streamspace_alloc,
-			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-			      trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	process_request_pass1(request,novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,
+			      trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 			      intlistpool,uintlistpool,univcoordlistpool,
 			      listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 			      transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3);
       } else if (pass == PASS2) {
-	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,&worker_runtime,
-				   request,streamspace_max_alloc,streamspace_alloc,
-				   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				   trdiagpool,univdiagpool,auxinfopool,pathstorepool,
+	fp = process_request_pass2(&fp_failedinput,&fp_failedinput_1,&fp_failedinput_2,
+				   request,novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				   localdb_tally,localdb_overflowp,max_nblocks,
+				   trdiagpool,univdiagpool,segmenteltpool,auxinfopool,pathstorepool,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,trpathpool,pathpool,vectorpool,hitlistpool,
 				   transcriptpool,spliceendsgen,spliceendsgen5,spliceendsgen3,
@@ -2070,11 +2587,13 @@ worker_thread (void *data) {
 	abort();
       }
 
+#if 0
       if (timingp == true) {
         queryseq1 = Request_queryseq1(request);
 	/* Report time in microseconds */
         fprintf(stderr,"%s\t%.6f\n",Shortread_accession(queryseq1),worker_runtime * 1e6);
       }
+#endif
 
     ELSE
       queryseq1 = Request_queryseq1(request);
@@ -2123,10 +2642,12 @@ worker_thread (void *data) {
       Outbuffer_put_filestrings(outbuffer,Request_id(request),fp,fp_failedinput,
 				fp_failedinput_1,fp_failedinput_2);
     }
+    Localdb_cache_reset();
 
     if (worker_jobid % POOL_FREE_INTERVAL == 0) {
       Trdiagpool_reset_memory(trdiagpool);
       Univdiagpool_reset_memory(univdiagpool);
+      Segmenteltpool_reset_memory(segmenteltpool);
       Auxinfopool_reset_memory(auxinfopool);
       Pathstorepool_reset_memory(pathstorepool);
       Intlistpool_reset_memory(intlistpool);
@@ -2189,6 +2710,7 @@ worker_thread (void *data) {
   if (worker_stopwatch != NULL) {
     Stopwatch_free(&worker_stopwatch);
   }
+  Localdb_cache_free();
 
   Spliceendsgen_free(&spliceendsgen3);
   Spliceendsgen_free(&spliceendsgen5);
@@ -2205,13 +2727,21 @@ worker_thread (void *data) {
   Intlistpool_free(&intlistpool);
   Auxinfopool_free(&auxinfopool);
   Pathstorepool_free(&pathstorepool);
+  Segmenteltpool_free(&segmenteltpool);
   Univdiagpool_free(&univdiagpool);
   Trdiagpool_free(&trdiagpool);
 
+#if !defined(HAVE_SSE2)
+  FREE_KEEP(localdb_overflowp);
+  FREE_KEEP(localdb_tally);
+#else
+  FREE_KEEP_ALIGN(localdb_overflowp);
+  FREE_KEEP_ALIGN(localdb_tally);
+#endif
   FREE_KEEP_ALIGN(localdb_alloc);
   FREE_KEEP(novel_diagonals_alloc);
   Univdiag_free_array_keep(&novel_univdiags_alloc);
-  FREE_KEEP_ALIGN(streamspace_alloc);
+  /* FREE_KEEP_ALIGN(streamspace_alloc); */
 
 #ifdef MEMUSAGE
   Mem_usage_set_threadname("main");
@@ -2441,12 +2971,361 @@ check_valid_float_or_int (char *string) {
 }
 
 
+static char *
+trim_token (char *token) {
+  char *end;
+
+  while (*token != '\0' && isspace((int) *token)) {
+    token++;
+  }
+
+  end = token + strlen(token);
+  while (end > token && isspace((int) end[-1])) {
+    --end;
+  }
+  *end = '\0';
+
+  return token;
+}
+
+
+static int
+parse_align_cascade (Align_cascade_T *cascade_out, bool *requires_transcriptome_p_out,
+		     char *string) {
+  char *copy, *token, *start, *comma;
+  Align_cascade_T cascade = ALIGN_CASCADE_NONE;
+  bool requires_transcriptome_p = false, all_token_p = false, any_token_p = false;
+  int ntokens = 0;
+
+  copy = (char *) MALLOC((strlen(string) + 1) * sizeof(char));
+  strcpy(copy,string);
+
+  start = copy;
+  do {
+    comma = strchr(start,',');
+    if (comma != NULL) {
+      *comma = '\0';
+    }
+    token = trim_token(start);
+    if (*token == '\0') {
+      fprintf(stderr,"--align-cascade contains an empty method name\n");
+      FREE(copy);
+      return 9;
+
+    } else if (!strcmp(token,"ALL")) {
+      cascade |= ALIGN_CASCADE_DEFAULT;
+      all_token_p = true;
+
+    } else if (!strcmp(token,"TR-EXACT")) {
+      cascade |= ALIGN_CASCADE_TR_EXACT;
+      requires_transcriptome_p = true;
+    } else if (!strcmp(token,"TR-EXTN")) {
+      cascade |= ALIGN_CASCADE_TR_EXT;
+      requires_transcriptome_p = true;
+    } else if (!strcmp(token,"TR-PREVALENT")) {
+      cascade |= ALIGN_CASCADE_TR_PREV;
+      requires_transcriptome_p = true;
+    } else if (!strcmp(token,"TR-CHAIN")) {
+      cascade |= ALIGN_CASCADE_TR_CHAIN;
+      requires_transcriptome_p = true;
+
+    } else if (!strcmp(token,"GENOME-EXACT")) {
+      cascade |= ALIGN_CASCADE_GEN_EXACT;
+    } else if (!strcmp(token,"GENOME-EXTN")) {
+      cascade |= ALIGN_CASCADE_GEN_EXT;
+    } else if (!strcmp(token,"GENOME-SEGMENT")) {
+      cascade |= ALIGN_CASCADE_GEN_SEGMENT;
+
+    } else if (!strcmp(token,"GENOME-MATE-RESCUE")) {
+      cascade |= ALIGN_CASCADE_MATE_RESCUE;
+    } else if (!strcmp(token,"GENOME-SOLVE-ALL")) {
+      cascade |= ALIGN_CASCADE_SOLVE_ALL;
+    } else if (!strcmp(token,"GENE-FUSION")) {
+      cascade |= ALIGN_CASCADE_GEN_FUSION;
+    } else if (!strcmp(token,"PAIR-RESOLVE")) {
+      cascade |= ALIGN_CASCADE_PAIR_RESOLVE;
+
+    } else {
+      fprintf(stderr,"Unknown --align-cascade method '%s'\n",token);
+      fprintf(stderr,"Allowed methods: ALL, TR-EXACT, TR-EXTN, TR-PREVALENT, TR-CHAIN, GENOME-EXACT, GENOME-EXTN, GENOME-SEGMENT, GENOME-MATE-RESCUE, GENOME-SOLVE-ALL, GENE-FUSION, PAIR-RESOLVE\n");
+      FREE(copy);
+      return 9;
+    }
+
+    any_token_p = true;
+    ntokens++;
+    if (comma != NULL) {
+      start = comma + 1;
+    }
+  } while (comma != NULL);
+
+  FREE(copy);
+
+  if (any_token_p == false) {
+    fprintf(stderr,"--align-cascade requires at least one method name\n");
+    return 9;
+  } else if (all_token_p == true && ntokens > 1) {
+    fprintf(stderr,"--align-cascade=ALL cannot be combined with other methods\n");
+    return 9;
+  } else {
+    *cascade_out = cascade;
+    *requires_transcriptome_p_out = requires_transcriptome_p;
+    return 0;
+  }
+}
+
+
+static bool
+removed_align_cascade_overlap_option_p (const char **removed_name_out, char *arg) {
+  const char *removed_names[] = {
+    "transcriptome-mode",
+    "paired-mate-rescue",
+    "resolve-inner",
+    "se-skip-extension-search"
+  };
+  const char *option, *equals;
+  size_t length;
+  int i;
+
+  if (arg == NULL || arg[0] != '-' || arg[1] != '-') {
+    return false;
+  } else {
+    option = &(arg[2]);
+    equals = strchr(option,'=');
+    length = (equals == NULL) ? strlen(option) : (size_t) (equals - option);
+
+    for (i = 0; i < 4; i++) {
+      if (length == strlen(removed_names[i]) &&
+	  strncmp(option,removed_names[i],length) == 0) {
+	*removed_name_out = removed_names[i];
+	return true;
+      }
+    }
+
+    return false;
+  }
+}
+
+
+static const char *
+removed_segment_diagonal_option_replacement (char *arg) {
+  static const struct {
+    const char *old_name;
+    const char *new_name;
+  } replacements[] = {
+    {"segment-diagonal-budget", "segment-diagonal-algorithm=width-or-count|adaptive-hybrid"},
+    {"segment-diagonal-budget-floor-per-kmer", "segment-diagonal-adaptive-hybrid-floor-per-kmer"},
+    {"segment-diagonal-budget-per-kmer", "segment-diagonal-adaptive-hybrid-budget-per-kmer"},
+    {"segment-diagonal-budget-hard-max", "segment-diagonal-adaptive-hybrid-hard-max"},
+    {"segment-diagonal-weak-width-per-kmer", "segment-diagonal-adaptive-hybrid-weak-width-per-kmer"},
+    {"segment-diagonal-weak-support-divisor", "segment-diagonal-adaptive-hybrid-weak-support-divisor"},
+    {"segment-diagonal-strong-support-fraction", "segment-diagonal-adaptive-hybrid-strong-support-fraction"},
+    {"segment-diagonal-weak-support-fraction", "segment-diagonal-stats-weak-support-fraction"}
+  };
+  const char *option, *equals;
+  size_t length;
+  unsigned int i;
+
+  if (arg == NULL || arg[0] != '-' || arg[1] != '-') {
+    return NULL;
+  }
+
+  option = &(arg[2]);
+  equals = strchr(option,'=');
+  length = (equals == NULL) ? strlen(option) : (size_t) (equals - option);
+  for (i = 0; i < sizeof(replacements)/sizeof(replacements[0]); i++) {
+    if (length == strlen(replacements[i].old_name) &&
+	strncmp(option,replacements[i].old_name,length) == 0) {
+      return replacements[i].new_name;
+    }
+  }
+
+  return NULL;
+}
+
+
+static const char *
+segment_diagonal_algorithm_string (Segment_diagonal_algorithm_T algorithm) {
+  switch (algorithm) {
+  case SEGMENT_DIAGONAL_ALGORITHM_WIDTH_OR_COUNT:
+    return "width-or-count";
+  case SEGMENT_DIAGONAL_ALGORITHM_ADAPTIVE_HYBRID:
+    return "adaptive-hybrid";
+  default:
+    abort();
+  }
+}
+
+
+static void
+resolve_segment_diagonal_tune_defaults (Segment_diagonal_algorithm_T algorithm_default,
+					int max_avg_kmer_positions_default) {
+  if (segment_max_avg_kmer_positions_explicit_p == false) {
+    segment_max_avg_kmer_positions = max_avg_kmer_positions_default;
+  }
+  if (segment_diagonal_algorithm_explicit_p == false) {
+    segment_diagonal_algorithm = algorithm_default;
+  }
+  if (adaptive_hybrid_floor_per_kmer_explicit_p == false) {
+    adaptive_hybrid_floor_per_kmer = 2;
+  }
+  if (adaptive_hybrid_budget_per_kmer_explicit_p == false) {
+    adaptive_hybrid_budget_per_kmer = 12;
+  }
+  if (adaptive_hybrid_hard_max_explicit_p == false) {
+    adaptive_hybrid_hard_max = 0;
+  }
+  if (adaptive_hybrid_weak_width_per_kmer_explicit_p == false) {
+    adaptive_hybrid_weak_width_per_kmer = 6;
+  }
+  if (adaptive_hybrid_weak_support_divisor_explicit_p == false) {
+    adaptive_hybrid_weak_support_divisor = 8;
+  }
+  if (adaptive_hybrid_strong_support_fraction_explicit_p == false) {
+    adaptive_hybrid_strong_support_fraction = 0.10;
+  }
+  if (stats_weak_support_fraction_explicit_p == false) {
+    stats_weak_support_fraction = 0.05;
+  }
+
+  return;
+}
+
+
+static void
+resolve_tune_defaults (void) {
+  if (Parameters_tune == TUNE_SBX) {
+    if (user_min_read_length_explicit_p == false) {
+      user_min_read_length = DEFAULT_MIN_READ_LENGTH_SBX;
+    }
+    if (user_mincoverage_filter_float_explicit_p == false) {
+      user_mincoverage_filter_float = 0.25;
+    }
+    if (single_end_split_paths_explicit_p == false) {
+      single_end_split_paths_p = true;
+    }
+    if (split_path_max_overlap_explicit_p == false) {
+      split_path_max_overlap = 20;
+    }
+    if (split_path_min_segment_explicit_p == false) {
+      split_path_min_segment = 100;
+    }
+    if (split_path_min_combined_coverage_explicit_p == false) {
+      split_path_min_combined_coverage_float = 0.50;
+    }
+    if (max_recursive_ends_explicit_p == false) {
+      max_recursive_ends = 32;
+    }
+    if (min_support_indel_explicit_p == false) {
+      min_support_indel = 3;
+    }
+    if (indel_support_mismatch_penalty_explicit_p == false) {
+      indel_support_mismatch_penalty = 2;
+    }
+    if (max_deletionlen_explicit_p == false) {
+      max_deletionlen = 30;
+    }
+    if (se_quality_ranker_explicit_p == false) {
+      se_quality_ranker_p = true;
+    }
+    if (se_quality_error_rate_penalty_explicit_p == false) {
+      se_quality_error_rate_penalty = 10.0;
+    }
+    if (se_quality_split_ranker_explicit_p == false) {
+      se_quality_split_ranker_p = true;
+    }
+    if (se_quality_split_segment_penalty_explicit_p == false) {
+      se_quality_split_segment_penalty = 10.0;
+    }
+    if (se_keep_trpath_candidates_explicit_p == false) {
+      se_keep_trpath_candidates_p = true;
+    }
+    if (se_materialize_equiv_splice_alts_explicit_p == false) {
+      se_materialize_equiv_splice_alts_p = true;
+    }
+    if (fix_splice_boundary_indels_explicit_p == false) {
+      Parameters_fix_splice_boundary_indels_p = true;
+    }
+    if (se_ext_equiv_prev_prune_explicit_p == false) {
+      se_ext_equiv_prev_prune_p = true;
+    }
+    if (se_segment_stream_chains_explicit_p == false) {
+      se_segment_stream_chains_p = true;
+    }
+    if (se_segment_prefix_skip_explicit_p == false) {
+      se_segment_prefix_skip_p = true;
+    }
+    if (se_segment_qstart_anchor_cache_explicit_p == false) {
+      se_segment_qstart_anchor_cache_p = true;
+    }
+    if (se_path_qend_local_cache_explicit_p == false) {
+      se_path_qend_local_cache_p = true;
+    }
+    if (se_emitted_path_dedup_explicit_p == false) {
+      se_emitted_path_dedup_p = true;
+    }
+    if (se_segment_equiv_prev_prune_explicit_p == false) {
+      se_segment_equiv_prev_prune_p = true;
+    }
+    if (se_segment_min_kmer_avg_quality_explicit_p == false) {
+      se_segment_min_kmer_avg_quality = 10.0;
+    }
+    if (se_segment_max_kmer_bad_bases_explicit_p == false) {
+      se_segment_max_kmer_bad_bases = 3;
+    }
+    if (se_segment_bad_base_quality_explicit_p == false) {
+      se_segment_bad_base_quality = 5;
+    }
+    resolve_segment_diagonal_tune_defaults(SEGMENT_DIAGONAL_ALGORITHM_ADAPTIVE_HYBRID,
+					   /*max_avg_kmer_positions*/10000);
+
+  } else if (Parameters_tune == TUNE_ILLUMINA_PE ||
+	     Parameters_tune == TUNE_ILLUMINA_SE) {
+    if (user_min_read_length_explicit_p == false) {
+      user_min_read_length = DEFAULT_MIN_READ_LENGTH;
+    }
+    if (se_segment_min_kmer_avg_quality_explicit_p == false) {
+      se_segment_min_kmer_avg_quality = 20.0;
+    }
+    if (se_segment_max_kmer_bad_bases_explicit_p == false) {
+      se_segment_max_kmer_bad_bases = 3;
+    }
+    if (se_segment_bad_base_quality_explicit_p == false) {
+      se_segment_bad_base_quality = 10;
+    }
+    resolve_segment_diagonal_tune_defaults(SEGMENT_DIAGONAL_ALGORITHM_ADAPTIVE_HYBRID,
+					   /*max_avg_kmer_positions*/100000);
+
+  } else if (Parameters_tune == TUNE_PACBIO ||
+	     Parameters_tune == TUNE_NANOPORE) {
+    if (user_min_read_length_explicit_p == false) {
+      user_min_read_length = DEFAULT_MIN_READ_LENGTH_LONGREAD;
+    }
+    if (se_segment_min_kmer_avg_quality_explicit_p == false) {
+      se_segment_min_kmer_avg_quality = 10.0;
+    }
+    if (se_segment_max_kmer_bad_bases_explicit_p == false) {
+      se_segment_max_kmer_bad_bases = 3;
+    }
+    if (se_segment_bad_base_quality_explicit_p == false) {
+      se_segment_bad_base_quality = 5;
+    }
+    resolve_segment_diagonal_tune_defaults(SEGMENT_DIAGONAL_ALGORITHM_ADAPTIVE_HYBRID,
+					   /*max_avg_kmer_positions*/10000);
+  }
+
+  return;
+}
+
+
 static int
 parse_command_line (int argc, char *argv[], int optind) {
   int opt, c;
   extern char *optarg;
   int long_option_index = 0;
   const char *long_name;
+  const char *removed_name;
+  const char *replacement;
   char **argstart;
   /* char *string; */
 
@@ -2457,8 +3336,21 @@ parse_command_line (int argc, char *argv[], int optind) {
   }
   fprintf(stderr,"\n");
 
+  for (c = optind; c < argc; c++) {
+    if (removed_align_cascade_overlap_option_p(&removed_name,argv[c]) == true) {
+      fprintf(stderr,"--%s has been removed.  Use --align-cascade to control alignment stages.\n",
+	      removed_name);
+      return 9;
+    } else if ((replacement = removed_segment_diagonal_option_replacement(argv[c])) != NULL) {
+      fprintf(stderr,"%.*s has been removed.  Use --%s instead.\n",
+	      (int) (strchr(argv[c],'=') == NULL ? strlen(argv[c]) :
+		     (size_t) (strchr(argv[c],'=') - argv[c])),argv[c],replacement);
+      return 9;
+    }
+  }
+
   while ((opt = getopt_long(argc,argv,
-			    "C:c:D:d:k:q:o:a:N:M:m:w:e:J:s:V:v:B:t:A:j:0n:QO",
+			    "C:c:D:d:k:j:q:o:a:N:M:m:w:e:s:V:v:B:t:A:0n:QO",
 			    long_options, &long_option_index)) != -1) {
     switch (opt) {
     case 0:
@@ -2494,19 +3386,11 @@ parse_command_line (int argc, char *argv[], int optind) {
 	  return 9;
 	}
 
-      } else if (!strcmp(long_name,"transcriptome-mode")) {
-	if (!strcmp(optarg,"assist")) {
-	  genome_align_p = true;
-	  transcriptome_align_p = true;
-	} else if (!strcmp(optarg,"only")) {
-	  genome_align_p = false;
-	  transcriptome_align_p = true;
-	} else if (!strcmp(optarg,"annotate")) {
-	  genome_align_p = true;
-	  transcriptome_align_p = false;
-	} else {
-	  fprintf(stderr,"--transcriptome-mode flag must be assist, only, or annotate\n");
+      } else if (!strcmp(long_name,"align-cascade")) {
+	if (parse_align_cascade(&align_cascade,&align_cascade_requires_transcriptome_p,optarg) != 0) {
 	  return 9;
+	} else {
+	  align_cascade_spec = optarg;
 	}
 
       } else if (!strcmp(long_name,"use-shared-memory")) {
@@ -2528,6 +3412,109 @@ parse_command_line (int argc, char *argv[], int optind) {
       } else if (!strcmp(long_name,"expand-offsets")) {
 	fprintf(stderr,"Note: --expand-offsets flag is no longer supported.  With the latest algorithms, it doesn't improve speed much.  Ignoring this flag");
 
+      } else if (!strcmp(long_name,"refine-partial-tgga")) {
+	refine_partial_tr_p = true;
+
+      } else if (!strcmp(long_name,"tr-chain-search")) {
+	tr_chain_search_explicit_p = true;
+	if (!strcasecmp(optarg,"legacy")) {
+	  tr_chain_search_p = false;
+	} else if (!strcasecmp(optarg,"chain")) {
+	  tr_chain_search_p = true;
+	} else {
+	  fprintf(stderr,"--tr-chain-search must be legacy or chain (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-seed-source")) {
+	if (!strcasecmp(optarg,"k13")) {
+	  tr_chain_seed_source = TR_CHAIN_SEED_K13;
+	} else if (!strcasecmp(optarg,"fm")) {
+	  tr_chain_seed_source = TR_CHAIN_SEED_FM;
+	} else {
+	  fprintf(stderr,"--tr-chain-seed-source must be k13 or fm (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-engine")) {
+	if (!strcasecmp(optarg,"trdiag")) {
+	  tr_chain_engine = TR_CHAIN_ENGINE_TRDIAG;
+	} else if (!strcasecmp(optarg,"fm-lchain")) {
+	  tr_chain_engine = TR_CHAIN_ENGINE_FM_LCHAIN;
+	} else {
+	  fprintf(stderr,"--tr-chain-engine must be trdiag or fm-lchain (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-rescue-transcriptome")) {
+	tr_chain_rescue_transcriptome_dbroot = optarg;
+
+      } else if (!strcmp(long_name,"tr-chain-fm-prefix")) {
+	tr_chain_fm_prefix = optarg;
+
+      } else if (!strcmp(long_name,"tr-chain-fm-min-seed-len")) {
+	tr_chain_fm_min_seed_len = atoi(check_valid_int(optarg));
+	if (tr_chain_fm_min_seed_len < 1) {
+	  fprintf(stderr,"--tr-chain-fm-min-seed-len must be >= 1 (got %d).\n",
+		  tr_chain_fm_min_seed_len);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-fm-max-occ")) {
+	tr_chain_fm_max_occ = atoi(check_valid_int(optarg));
+	if (tr_chain_fm_max_occ < 1) {
+	  fprintf(stderr,"--tr-chain-fm-max-occ must be >= 1 (got %d).\n",
+		  tr_chain_fm_max_occ);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-fm-max-sub-occ")) {
+	tr_chain_fm_max_sub_occ = atoi(check_valid_int(optarg));
+	if (tr_chain_fm_max_sub_occ < 1) {
+	  fprintf(stderr,"--tr-chain-fm-max-sub-occ must be >= 1 (got %d).\n",
+		  tr_chain_fm_max_sub_occ);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-max-indel")) {
+	tr_chain_max_indel = atoi(check_valid_int(optarg));
+	if (tr_chain_max_indel < 0) {
+	  fprintf(stderr,"--tr-chain-max-indel must be >= 0 (got %d).\n",tr_chain_max_indel);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-score-min-ratio")) {
+	tr_chain_score_min_ratio = check_valid_float(optarg,long_name);
+	if (tr_chain_score_min_ratio < 0.0 || tr_chain_score_min_ratio > 1.0) {
+	  fprintf(stderr,"--%s must be between 0.0 and 1.0 (got %g).\n",
+		  long_name,tr_chain_score_min_ratio);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-frontier-cap")) {
+	tr_chain_frontier_cap = atoi(check_valid_int(optarg));
+	if (tr_chain_frontier_cap < 1) {
+	  fprintf(stderr,"--tr-chain-frontier-cap must be >= 1 (got %d).\n",
+		  tr_chain_frontier_cap);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-max-seed-occ")) {
+	tr_chain_max_seed_occ = atoi(check_valid_int(optarg));
+	if (tr_chain_max_seed_occ < 0) {
+	  fprintf(stderr,"--tr-chain-max-seed-occ must be >= 0 (got %d).\n",
+		  tr_chain_max_seed_occ);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-chain-max-anchors")) {
+	tr_chain_max_anchors = atoi(check_valid_int(optarg));
+	if (tr_chain_max_anchors < 0) {
+	  fprintf(stderr,"--tr-chain-max-anchors must be >= 0 (got %d).\n",
+		  tr_chain_max_anchors);
+	  return 9;
+	}
+
       } else if (!strcmp(long_name,"sampling")) {
 	required_index1interval = atoi(check_valid_int(optarg));
 
@@ -2542,6 +3529,13 @@ parse_command_line (int argc, char *argv[], int optind) {
 
       } else if (!strcmp(long_name,"maxsearch")) {
 	maxpaths_search = atoi(check_valid_int(optarg)); break;
+
+      } else if (!strcmp(long_name,"n-splice-paths")) {
+	n_splice_paths = atoi(check_valid_int(optarg));
+	if (n_splice_paths < 1) {
+	  fprintf(stderr,"--n-splice-paths must be >= 1 (got '%s').\n",optarg);
+	  return 9;
+	}
 
       } else if (!strcmp(long_name,"mode")) {
 	if (!strcmp(optarg,"standard")) {
@@ -2628,6 +3622,63 @@ parse_command_line (int argc, char *argv[], int optind) {
 
       } else if (!strcmp(long_name,"endtrim-length")) {
 	endtrim_length = atoi(check_valid_int(optarg));
+
+      } else if (!strcmp(long_name,"tune")) {
+	if (Parameters_parse_tune(optarg,&Parameters_tune) < 0) {
+	  fprintf(stderr,
+		  "--tune value '%s' is unknown.  Valid values: illumina-pe, illumina-se, sbx, pacbio, nanopore.\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"max-read-length")) {
+	{
+	  int v = atoi(check_valid_int(optarg));
+	  if (v < 1) {
+	    fprintf(stderr,"--max-read-length must be >= 1 (got '%s').\n",optarg);
+	    return 9;
+	  }
+	  Parameters_max_readlength = v;
+	  Parameters_max_readlength_explicit = true;
+	}
+
+      } else if (!strcmp(long_name,"min-read-length")) {
+	{
+	  int v = atoi(check_valid_int(optarg));
+	  if (v < 0) {
+	    fprintf(stderr,"--min-read-length must be >= 0 (got '%s').\n",optarg);
+	    return 9;
+	  }
+	  user_min_read_length = v;
+	  user_min_read_length_explicit_p = true;
+	}
+
+      } else if (!strcmp(long_name,"fix-middle-exon")) {
+	if (Parameters_parse_on_off(optarg,&Parameters_fix_middle_exon_p) < 0) {
+	  fprintf(stderr,
+		  "--fix-middle-exon must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"min-short-middle-exon")) {
+	{
+	  int v = atoi(check_valid_int(optarg));
+	  if (v < 3) {
+	    fprintf(stderr,"--min-short-middle-exon must be >= 3 (got '%s').\n",optarg);
+	    return 9;
+	  }
+	  Parameters_min_short_middle_exon = v;
+	}
+
+      } else if (!strcmp(long_name,"fix-splice-boundary-indels")) {
+	if (Parameters_parse_on_off(optarg,&Parameters_fix_splice_boundary_indels_p) < 0) {
+	  fprintf(stderr,
+		  "--fix-splice-boundary-indels must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+	fix_splice_boundary_indels_explicit_p = true;
 
       } else if (!strcmp(long_name,"fastq-id-start")) {
 	acc_fieldi_start = atoi(check_valid_int(optarg)) - 1;
@@ -2737,27 +3788,682 @@ parse_command_line (int argc, char *argv[], int optind) {
       } else if (!strcmp(long_name,"pairmax-rna")) {
 	pairmax_rna = atoi(check_valid_int(optarg));
 
-      } else if (!strcmp(long_name,"resolve-inner")) {
-	if (!strcmp(optarg,"1")) {
-	  resolve_inner_p = true;
-	} else if (!strcmp(optarg,"0")) {
-	  resolve_inner_p = false;
-	} else {
-	  fprintf(stderr,"--resolve-inner flag must be 0 or 1\n");
-	  return 9;
-	}
-
       } else if (!strcmp(long_name,"pairexpect")) {
 	expected_pairlength = atoi(check_valid_int(optarg));
 
       } else if (!strcmp(long_name,"pairdev")) {
 	pairlength_deviation = atoi(check_valid_int(optarg));
 
+      } else if (!strcmp(long_name,"paired-terminal-anchor-min-score")) {
+	paired_terminal_anchor_min_score = atoi(check_valid_int(optarg));
+	if (paired_terminal_anchor_min_score < 0) {
+	  fprintf(stderr,"--paired-terminal-anchor-min-score must be >= 0\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-terminal-anchor-slop")) {
+	paired_terminal_anchor_slop = atoi(check_valid_int(optarg));
+	if (paired_terminal_anchor_slop < 0) {
+	  fprintf(stderr,"--paired-terminal-anchor-slop must be >= 0\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-segment-exact-max-mismatch-divisor")) {
+	paired_segment_exact_max_mismatch_divisor = atoi(check_valid_int(optarg));
+	if (paired_segment_exact_max_mismatch_divisor < 1) {
+	  fprintf(stderr,"--paired-segment-exact-max-mismatch-divisor must be >= 1\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-mate-rescue-gapped")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_mate_rescue_gapped_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_mate_rescue_gapped_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-mate-rescue-gapped must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-preeval-ungapped-mate")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_preeval_ungapped_mate_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_preeval_ungapped_mate_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-preeval-ungapped-mate must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-preeval-rescue-skip")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_preeval_rescue_skip_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_preeval_rescue_skip_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-preeval-rescue-skip must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-segment-stream-chains")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_segment_stream_chains_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_segment_stream_chains_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-segment-stream-chains must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-solve-all-anchor-first")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_solve_all_anchor_first_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_solve_all_anchor_first_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-solve-all-anchor-first must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-postsolve-reliable-anchors-first")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_postsolve_reliable_anchors_first_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_postsolve_reliable_anchors_first_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-postsolve-reliable-anchors-first must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-seg1-exhaustive-concordance")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_seg1_exhaustive_concordance_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_seg1_exhaustive_concordance_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-seg1-exhaustive-concordance must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-duplicate-auxinfo-frontier")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_duplicate_auxinfo_frontier_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_duplicate_auxinfo_frontier_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-duplicate-auxinfo-frontier must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-mate-minpure-floor")) {
+	paired_mate_minpure_floor = (unsigned int) atoi(check_valid_int(optarg));
+	if (paired_mate_minpure_floor == 0U || paired_mate_minpure_floor > STAGE1_MINPURE_SPECIFICITY_SCALE) {
+	  fprintf(stderr,
+		  "--paired-mate-minpure-floor must be between 1 and %u (got '%s').\n",
+		  STAGE1_MINPURE_SPECIFICITY_SCALE,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"minpure-diagonal-debug")) {
+	if (!strcmp(optarg,"0")) {
+	  minpure_diagonal_debug_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  minpure_diagonal_debug_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--minpure-diagonal-debug must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"pathpair-equal-coverage-diff-tiebreak")) {
+	if (!strcmp(optarg,"0")) {
+	  pathpair_equal_coverage_diff_tiebreak_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  pathpair_equal_coverage_diff_tiebreak_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--pathpair-equal-coverage-diff-tiebreak must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-transcript-completion")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_transcript_completion_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_transcript_completion_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-transcript-completion must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"paired-tr-adjacent-indel-repair")) {
+	if (!strcmp(optarg,"0")) {
+	  paired_tr_adjacent_indel_repair_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  paired_tr_adjacent_indel_repair_p = true;
+	} else {
+	  fprintf(stderr,
+		  "--paired-tr-adjacent-indel-repair must be 0 or 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-match")) {
+	score_match_reward = atof(check_valid_float_or_int(optarg));
+	if (score_match_reward < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-mismatch")) {
+	score_mismatch_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_mismatch_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-indel-open")) {
+	score_indel_open_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_indel_open_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-indel-extend")) {
+	score_indel_extend_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_indel_extend_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-long-indel-open")) {
+	score_long_indel_open_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_long_indel_open_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-long-indel-extend")) {
+	score_long_indel_extend_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_long_indel_extend_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-splice-unannotated")) {
+	score_splice_unannotated_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_splice_unannotated_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-pair-transcript-discordance")) {
+	score_pair_transcript_discordance_penalty = atof(check_valid_float_or_int(optarg));
+	if (score_pair_transcript_discordance_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-pair-margin")) {
+	score_pair_margin = atof(check_valid_float_or_int(optarg));
+	if (score_pair_margin < 0.0 || score_pair_margin >= 1.0) {
+	  fprintf(stderr,"--%s must be >= 0 and < 1 (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"score-min-read")) {
+	score_min_read = atof(check_valid_float_or_int(optarg));
+
+      } else if (!strcmp(long_name,"score-min-pair")) {
+	score_min_pair = atof(check_valid_float_or_int(optarg));
+
+      } else if (!strcmp(long_name,"tr-score-ranker") ||
+		 !strcmp(long_name,"tr-quality-ranker")) {
+	if (Parameters_parse_on_off(optarg,&tr_score_ranker_p) < 0) {
+	  fprintf(stderr,
+		  "--%s must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-score-match-reward") ||
+		 !strcmp(long_name,"tr-quality-match-reward")) {
+	tr_score_match_reward = atof(check_valid_float_or_int(optarg));
+	if (tr_score_match_reward < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-score-mismatch-penalty") ||
+		 !strcmp(long_name,"tr-quality-mismatch-penalty")) {
+	tr_score_mismatch_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_mismatch_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-score-indel-open-penalty")) {
+	tr_score_indel_open_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_indel_open_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-score-indel-extend-penalty")) {
+	tr_score_indel_extend_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_indel_extend_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-quality-indel-penalty")) {
+	tr_score_indel_open_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_indel_open_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+	tr_score_indel_extend_penalty = tr_score_indel_open_penalty;
+
+      } else if (!strcmp(long_name,"tr-score-softclip-penalty") ||
+		 !strcmp(long_name,"tr-quality-softclip-penalty")) {
+	tr_score_softclip_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_softclip_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"tr-score-transcript-discordance-penalty")) {
+	tr_score_transcript_discordance_penalty = atof(check_valid_float_or_int(optarg));
+	if (tr_score_transcript_discordance_penalty < 0.0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
       } else if (!strcmp(long_name,"min-coverage")) {
+	user_mincoverage_filter_float_explicit_p = true;
 	user_mincoverage_filter_float = atof(check_valid_float_or_int(optarg));
 	if (user_mincoverage_filter_float > 1.0 && user_mincoverage_filter_float != rint(user_mincoverage_filter_float)) {
 	  fprintf(stderr,"Cannot specify fractional value %f for --min-coverage except between 0.0 and 1.0\n",
 		  user_mincoverage_filter_float);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"single-end-split-paths")) {
+	single_end_split_paths_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&single_end_split_paths_p) < 0) {
+	  fprintf(stderr,
+		  "--single-end-split-paths must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"split-path-max-overlap")) {
+	split_path_max_overlap_explicit_p = true;
+	split_path_max_overlap = atoi(check_valid_int(optarg));
+	if (split_path_max_overlap < 0) {
+	  fprintf(stderr,"--split-path-max-overlap must be >= 0\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"split-path-min-segment")) {
+	split_path_min_segment_explicit_p = true;
+	split_path_min_segment = atoi(check_valid_int(optarg));
+	if (split_path_min_segment < 1) {
+	  fprintf(stderr,"--split-path-min-segment must be >= 1\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"split-path-min-combined-coverage")) {
+	split_path_min_combined_coverage_explicit_p = true;
+	split_path_min_combined_coverage_float = atof(check_valid_float_or_int(optarg));
+	if (split_path_min_combined_coverage_float > 1.0 &&
+	    split_path_min_combined_coverage_float != rint(split_path_min_combined_coverage_float)) {
+	  fprintf(stderr,"Cannot specify fractional value %f for --split-path-min-combined-coverage except between 0.0 and 1.0\n",
+		  split_path_min_combined_coverage_float);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-ext-dedup-exact-chains")) {
+	if (Parameters_parse_on_off(optarg,&se_ext_dedup_exact_chains_p) < 0) {
+	  fprintf(stderr,
+		  "--se-ext-dedup-exact-chains must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-ext-equiv-prev-prune")) {
+	se_ext_equiv_prev_prune_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_ext_equiv_prev_prune_p) < 0) {
+	  fprintf(stderr,
+		  "--se-ext-equiv-prev-prune must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-keep-trpath-candidates")) {
+	se_keep_trpath_candidates_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_keep_trpath_candidates_p) < 0) {
+	  fprintf(stderr,
+		  "--se-keep-trpath-candidates must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-materialize-equiv-splice-alts")) {
+	se_materialize_equiv_splice_alts_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_materialize_equiv_splice_alts_p) < 0) {
+	  fprintf(stderr,
+		  "--se-materialize-equiv-splice-alts must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-stream-chains")) {
+	se_segment_stream_chains_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_segment_stream_chains_p) < 0) {
+	  fprintf(stderr,
+		  "--se-segment-stream-chains must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-dedup-exact-chains")) {
+	if (Parameters_parse_on_off(optarg,&se_segment_dedup_exact_chains_p) < 0) {
+	  fprintf(stderr,
+		  "--se-segment-dedup-exact-chains must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-prefix-skip")) {
+	se_segment_prefix_skip_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_segment_prefix_skip_p) < 0) {
+	  fprintf(stderr,
+		  "--se-segment-prefix-skip must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-qstart-anchor-cache")) {
+	se_segment_qstart_anchor_cache_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_segment_qstart_anchor_cache_p) < 0) {
+	  fprintf(stderr,
+		  "--se-segment-qstart-anchor-cache must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-path-qend-local-cache")) {
+	se_path_qend_local_cache_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_path_qend_local_cache_p) < 0) {
+	  fprintf(stderr,
+		  "--se-path-qend-local-cache must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-emitted-path-dedup")) {
+	se_emitted_path_dedup_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_emitted_path_dedup_p) < 0) {
+	  fprintf(stderr,
+		  "--se-emitted-path-dedup must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-equiv-prev-prune")) {
+	se_segment_equiv_prev_prune_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_segment_equiv_prev_prune_p) < 0) {
+	  fprintf(stderr,
+		  "--se-segment-equiv-prev-prune must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-cache-threshold")) {
+	se_segment_cache_threshold = atoi(check_valid_int(optarg));
+	if (se_segment_cache_threshold < 0) {
+	  fprintf(stderr,"--se-segment-cache-threshold must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-max-window")) {
+	se_segment_max_window = atoi(check_valid_int(optarg));
+	if (se_segment_max_window < 0) {
+	  fprintf(stderr,"--se-segment-max-window must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-segment-min-kmer-avg-quality")) {
+	se_segment_min_kmer_avg_quality_explicit_p = true;
+	se_segment_min_kmer_avg_quality = atof(check_valid_float_or_int(optarg));
+
+      } else if (!strcmp(long_name,"se-segment-max-kmer-bad-bases")) {
+	se_segment_max_kmer_bad_bases_explicit_p = true;
+	se_segment_max_kmer_bad_bases = atoi(check_valid_int(optarg));
+
+      } else if (!strcmp(long_name,"se-segment-bad-base-quality")) {
+	se_segment_bad_base_quality_explicit_p = true;
+	se_segment_bad_base_quality = atoi(check_valid_int(optarg));
+	if (se_segment_bad_base_quality < 0) {
+	  fprintf(stderr,"--se-segment-bad-base-quality must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-max-avg-kmer-positions") ||
+		 !strcmp(long_name,"se-segment-max-avg-kmer-positions")) {
+	segment_max_avg_kmer_positions_explicit_p = true;
+	segment_max_avg_kmer_positions = atoi(check_valid_int(optarg));
+	if (segment_max_avg_kmer_positions < 0) {
+	  fprintf(stderr,"--%s must be non-negative (got '%s').\n",long_name,optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-repetitive-kmer-filter")) {
+	if (!strcmp(optarg,"0")) {
+	  segment_repetitive_kmer_filter_p = false;
+	} else if (!strcmp(optarg,"1")) {
+	  segment_repetitive_kmer_filter_p = true;
+	} else {
+	  fprintf(stderr,"--segment-repetitive-kmer-filter must be 0 or 1 (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-max-kmer-positions")) {
+	segment_max_kmer_positions = atoi(check_valid_int(optarg));
+	if (segment_max_kmer_positions < 0) {
+	  fprintf(stderr,"--segment-max-kmer-positions must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-algorithm")) {
+	segment_diagonal_algorithm_explicit_p = true;
+	if (!strcmp(optarg,"width-or-count")) {
+	  segment_diagonal_algorithm = SEGMENT_DIAGONAL_ALGORITHM_WIDTH_OR_COUNT;
+	} else if (!strcmp(optarg,"adaptive-hybrid")) {
+	  segment_diagonal_algorithm = SEGMENT_DIAGONAL_ALGORITHM_ADAPTIVE_HYBRID;
+	} else {
+	  fprintf(stderr,
+		  "--segment-diagonal-algorithm must be width-or-count or adaptive-hybrid (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-floor-per-kmer")) {
+	adaptive_hybrid_floor_per_kmer_explicit_p = true;
+	adaptive_hybrid_floor_per_kmer = atoi(check_valid_int(optarg));
+	if (adaptive_hybrid_floor_per_kmer < 1) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-floor-per-kmer must be positive (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-budget-per-kmer")) {
+	adaptive_hybrid_budget_per_kmer_explicit_p = true;
+	adaptive_hybrid_budget_per_kmer = atoi(check_valid_int(optarg));
+	if (adaptive_hybrid_budget_per_kmer < 1) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-budget-per-kmer must be positive (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-hard-max")) {
+	adaptive_hybrid_hard_max_explicit_p = true;
+	adaptive_hybrid_hard_max = atoi(check_valid_int(optarg));
+	if (adaptive_hybrid_hard_max < 0) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-hard-max must be non-negative (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-weak-width-per-kmer")) {
+	adaptive_hybrid_weak_width_per_kmer_explicit_p = true;
+	adaptive_hybrid_weak_width_per_kmer = atoi(check_valid_int(optarg));
+	if (adaptive_hybrid_weak_width_per_kmer < 1) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-weak-width-per-kmer must be positive (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-weak-support-divisor")) {
+	adaptive_hybrid_weak_support_divisor_explicit_p = true;
+	adaptive_hybrid_weak_support_divisor = atoi(check_valid_int(optarg));
+	if (adaptive_hybrid_weak_support_divisor < 1) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-weak-support-divisor must be positive (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-adaptive-hybrid-strong-support-fraction")) {
+	adaptive_hybrid_strong_support_fraction_explicit_p = true;
+	adaptive_hybrid_strong_support_fraction = check_valid_float(optarg,long_name);
+	if (adaptive_hybrid_strong_support_fraction < 0.0 ||
+	    adaptive_hybrid_strong_support_fraction > 1.0) {
+	  fprintf(stderr,"--segment-diagonal-adaptive-hybrid-strong-support-fraction must be between 0 and 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"segment-diagonal-stats-weak-support-fraction")) {
+	stats_weak_support_fraction_explicit_p = true;
+	stats_weak_support_fraction = check_valid_float(optarg,long_name);
+	if (stats_weak_support_fraction < 0.0 || stats_weak_support_fraction > 1.0) {
+	  fprintf(stderr,"--segment-diagonal-stats-weak-support-fraction must be between 0 and 1 (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-max-mismatches")) {
+	se_max_mismatches_filter_float = atof(check_valid_float_or_int(optarg));
+	if (se_max_mismatches_filter_float > 1.0 &&
+	    se_max_mismatches_filter_float != rint(se_max_mismatches_filter_float)) {
+	  fprintf(stderr,"Cannot specify fractional value %f for --se-max-mismatches except between 0.0 and 1.0\n",
+		  se_max_mismatches_filter_float);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-max-softclip")) {
+	se_max_softclip_filter_float = atof(check_valid_float_or_int(optarg));
+	if (se_max_softclip_filter_float > 1.0 &&
+	    se_max_softclip_filter_float != rint(se_max_softclip_filter_float)) {
+	  fprintf(stderr,"Cannot specify fractional value %f for --se-max-softclip except between 0.0 and 1.0\n",
+		  se_max_softclip_filter_float);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-ranker")) {
+	se_quality_ranker_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_quality_ranker_p) < 0) {
+	  fprintf(stderr,
+		  "--se-quality-ranker must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-match-reward")) {
+	se_quality_match_reward = atof(check_valid_float_or_int(optarg));
+	if (se_quality_match_reward < 0.0) {
+	  fprintf(stderr,"--se-quality-match-reward must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-mismatch-penalty")) {
+	se_quality_mismatch_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_mismatch_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-mismatch-penalty must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-indel-penalty")) {
+	se_quality_indel_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_indel_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-indel-penalty must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-softclip-penalty")) {
+	se_quality_softclip_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_softclip_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-softclip-penalty must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-error-rate-penalty")) {
+	se_quality_error_rate_penalty_explicit_p = true;
+	se_quality_error_rate_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_error_rate_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-error-rate-penalty must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-rank-margin")) {
+	se_quality_rank_margin = atof(check_valid_float_or_int(optarg));
+	if (se_quality_rank_margin < 0.0) {
+	  fprintf(stderr,"--se-quality-rank-margin must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-split-ranker")) {
+	se_quality_split_ranker_explicit_p = true;
+	if (Parameters_parse_on_off(optarg,&se_quality_split_ranker_p) < 0) {
+	  fprintf(stderr,
+		  "--se-quality-split-ranker must be 1/ON/true/yes or 0/OFF/false/no (got '%s').\n",
+		  optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-split-gap-penalty")) {
+	se_quality_split_gap_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_split_gap_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-split-gap-penalty must be non-negative (got '%s').\n",optarg);
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"se-quality-split-segment-penalty")) {
+	se_quality_split_segment_penalty_explicit_p = true;
+	se_quality_split_segment_penalty = atof(check_valid_float_or_int(optarg));
+	if (se_quality_split_segment_penalty < 0.0) {
+	  fprintf(stderr,"--se-quality-split-segment-penalty must be non-negative (got '%s').\n",optarg);
 	  return 9;
 	}
 
@@ -2772,10 +4478,35 @@ parse_command_line (int argc, char *argv[], int optind) {
 	}
 #endif
 
+      } else if (!strcmp(long_name,"max-recursive-ends")) {
+	max_recursive_ends_explicit_p = true;
+	max_recursive_ends = atoi(check_valid_int(optarg));
+	if (max_recursive_ends < 2) {
+	  fprintf(stderr,"--max-recursive-ends must be >= 2\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"min-support-indel")) {
+	min_support_indel_explicit_p = true;
+	min_support_indel = atoi(check_valid_int(optarg));
+	if (min_support_indel < 1) {
+	  fprintf(stderr,"--min-support-indel must be >= 1\n");
+	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"indel-support-mismatch-penalty")) {
+	indel_support_mismatch_penalty_explicit_p = true;
+	indel_support_mismatch_penalty = atoi(check_valid_int(optarg));
+	if (indel_support_mismatch_penalty < 0) {
+	  fprintf(stderr,"--indel-support-mismatch-penalty must be >= 0\n");
+	  return 9;
+	}
+
       } else if (!strcmp(long_name,"max-insertions")) {
 	max_insertionlen = atoi(check_valid_int(optarg));
 
       } else if (!strcmp(long_name,"max-deletions")) {
+	max_deletionlen_explicit_p = true;
 	max_deletionlen = atoi(check_valid_int(optarg));
 
       } else if (!strcmp(long_name,"merge-distant-samechr")) {
@@ -2867,10 +4598,10 @@ parse_command_line (int argc, char *argv[], int optind) {
 
       } else if (!strcmp(long_name,"quality-protocol")) {
 	if (user_quality_score_adj == true) {
-	  fprintf(stderr,"Cannot specify both -J (--quality-zero-score) and --quality-protocol\n");
+	  fprintf(stderr,"Cannot specify both --quality-zero-score and --quality-protocol\n");
 	  return 9;
 	} else if (user_quality_shift == true) {
-	  fprintf(stderr,"Cannot specify both -j (--quality-print-shift) and --quality-protocol\n");
+	  fprintf(stderr,"Cannot specify both --quality-print-shift and --quality-protocol\n");
 	  return 9;
 	} else if (!strcmp(optarg,"illumina")) {
 	  MAPQ_init(/*quality_score_adj*/64);
@@ -2887,11 +4618,36 @@ parse_command_line (int argc, char *argv[], int optind) {
 	  return 9;
 	}
 
+      } else if (!strcmp(long_name,"quality-zero-score")) {
+	if (user_quality_score_adj == true) {
+	  fprintf(stderr,"Cannot specify both --quality-zero-score and --quality-protocol\n");
+	  return 9;
+	} else {
+	  MAPQ_init(/*quality_score_adj*/atoi(check_valid_int(optarg)));
+	  user_quality_score_adj = true;
+	}
+
+      } else if (!strcmp(long_name,"quality-print-shift")) {
+	if (user_quality_shift == true) {
+	  fprintf(stderr,"Cannot specify both --quality-print-shift and --quality-protocol\n");
+	  return 9;
+	} else {
+	  quality_shift = atoi(check_valid_int(optarg));
+	  user_quality_shift = true;
+	}
+
       } else if (!strcmp(long_name,"md-report-snps")) {
 	md_report_snps_p = true;
 
       } else if (!strcmp(long_name,"no-soft-clips")) {
-	allow_soft_clips_p = false;
+	allow_soft_clips_start_p = false;
+	allow_soft_clips_end_p = false;
+
+      } else if (!strcmp(long_name,"no-soft-clips-start")) {
+	allow_soft_clips_start_p = false;
+
+      } else if (!strcmp(long_name,"no-soft-clips-end")) {
+	allow_soft_clips_end_p = false;
 
       } else if (!strcmp(long_name,"extend-soft-clips")) {
 	extend_soft_clips_p = true;
@@ -2950,10 +4706,6 @@ parse_command_line (int argc, char *argv[], int optind) {
 	omit_concordant_uniq_p = true;
       } else if (!strcmp(long_name,"omit-concordant-mult")) {
 	omit_concordant_mult_p = true;
-
-      } else if (!strcmp(long_name,"omit-softclipped")) {
-	omit_softclipped_p = false;
-
       } else if (!strcmp(long_name,"only-tr-consistent")) {
 	only_tr_consistent_p = true;
 
@@ -2978,9 +4730,10 @@ parse_command_line (int argc, char *argv[], int optind) {
       }
       break;
 
+    case 'j': required_msize = atoi(check_valid_int(optarg)); break;
+
     case 'q': parse_part(&part_modulus,&part_interval,optarg); break;
     case 'o': output_file = optarg; break;
-
     case 'a': 
       if (!strcmp(optarg,"paired")) {
 	chop_primers_p = true;
@@ -3145,26 +4898,6 @@ parse_command_line (int argc, char *argv[], int optind) {
       }
       break;
 
-    case 'j':
-      if (user_quality_shift == true) {
-	fprintf(stderr,"Cannot specify both -j (--quality-print-shift) and --quality-protocol\n");
-	return 9;
-      } else {
-	quality_shift = atoi(check_valid_int(optarg));
-	user_quality_shift = true;
-      }
-      break;
-
-    case 'J':
-      if (user_quality_score_adj == true) {
-	fprintf(stderr,"Cannot specify both -J (--quality-zero-score) and --quality-protocol\n");
-	return 9;
-      } else {
-	MAPQ_init(/*quality_score_adj*/atoi(check_valid_int(optarg)));
-	user_quality_score_adj = true;
-      }
-      break;
-
     case '0': exception_raise_p = false; break; /* Allows signals to pass through */
     case 'n': maxpaths_report = atoi(check_valid_int(optarg)); break;
     case 'Q': quiet_if_excessive_p = true; break;
@@ -3176,6 +4909,20 @@ parse_command_line (int argc, char *argv[], int optind) {
     }
   }
 
+  if (segment_diagonal_algorithm_explicit_p == true &&
+      segment_diagonal_algorithm == SEGMENT_DIAGONAL_ALGORITHM_WIDTH_OR_COUNT &&
+      (adaptive_hybrid_floor_per_kmer_explicit_p == true ||
+	adaptive_hybrid_budget_per_kmer_explicit_p == true ||
+	adaptive_hybrid_hard_max_explicit_p == true ||
+	adaptive_hybrid_weak_width_per_kmer_explicit_p == true ||
+	adaptive_hybrid_weak_support_divisor_explicit_p == true ||
+	adaptive_hybrid_strong_support_fraction_explicit_p == true)) {
+    fprintf(stderr,
+	    "--segment-diagonal-adaptive-hybrid-* options require "
+	    "--segment-diagonal-algorithm=adaptive-hybrid.\n");
+    return 9;
+  }
+
   /* Make inferences */
   if (genome_dbroot == NULL) {
     fprintf(stderr,"Need to specify the -d flag.  For usage, run 'gsnap --help'\n");
@@ -3184,7 +4931,7 @@ parse_command_line (int argc, char *argv[], int optind) {
   }
 
   if (single_cell_p == true) {
-    chop_poly_at_first_p = false;
+    chop_poly_at_first_p = false; /* Contains UMI barcode */
     chop_poly_at_second_p = true;
   } else {
     chop_poly_at_first_p = true;
@@ -3230,6 +4977,61 @@ parse_command_line (int argc, char *argv[], int optind) {
   if (transcriptome_dbroot == NULL) {
     transcriptome_align_p = false;
   }
+
+  if (align_cascade_requires_transcriptome_p == true && transcriptome_dbroot == NULL) {
+    fprintf(stderr,"--align-cascade=%s requires --transcriptdb (-c)\n",align_cascade_spec);
+    return 9;
+  }
+  if (tr_chain_rescue_transcriptome_dbroot != NULL && transcriptome_dbroot == NULL) {
+    fprintf(stderr,"--tr-chain-rescue-transcriptome requires primary --transcriptdb (-c)\n");
+    return 9;
+  }
+  if (Align_cascade_enabled_p(align_cascade,ALIGN_CASCADE_TR_CHAIN) &&
+      (align_cascade & ALIGN_CASCADE_TR_LEGACY_STAGES) != 0U) {
+    fprintf(stderr,"--align-cascade=TR-CHAIN cannot be combined with TR-EXACT, TR-PREVALENT, or TR-EXTN\n");
+    return 9;
+  }
+  if (tr_chain_search_explicit_p == true) {
+    if (tr_chain_search_p == true &&
+	Align_cascade_enabled_p(align_cascade,ALIGN_CASCADE_TR_CHAIN) == false) {
+      fprintf(stderr,"--tr-chain-search=chain requires --align-cascade to include TR-CHAIN\n");
+      return 9;
+    } else if (tr_chain_search_p == false &&
+	       Align_cascade_enabled_p(align_cascade,ALIGN_CASCADE_TR_CHAIN)) {
+      fprintf(stderr,"--tr-chain-search=legacy cannot be used with --align-cascade=TR-CHAIN\n");
+      return 9;
+    }
+  } else {
+    tr_chain_search_p =
+      Align_cascade_enabled_p(align_cascade,ALIGN_CASCADE_TR_CHAIN) ? true : false;
+  }
+  if (tr_chain_rescue_transcriptome_dbroot != NULL && tr_chain_search_p == false) {
+    fprintf(stderr,"--tr-chain-rescue-transcriptome requires --align-cascade=TR-CHAIN\n");
+    return 9;
+  }
+  if ((tr_chain_seed_source & TR_CHAIN_SEED_FM) != 0 && tr_chain_search_p == false) {
+    fprintf(stderr,"--tr-chain-seed-source=fm requires --align-cascade=TR-CHAIN\n");
+    return 9;
+  }
+  if ((tr_chain_seed_source & TR_CHAIN_SEED_FM) != 0 && tr_chain_fm_prefix == NULL) {
+    fprintf(stderr,"--tr-chain-seed-source=fm requires --tr-chain-fm-prefix\n");
+    return 9;
+  }
+  if (tr_chain_engine == TR_CHAIN_ENGINE_FM_LCHAIN &&
+      (tr_chain_seed_source & TR_CHAIN_SEED_FM) == 0) {
+    fprintf(stderr,"--tr-chain-engine=fm-lchain requires --tr-chain-seed-source=fm\n");
+    return 9;
+  }
+  if ((tr_chain_seed_source & TR_CHAIN_SEED_FM) != 0 &&
+      tr_chain_rescue_transcriptome_dbroot != NULL) {
+    fprintf(stderr,"--tr-chain-rescue-transcriptome is not used with --tr-chain-seed-source=fm\n");
+    return 9;
+  }
+  transcriptome_align_p =
+    (transcriptome_dbroot != NULL && (align_cascade & ALIGN_CASCADE_TR_STAGES) != 0U) ? true : false;
+  genome_align_p =
+    (align_cascade & (ALIGN_CASCADE_GEN_STAGES | ALIGN_CASCADE_GEN_FUSION)) != 0U ? true : false;
+  resolve_inner_p = Align_cascade_enabled_p(align_cascade,ALIGN_CASCADE_PAIR_RESOLVE);
 
   if (transcriptome_dbroot != NULL) {
     knownsplicingp = true;
@@ -3701,10 +5503,10 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
     idx_filesuffix2 = (char *) NULL;
   }
 
-  if ((indexdb = Indexdb_new_genome(&index1part,&index1interval,
+  if ((indexdb = Indexdb_new_genome(&index1part,&index1interval,&msize,
 				    /*genomesubdir*/modedir,snpsdir,
 				    genome_fileroot,idx_filesuffix1,snps_root,
-				    required_index1part,required_index1interval,
+				    required_index1part,required_index1interval,required_msize,
 				    offsetsstrm_access,positions_access,sharedp,
 				    multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p)) == NULL) {
 
@@ -3721,10 +5523,10 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
 
   if (idx_filesuffix2 == NULL) {
     indexdb_nonstd = indexdb;
-  } else if ((indexdb_nonstd = Indexdb_new_genome(&index1part,&index1interval,
+  } else if ((indexdb_nonstd = Indexdb_new_genome(&index1part,&index1interval,&msize,
 						  /*genomesubdir*/modedir,snpsdir,
 						  genome_fileroot,idx_filesuffix2,snps_root,
-						  required_index1part,required_index1interval,
+						  required_index1part,required_index1interval,required_msize,
 						  offsetsstrm_access,positions_access,sharedp,
 						  multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p)) == NULL) {
     if (mode == CMET_STRANDED || mode == CMET_NONSTRANDED) {
@@ -4018,18 +5820,35 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   Path_solve_setup(circularp,transcriptome,chromosome_ef64,
 		   genomebits,genomebits_alt,genomelength,
 		   index1part,min_intronlength,
-		   max_insertionlen,max_deletionlen,
-		   novelsplicingp,knownsplicingp);
+		   max_insertionlen,max_deletionlen,shortsplicedist,
+		   novelsplicingp,knownsplicingp,n_splice_paths,
+		   max_recursive_ends,min_support_indel,
+		   indel_support_mismatch_penalty,
+		   se_materialize_equiv_splice_alts_p);
   Path_fusion_setup(circularp,chromosome_ef64,genomelength,shortsplicedist,transcriptome,
 		    genomebits);
   Path_trim_setup(genomebits,genomebits_alt);
   Path_eval_setup(genomebits,genomebits_alt,transcriptome,
 		  circularp,chrsubsetp,altlocp,index1part,index1interval,
-		  output_type,md_report_snps_p,want_random_p,allow_soft_clips_p);
+		  output_type,md_report_snps_p,want_random_p,
+		  allow_soft_clips_start_p,allow_soft_clips_end_p,
+		  se_quality_ranker_p,se_quality_match_reward,
+		  se_quality_mismatch_penalty,se_quality_indel_penalty,
+		  se_quality_softclip_penalty,se_quality_error_rate_penalty,
+		  se_quality_rank_margin,se_quality_split_ranker_p,
+		  se_quality_split_gap_penalty,se_quality_split_segment_penalty);
   Pathpair_eval_setup(expected_pairlength,pairlength_deviation,transcriptome,
 		      circularp,chrsubsetp,altlocp,
 		      output_type,splicingp,resolve_inner_p,want_random_p,
-		      allow_soft_clips_p);
+		      allow_soft_clips_start_p,allow_soft_clips_end_p,
+		      paired_terminal_anchor_rescue_min_score,paired_terminal_anchor_slop,
+		      Parameters_tune == TUNE_ILLUMINA_PE,
+		      pathpair_equal_coverage_diff_tiebreak_p,
+		      score_match_reward,score_mismatch_penalty,
+		      score_indel_open_penalty,score_indel_extend_penalty,
+		      score_splice_unannotated_penalty,
+		      score_pair_transcript_discordance_penalty,
+		      score_pair_margin,score_min_read,score_min_pair);
   Path_print_alignment_setup(chromosome_iit,method_print_p,print_univdiagonal_p,print_nsnpdiffs_p);
   Path_print_m8_setup(chromosome_iit);
   Path_print_sam_setup(add_paired_nomappers_p,paired_flag_means_concordant_p,sam_insert_0M_p,
@@ -4039,10 +5858,16 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
 		       only_tr_consistent_p,circularp,
 		       clip_overlap_p,merge_overlap_p,merge_samechr_p,
 		       sam_multiple_primaries_p,sam_sparse_secondaries_p,
-		       chromosome_iit,transcript_iit,snps_iit,maskedp);
+		       chromosome_iit,transcript_iit,snps_iit,maskedp,timingp);
 
   Trpath_solve_setup(transcriptome,transcriptomebits,transcript_ef64,
-		     max_insertionlen,max_deletionlen,index1part_tr);
+		     max_insertionlen,max_deletionlen,index1part_tr,
+		     min_support_indel,indel_support_mismatch_penalty,
+		     paired_transcript_completion_p,
+		     tr_score_ranker_p,tr_score_match_reward,
+		     tr_score_mismatch_penalty,tr_score_indel_open_penalty,
+		     tr_score_indel_extend_penalty,tr_score_softclip_penalty,
+		     tr_score_transcript_discordance_penalty);
   Trpath_eval_setup(transcriptomebits);
   Trpath_convert_setup(transcriptome,chromosome_ef64);
   Transcriptome_search_setup(index1part_tr,index1interval_tr,tr_indexdb,
@@ -4051,10 +5876,73 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   Tr_extension_search_setup(transcriptome,transcriptomelength,transcript_ef64,
 			    transcriptomebits,tr_indexdb,index1part_tr,
 			    max_insertionlen,max_deletionlen,maxpaths_search);
+	  Trchain_search_setup(transcriptome,transcriptomelength,transcript_ef64,
+			       transcriptomebits,index1part_tr,maxpaths_search,
+			       tr_chain_seed_source,tr_chain_engine,tr_chain_rescue_indexdb,
+			       (int) tr_chain_rescue_index1part,
+			       tr_chain_fm_prefix,tr_chain_fm_min_seed_len,
+			       tr_chain_fm_max_occ,tr_chain_fm_max_sub_occ,
+			       tr_chain_max_indel,tr_chain_score_min_ratio,
+			       tr_chain_frontier_cap,tr_chain_max_seed_occ,
+			       tr_chain_max_anchors,
+			       score_match_reward,score_mismatch_penalty,
+			       score_indel_open_penalty,score_indel_extend_penalty);
 
-  Kmer_search_setup(index1part,index1interval,indexdb,chromosome_ef64,
+  Segmentelt_setup(max_insertionlen,shortsplicedist,max_deletionlen,
+		   paired_terminal_anchor_min_score,paired_terminal_anchor_slop);
+  Singleelt_setup(max_insertionlen,shortsplicedist,max_deletionlen);
+  Kmer_search_setup(index1part,index1interval,chromosome_ef64,chromosome_iit,
 		    genomebits,genomebits_alt,genomelength,
-		    max_insertionlen,max_deletionlen,shortsplicedist,splicingp);
+		    max_insertionlen,max_deletionlen,shortsplicedist,splicingp,
+		    segment_diagonal_algorithm,
+		    adaptive_hybrid_floor_per_kmer,
+		    adaptive_hybrid_budget_per_kmer,
+		    adaptive_hybrid_hard_max,
+		    adaptive_hybrid_weak_width_per_kmer,
+		    adaptive_hybrid_weak_support_divisor,
+		    adaptive_hybrid_strong_support_fraction,
+		    stats_weak_support_fraction,
+		    segment_repetitive_kmer_filter_p,
+		    segment_max_kmer_positions,
+		    minpure_diagonal_debug_p);
+  {
+    Minpure_Table_T genome_minpure = NULL;
+#ifdef GSNAP_DIAGONAL_ROW_STATS
+    bool need_minpure = true;
+#else
+    bool need_minpure = (paired_end_p == true && paired_mate_minpure_floor > 0U) ||
+      minpure_diagonal_debug_p == true ? true : false;
+#endif
+
+    if (need_minpure == true) {
+      genome_minpure = Minpure_table_new(genomesubdir,genome_fileroot,
+					 index1part,MINPURE_DEFAULT_M);
+      Kmer_search_setup_minpure(genome_minpure);
+    }
+    if (genome_minpure != NULL) {
+      fprintf(stderr,"Loaded genome pure-minimizer sidecar k=%d m=%d%s\n",
+	      Minpure_table_k(genome_minpure),Minpure_table_m(genome_minpure),
+	      (paired_end_p == true && paired_mate_minpure_floor > 0U) ? " for paired mate rescue" :
+	      (minpure_diagonal_debug_p == true ? " for diagonal debug" : " for diagonal stats"));
+#ifdef GSNAP_DIAGONAL_ROW_STATS
+    } else if (need_minpure == true) {
+      if (paired_end_p == true && paired_mate_minpure_floor > 0U) {
+	fprintf(stderr,"Error: --paired-mate-minpure-floor requires the genome pure-minimizer sidecar for paired mate rescue.\n");
+	exit(9);
+      } else {
+	fprintf(stderr,"No genome pure-minimizer sidecar found; DIAGROW minfreq columns will be empty\n");
+      }
+#else
+    } else if (paired_end_p == true && paired_mate_minpure_floor > 0U) {
+      fprintf(stderr,"Error: --paired-mate-minpure-floor requires the genome pure-minimizer sidecar for paired mate rescue.\n");
+      exit(9);
+    } else if (minpure_diagonal_debug_p == true) {
+      fprintf(stderr,"No genome pure-minimizer sidecar found; diagonal debug scores will be empty\n");
+#endif
+    } else {
+      /* No runtime user requested pure-minimizer scoring. */
+    }
+  }
   Extension_search_setup(mode,genomelength,
 			 circular_typeint,circularp,chromosome_ef64,
 			 genomebits,genomebits_alt,indexdb,indexdb_nonstd,
@@ -4091,6 +5979,9 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   /* Oligoindex_localdb_setup(chromosome_iit,circular_typeint,localdb,local1part); */
 
   min_querylength = index1part + index1interval - 1;
+  fprintf(stderr,"Read length filter: --min-read-length=%d, seed-min=%d, effective-min=%d\n",
+	  user_min_read_length,min_querylength,
+	  user_min_read_length > min_querylength ? user_min_read_length : min_querylength);
   Indexdb_setup(index1part);
   /* Localdb_setup(genome,genomelength,index1part,index1interval); */
 
@@ -4099,28 +5990,63 @@ worker_setup (char *transcriptomesubdir, char *transcriptome_fileroot,
   Spliceends_setup(circularp,genomebits,genomebits_alt,genomelength,
 		   indexdb,index1part,index1interval,
 		   max_insertionlen,max_deletionlen,shortsplicedist,
-		   allow_soft_clips_p,novelsplicingp,knownsplicingp);
+		   novelsplicingp,knownsplicingp,n_splice_paths);
   Indel_setup(genomebits,genomebits_alt,
 	      min_indel_end_matches,maskedp);
   Transcript_setup(pairmax_transcriptome,output_type,transcriptome,transcript_iit);
   Transcript_remap_setup(circularp,transcriptome,transcript_map_iit,transcript_chrnum_crosstable);
   Single_cell_setup(wellpos);
 
-  repetitive_ef64 = Repetitive_setup(index1part);
+  repetitive_ef64 = segment_repetitive_kmer_filter_p == true ?
+    Repetitive_setup(index1part) : (EF64_T) NULL;
   Pathstore_setup(chromosome_ef64);
+  Signature_setup(/*ksize*/index1part,msize);
   Stage1hr_setup(indexdb,indexdb_nonstd,tr_indexdb,repetitive_ef64,
-		 index1part,index1interval,index1part_tr,index1interval_tr,
+		 segment_repetitive_kmer_filter_p,
+		 index1part,index1interval,msize,index1part_tr,index1interval_tr,
 		 max_deletionlen,shortsplicedist,transcriptome);
   Stage1hr_single_setup(mode,index1part,index1interval,index1part_tr,
-			transcriptome,genome_align_p,transcriptome_align_p,
-			user_nmismatches_filter_float,user_mincoverage_filter_float,splicingp);
+			transcriptome,genome_align_p,transcriptome_align_p,refine_partial_tr_p,
+			tr_chain_search_p,
+				user_nmismatches_filter_float,user_mincoverage_filter_float,
+				single_end_split_paths_p,split_path_max_overlap,split_path_min_segment,
+				split_path_min_combined_coverage_float,splicingp,
+				se_ext_dedup_exact_chains_p,se_ext_equiv_prev_prune_p,
+				se_keep_trpath_candidates_p,
+				se_segment_stream_chains_p,
+				se_segment_dedup_exact_chains_p,se_segment_prefix_skip_p,
+					se_segment_qstart_anchor_cache_p,se_path_qend_local_cache_p,
+					se_emitted_path_dedup_p,se_segment_equiv_prev_prune_p,
+					se_segment_cache_threshold,se_segment_max_window,
+					se_segment_min_kmer_avg_quality,
+					se_segment_max_kmer_bad_bases,se_segment_bad_base_quality,
+					segment_max_avg_kmer_positions,
+					se_max_mismatches_filter_float,se_max_softclip_filter_float,
+					align_cascade);
   Stage1hr_paired_setup(mode,index1part,index1interval,index1part_tr,
 			transcriptome,genome_align_p,transcriptome_align_p,
 			genomebits,chromosome_ef64,
 			user_nmismatches_filter_float,user_mincoverage_filter_float,
 			max_deletionlen,max_insertlength,shortsplicedist,
 			splicingp,maxpaths_search,maxpaths_report,
-			circularp,pairmax_linear,pairmax_circular);
+			circularp,pairmax_linear,pairmax_circular,
+			paired_segment_exact_max_mismatch_divisor,
+			paired_mate_rescue_gapped_p,
+			paired_preeval_ungapped_mate_p,
+			paired_preeval_rescue_skip_p,
+			paired_segment_stream_chains_p,
+			paired_solve_all_anchor_first_p,
+			paired_postsolve_reliable_anchors_first_p,
+			paired_seg1_exhaustive_concordance_p,
+			paired_duplicate_auxinfo_frontier_p,
+			paired_mate_minpure_floor,
+			paired_transcript_completion_p,
+			paired_tr_adjacent_indel_repair_p,
+			tr_chain_search_p,
+			se_segment_min_kmer_avg_quality,
+			se_segment_max_kmer_bad_bases,se_segment_bad_base_quality,
+			segment_max_avg_kmer_positions,
+			align_cascade);
 
   Concordance_setup(subopt_levels,pairmax_transcriptome,pairmax_linear,pairmax_circular,
 		    circularp,merge_samechr_p,two_pass_p);
@@ -4149,12 +6075,20 @@ static void
 worker_localdb_setup (char *genomesubdir, char *genome_fileroot) {
 
   /* Note: localdb based on suffix arrays, so it is not SNP-tolerant */
-  if (use_localdb_p == false) { 
-    fprintf(stderr,"Not loading localdb files because --use-local=0\n");
+  if (splicingp == false) {
+    fprintf(stderr,"Not loading localdb files because reads are DNA-seq (without -N, -s, or -c flags)\n");
+    if (paired_end_p == true && paired_mate_minpure_floor > 0U) {
+      fprintf(stderr,"Error: --paired-mate-minpure-floor requires localdb-enabled RNA-seq mode (-N, -s, or -c).\n");
+      exit(9);
+    }
     localdb = (Localdb_T) NULL; 
 
-  } else if (splicingp == false) {
-    fprintf(stderr,"Not loading localdb files because reads are DNA-seq (without -N, -s, or -c flags)\n");
+  } else if (use_localdb_p == false) { 
+    fprintf(stderr,"Not loading localdb files because --use-localdb=0\n");
+    if (paired_end_p == true && paired_mate_minpure_floor > 0U) {
+      fprintf(stderr,"Error: --paired-mate-minpure-floor requires localdb, so --use-localdb=0 is invalid.\n");
+      exit(9);
+    }
     localdb = (Localdb_T) NULL; 
 
   } else {
@@ -4165,6 +6099,11 @@ worker_localdb_setup (char *genomesubdir, char *genome_fileroot) {
       fprintf(stderr,"Warning: Cannot find localdb files.  GSNAP will run on this older index, but there is a newer index format available\n");
     }
 #endif
+    if (paired_end_p == true && paired_mate_minpure_floor > 0U && localdb == NULL) {
+      fprintf(stderr,"Error: --paired-mate-minpure-floor requires localdb files for genome DB '%s' under '%s'.\n",
+	      genome_fileroot,genomesubdir);
+      exit(9);
+    }
   }
   
   Localdb_setup(genome,genomelength,index1part,index1interval);
@@ -4269,6 +6208,10 @@ worker_cleanup () {
 
   if (tr_indexdb != NULL) {
     Indexdb_free(&tr_indexdb);
+  }
+
+  if (tr_chain_rescue_indexdb != NULL) {
+    Indexdb_free(&tr_chain_rescue_indexdb);
   }
 
   if (transcriptome != NULL) {
@@ -4410,6 +6353,124 @@ main (int argc, char *argv[]) {
   /* If we are processing oligos (e.g., for repetitiveness), this
      needs to occur before the initial call to Inbuffer_fill_init */
   Oligo_setup(mode);
+
+  Parameters_resolve();
+  resolve_tune_defaults();
+  if (adaptive_hybrid_budget_per_kmer < adaptive_hybrid_floor_per_kmer) {
+    adaptive_hybrid_budget_per_kmer = adaptive_hybrid_floor_per_kmer;
+  }
+  fprintf(stderr,"Tune: %s, --max-read-length=%d\n",
+	  Parameters_tune_name(Parameters_tune),Parameters_max_readlength);
+  if (Parameters_tune == TUNE_SBX) {
+    fprintf(stderr,"SBX tune filters: --min-coverage=%g, --single-end-split-paths=%d, --split-path-max-overlap=%d, --split-path-min-segment=%d, --split-path-min-combined-coverage=%g, --max-recursive-ends=%d, --min-support-indel=%d, --indel-support-mismatch-penalty=%d, --max-deletions=%d\n",
+	    user_mincoverage_filter_float,single_end_split_paths_p,
+	    split_path_max_overlap,split_path_min_segment,split_path_min_combined_coverage_float,
+	    max_recursive_ends,min_support_indel,indel_support_mismatch_penalty,max_deletionlen);
+    fprintf(stderr,"SBX tune single-end chain controls: --se-ext-equiv-prev-prune=%d, --se-segment-stream-chains=%d, --se-segment-prefix-skip=%d, --se-segment-equiv-prev-prune=%d\n",
+	    se_ext_equiv_prev_prune_p,se_segment_stream_chains_p,
+	    se_segment_prefix_skip_p,se_segment_equiv_prev_prune_p);
+    fprintf(stderr,"SBX tune transcriptome/genome recovery: --se-keep-trpath-candidates=%d, --se-materialize-equiv-splice-alts=%d, --fix-splice-boundary-indels=%d\n",
+	    se_keep_trpath_candidates_p,se_materialize_equiv_splice_alts_p,
+	    Parameters_fix_splice_boundary_indels_p);
+  }
+  fprintf(stderr,"Alignment cascade: --align-cascade=%s\n",align_cascade_spec);
+  fprintf(stderr,"Alignment scoring: --score-match=%g, --score-mismatch=%g, --score-indel-open=%g, --score-indel-extend=%g, --score-splice-unannotated=%g, --score-pair-transcript-discordance=%g, --score-pair-margin=%g, --score-min-read=%g, --score-min-pair=%g\n",
+	  score_match_reward,score_mismatch_penalty,
+	  score_indel_open_penalty,score_indel_extend_penalty,
+	  score_splice_unannotated_penalty,
+	  score_pair_transcript_discordance_penalty,
+	  score_pair_margin,score_min_read,score_min_pair);
+  fprintf(stderr,"Transcriptome method policy: --tr-chain-search=%s%s\n",
+	  tr_chain_search_p == true ? "chain" : "legacy",
+	  tr_chain_search_p == true ?
+	  " (TR-chain replaces legacy exact/prevalent/tr.ext)" :
+	  " (legacy exact/prevalent/tr.ext)");
+  if (tr_chain_search_p == true) {
+	    fprintf(stderr,"TR-chain search: --tr-chain-seed-source=%s, --tr-chain-engine=%s, --tr-chain-rescue-transcriptome=%s, --tr-chain-fm-prefix=%s, --tr-chain-fm-seed-policy=smem-adaptive-prefix-ladder, --tr-chain-fm-min-seed-len=%d, --tr-chain-fm-max-occ=%d, --tr-chain-fm-max-sub-occ=%d, --tr-chain-max-indel=%d, --tr-chain-score-min-ratio=%g, --tr-chain-frontier-cap=%d, --tr-chain-max-seed-occ=%d, --tr-chain-max-anchors=%d\n",
+		    (tr_chain_seed_source & TR_CHAIN_SEED_FM) != 0 ? "fm" :
+		    (tr_chain_seed_source & TR_CHAIN_SEED_K13) != 0 ? "k13" : "none",
+		    tr_chain_engine == TR_CHAIN_ENGINE_FM_LCHAIN ? "fm-lchain" : "trdiag",
+		    tr_chain_rescue_transcriptome_dbroot == NULL ? "none" : tr_chain_rescue_transcriptome_dbroot,
+		    tr_chain_fm_prefix == NULL ? "none" : tr_chain_fm_prefix,
+		    tr_chain_fm_min_seed_len,tr_chain_fm_max_occ,tr_chain_fm_max_sub_occ,
+		    tr_chain_max_indel,tr_chain_score_min_ratio,tr_chain_frontier_cap,
+		    tr_chain_max_seed_occ,tr_chain_max_anchors);
+  }
+  fprintf(stderr,"Alignment long-gap scoring: --score-long-indel-open=%g, --score-long-indel-extend=%g\n",
+	  score_long_indel_open_penalty,score_long_indel_extend_penalty);
+  if (paired_end_p == true) {
+    fprintf(stderr,"Paired terminal anchor retention: --paired-terminal-anchor-min-score=%d, --paired-terminal-anchor-slop=%d\n",
+	    paired_terminal_anchor_min_score,paired_terminal_anchor_slop);
+    fprintf(stderr,"Paired terminal anchor rescue min score: %d\n",
+	    paired_terminal_anchor_rescue_min_score);
+    fprintf(stderr,"Paired segment exact max mismatch divisor: --paired-segment-exact-max-mismatch-divisor=%d\n",
+	    paired_segment_exact_max_mismatch_divisor);
+    fprintf(stderr,"Paired mate rescue gapped completion: --paired-mate-rescue-gapped=%d\n",
+	    paired_mate_rescue_gapped_p);
+    fprintf(stderr,"Paired pre-eval ungapped mate rescue: --paired-preeval-ungapped-mate=%d\n",
+	    paired_preeval_ungapped_mate_p);
+    fprintf(stderr,"Paired pre-eval rescue skip: --paired-preeval-rescue-skip=%d\n",
+	    paired_preeval_rescue_skip_p);
+    fprintf(stderr,"Paired SEGMENT1 chain streaming: --paired-segment-stream-chains=%d\n",
+	    paired_segment_stream_chains_p);
+    fprintf(stderr,"Paired solve-all anchor-first rescue: --paired-solve-all-anchor-first=%d\n",
+	    paired_solve_all_anchor_first_p);
+    fprintf(stderr,"Paired post-solve reliable anchors first: --paired-postsolve-reliable-anchors-first=%d\n",
+	    paired_postsolve_reliable_anchors_first_p);
+    fprintf(stderr,"Paired SEG1 exhaustive concordance: --paired-seg1-exhaustive-concordance=%d\n",
+	    paired_seg1_exhaustive_concordance_p);
+    fprintf(stderr,"Paired duplicate auxinfo frontier: --paired-duplicate-auxinfo-frontier=%d\n",
+	    paired_duplicate_auxinfo_frontier_p);
+    fprintf(stderr,"Paired mate rescue pure-minimizer floor: --paired-mate-minpure-floor=%u\n",
+	    paired_mate_minpure_floor);
+    fprintf(stderr,"Pure-minimizer diagonal debug: --minpure-diagonal-debug=%d\n",
+	    minpure_diagonal_debug_p);
+    fprintf(stderr,"Pathpair equal-coverage diff tiebreak: --pathpair-equal-coverage-diff-tiebreak=%d\n",
+	    pathpair_equal_coverage_diff_tiebreak_p);
+    fprintf(stderr,"Paired transcript completion: --paired-transcript-completion=%d\n",
+	    paired_transcript_completion_p);
+    fprintf(stderr,"Paired transcript adjacent indel repair: --paired-tr-adjacent-indel-repair=%d\n",
+	    paired_tr_adjacent_indel_repair_p);
+    fprintf(stderr,
+	    "Transcriptome score ranker: --tr-score-ranker=%d, --tr-score-match-reward=%g, --tr-score-mismatch-penalty=%g, --tr-score-indel-open-penalty=%g, --tr-score-indel-extend-penalty=%g, --tr-score-softclip-penalty=%g, --tr-score-transcript-discordance-penalty=%g\n",
+	    tr_score_ranker_p,tr_score_match_reward,tr_score_mismatch_penalty,
+	    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+	    tr_score_softclip_penalty,tr_score_transcript_discordance_penalty);
+  } else if (single_end_split_paths_p == true && Parameters_tune != TUNE_SBX) {
+    fprintf(stderr,"Single-end split path retention: --single-end-split-paths=1, --split-path-max-overlap=%d, --split-path-min-segment=%d, --split-path-min-combined-coverage=%g\n",
+	    split_path_max_overlap,split_path_min_segment,split_path_min_combined_coverage_float);
+  }
+  fprintf(stderr,
+	  "Single-end experimental controls: --se-ext-dedup-exact-chains=%d, --se-ext-equiv-prev-prune=%d, --se-keep-trpath-candidates=%d, --se-materialize-equiv-splice-alts=%d, --se-segment-stream-chains=%d, --se-segment-dedup-exact-chains=%d, --se-segment-prefix-skip=%d, --se-segment-qstart-anchor-cache=%d, --se-path-qend-local-cache=%d, --se-emitted-path-dedup=%d, --se-segment-equiv-prev-prune=%d, --se-segment-cache-threshold=%d, --se-segment-max-window=%d\n",
+	  se_ext_dedup_exact_chains_p,se_ext_equiv_prev_prune_p,
+	  se_keep_trpath_candidates_p,se_materialize_equiv_splice_alts_p,
+	  se_segment_stream_chains_p,
+	  se_segment_dedup_exact_chains_p,se_segment_prefix_skip_p,
+	  se_segment_qstart_anchor_cache_p,se_path_qend_local_cache_p,
+	  se_emitted_path_dedup_p,se_segment_equiv_prev_prune_p,
+	  se_segment_cache_threshold,se_segment_max_window);
+  fprintf(stderr,
+	  "Single-end path filters: --se-max-mismatches=%g, --se-max-softclip=%g\n",
+	  se_max_mismatches_filter_float,se_max_softclip_filter_float);
+  fprintf(stderr,
+	  "Segment kmer filters: --se-segment-min-kmer-avg-quality=%g, --se-segment-max-kmer-bad-bases=%d, --se-segment-bad-base-quality=%d, --segment-max-avg-kmer-positions=%d, --segment-repetitive-kmer-filter=%d, --segment-max-kmer-positions=%d\n",
+	  se_segment_min_kmer_avg_quality,se_segment_max_kmer_bad_bases,
+	  se_segment_bad_base_quality,segment_max_avg_kmer_positions,
+	  segment_repetitive_kmer_filter_p,segment_max_kmer_positions);
+  fprintf(stderr,
+	  "Segment diagonal algorithm: --segment-diagonal-algorithm=%s, --segment-diagonal-adaptive-hybrid-floor-per-kmer=%d, --segment-diagonal-adaptive-hybrid-budget-per-kmer=%d, --segment-diagonal-adaptive-hybrid-hard-max=%d, --segment-diagonal-adaptive-hybrid-weak-width-per-kmer=%d, --segment-diagonal-adaptive-hybrid-weak-support-divisor=%d, --segment-diagonal-adaptive-hybrid-strong-support-fraction=%g, --segment-diagonal-stats-weak-support-fraction=%g\n",
+	  segment_diagonal_algorithm_string(segment_diagonal_algorithm),
+	  adaptive_hybrid_floor_per_kmer,adaptive_hybrid_budget_per_kmer,
+	  adaptive_hybrid_hard_max,adaptive_hybrid_weak_width_per_kmer,
+	  adaptive_hybrid_weak_support_divisor,adaptive_hybrid_strong_support_fraction,
+	  stats_weak_support_fraction);
+  fprintf(stderr,
+	  "Single-end quality ranker: --se-quality-ranker=%d, --se-quality-match-reward=%g, --se-quality-mismatch-penalty=%g, --se-quality-indel-penalty=%g, --se-quality-softclip-penalty=%g, --se-quality-error-rate-penalty=%g, --se-quality-rank-margin=%g, --se-quality-split-ranker=%d, --se-quality-split-gap-penalty=%g, --se-quality-split-segment-penalty=%g\n",
+	  se_quality_ranker_p,se_quality_match_reward,se_quality_mismatch_penalty,
+	  se_quality_indel_penalty,se_quality_softclip_penalty,
+	  se_quality_error_rate_penalty,se_quality_rank_margin,
+	  se_quality_split_ranker_p,se_quality_split_gap_penalty,
+	  se_quality_split_segment_penalty);
 
   /* Needs to be after open_input_streams_parser to get correct fastq_format_p */
   Shortread_setup(acc_fieldi_start,acc_fieldi_end,force_single_end_p,
@@ -4555,6 +6616,34 @@ main (int argc, char *argv[]) {
 					   /*required_index1part*/0,/*required_index1interval*/0,
 					   offsetsstrm_access,positions_access,sharedp,
 					   multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p);
+    if (tr_chain_rescue_transcriptome_dbroot != NULL) {
+      char *rescue_transcriptomesubdir, *rescue_transcriptome_fileroot, *rescue_dbversion;
+      Width_T rescue_index1interval;
+
+      rescue_transcriptomesubdir =
+	Datadir_find_genomesubdir(&rescue_transcriptome_fileroot,&rescue_dbversion,
+				  user_transcriptomedir,tr_chain_rescue_transcriptome_dbroot);
+      FREE(rescue_dbversion);
+
+      tr_chain_rescue_indexdb =
+	Indexdb_new_transcriptome(&tr_chain_rescue_index1part,&rescue_index1interval,
+				  rescue_transcriptomesubdir,rescue_transcriptome_fileroot,
+				  /*idx_filesuffix*/"ref",/*snps_root*/NULL,
+				  /*required_index1part*/11,/*required_index1interval*/1,
+				  offsetsstrm_access,positions_access,sharedp,
+				  multiple_sequences_p,preload_shared_memory_p,unload_shared_memory_p);
+      if (tr_chain_rescue_index1part != 11 || rescue_index1interval != 1) {
+	fprintf(stderr,"--tr-chain-rescue-transcriptome must point to a direct K11 interval-1 transcriptome index; got k=%d interval=%d\n",
+		tr_chain_rescue_index1part,rescue_index1interval);
+	exit(9);
+      } else {
+	fprintf(stderr,"TR-chain rescue transcriptome: %s (k=11 interval=1).  It must share transcript coordinates with primary -c %s\n",
+		tr_chain_rescue_transcriptome_dbroot,transcriptome_dbroot);
+      }
+
+      FREE(rescue_transcriptomesubdir);
+      FREE(rescue_transcriptome_fileroot);
+    }
     nalignments = IIT_total_nintervals(transcript_map_iit);
     knownsplicing = Knownsplicing_from_transcriptome(transcriptome,nalignments,
 						     chromosome_ef64,genomelength,/*intron_level_p*/true);
@@ -4909,13 +6998,12 @@ Usage: gsnap [OPTIONS...] <FASTA file>, or\n\
   fprintf(stdout,"\
   -C, --transcriptdir=directory  Transcriptome directory.  Default is the value for --dir above\n\
   -c, --transcriptdb=STRING      Transcriptome database\n\
-  --transcriptome-mode=STRING    Options: assist, only, annotate (default).  The option assist means\n\
-                                   to try transcriptome alignment first, but then use genomic alignment\n\
-                                   if nothing is found.  The option only means to try transcriptome\n\
-                                   alignment only.  The option annotate means to try only genomic\n\
-                                   alignment, to use the transcriptome only for annotation; this is\n\
-                                   the fastest option.  In the other two options, annotation is also\n\
-                                   performed\n\
+  --align-cascade=STRING         ALL, or comma-separated stages to allow:\n\
+                                   TR-EXACT, TR-EXTN, TR-PREVALENT, TR-CHAIN,\n\
+                                   GENOME-EXACT,\n\
+                                   GENOME-EXTN, GENOME-SEGMENT, GENOME-MATE-RESCUE,\n\
+                                   GENOME-SOLVE-ALL, GENE-FUSION, PAIR-RESOLVE.\n\
+                                   TR stages require --transcriptdb\n\
 \n\
 ");
 
@@ -4928,6 +7016,9 @@ Usage: gsnap [OPTIONS...] <FASTA file>, or\n\
   --sampling=INT                 Sampling to use in genome database.  If not specified, the program\n\
                                    will find the smallest available sampling value in the genome database\n\
                                    within selected k-mer size\n\
+  -j, --minimizer=INT            Minimizer length to use in genome database\n\
+                                   If not specified, the program will find the highest available\n\
+                                   minimizer length in the genome database, if any exist\n\
   --align-fraction=FLOAT         Process only the given fraction of reads, selected at random\n\
                                    If --align-fraction and --part are given, --align-fraction takes precedence\n\
   -q, --part=INT/INT             Process only the i-th out of every n sequences\n\
@@ -4948,6 +7039,45 @@ Usage: gsnap [OPTIONS...] <FASTA file>, or\n\
   --endtrim-length=INT           Amount of trim to remove from the end of every read before alignment\n\
                                    (default %d)\n\
 ",endtrim_length);
+
+  fprintf(stdout,"\
+  --tune=LIBRARY                 Per-library sequencing preset (sets --max-read-length default,\n\
+                                   plus library-specific filter defaults)\n\
+                                   illumina-pe  (default, cap %d)\n\
+                                   illumina-se  (cap %d)\n\
+                                   sbx          (cap %d; default --min-coverage=0.25,\n\
+                                                 --single-end-split-paths=1,\n\
+                                                 stable single-end chain controls on,\n\
+                                                 --fix-splice-boundary-indels=1)\n\
+                                   pacbio       (cap %d)\n\
+                                   nanopore     (cap %d)\n\
+  --max-read-length=INT          Hard cap on per-read sequence/quality length.  Overrides any\n\
+                                   --tune preset.  Reads longer than this cause GSNAP to exit\n\
+                                   with a clear error.  Current default depends on --tune.\n\
+  --min-read-length=INT          Minimum post-trim read length to align.  Effective minimum\n\
+                                   is at least the index seed minimum.  Tune defaults:\n\
+                                   illumina-pe/se %d, sbx %d, pacbio/nanopore %d.\n\
+                                   Explicit CLI values override --tune.\n\
+  --fix-middle-exon=1|0          Enable (1) or disable (0) middle-exon resolution in\n\
+                                   find_middle_exon.  Default %d.\n\
+  --min-short-middle-exon=INT    Minimum middle-exon length to consider for the\n\
+                                   short middle-exon rescue.  Default %d.\n\
+  --fix-splice-boundary-indels=1|0\n\
+                                 Enable (1) or disable (0) short indel rescue\n\
+                                   exactly at a splice boundary.  Base default %d;\n\
+                                   --tune=sbx defaults to 1.\n\
+",
+DEFAULT_MAX_READLENGTH_ILLUMINA_PE,
+DEFAULT_MAX_READLENGTH_ILLUMINA_SE,
+DEFAULT_MAX_READLENGTH_SBX,
+DEFAULT_MAX_READLENGTH_PACBIO,
+DEFAULT_MAX_READLENGTH_NANOPORE,
+DEFAULT_MIN_READ_LENGTH,
+DEFAULT_MIN_READ_LENGTH_SBX,
+DEFAULT_MIN_READ_LENGTH_LONGREAD,
+(int) DEFAULT_FIX_MIDDLE_EXON,
+DEFAULT_MIN_SHORT_MIDDLE_EXON,
+(int) DEFAULT_FIX_SPLICE_BOUNDARY_INDELS);
 
   fprintf(stdout,"\
   --orientation=STRING           Orientation of paired-end reads\n\
@@ -5044,11 +7174,165 @@ is still designed to be fast.\n\
                                    of each read length.  Otherwise, treated as an integral number\n\
                                    of mismatches (including indel and splicing penalties).\n\
                                    Default is 0.3\n\
+  --single-end-split-paths=INT   Whether single-end path evaluation may retain complementary\n\
+                                   partial genomic paths by combined read-span coverage (default %d)\n\
+  --split-path-max-overlap=INT   Maximum shared read bases for two retained single-end paths to be\n\
+                                   considered complementary instead of alternatives (default %d)\n\
+  --split-path-min-segment=INT   Minimum per-path coverage for single-end split-path retention\n\
+                                   (default %d)\n\
+  --split-path-min-combined-coverage=FLOAT\n\
+                                 Minimum combined read-span coverage for retained single-end split\n\
+                                   paths.  Values 0.0-1.0 are read-length fractions (default %g)\n\
+  --se-ext-dedup-exact-chains=INT\n\
+                                 Enable exact duplicate-chain skipping in single-end\n\
+                                   Extension search (default %d)\n\
+  --se-ext-equiv-prev-prune=INT\n\
+                                 Suppress extra equal-score/equal-splice predecessor\n\
+                                   links in single-end Extension chaining (default %d)\n\
+  --se-keep-trpath-candidates=INT\n\
+                                 Keep converted transcriptome paths for final ranking\n\
+                                   during single-end genome fallback (default %d)\n\
+  --se-materialize-equiv-splice-alts=INT\n\
+                                 Collapse equivalent splice-alt partners into a real\n\
+                                   extension path so recursion can continue (default %d)\n\
+  --se-segment-stream-chains=INT\n\
+                                 Stream single-end Segment chains to path solving instead of\n\
+                                   materializing all chains first (default %d)\n\
+  --se-segment-dedup-exact-chains=INT\n\
+                                 Skip exact duplicate Segment chains while streaming (default %d)\n\
+  --se-segment-prefix-skip=INT  Skip Segment chain subtrees with cached failed head+next\n\
+                                   prefixes (default %d)\n\
+  --se-segment-qstart-anchor-cache=INT\n\
+                                 Reuse single-anchor qstart solves in Segment right-chain\n\
+                                   solving (default %d)\n\
+  --se-path-qend-local-cache=INT\n\
+                                 Cache recursive qend-local path solves (default %d)\n\
+  --se-emitted-path-dedup=INT   Suppress duplicate emitted paths from cached chain solving\n\
+                                   (default %d)\n\
+  --se-segment-equiv-prev-prune=INT\n\
+                                 Prune equivalent right-chain predecessors while streaming\n\
+                                   Segment chains (default %d)\n\
+  --se-segment-cache-threshold=INT\n\
+                                 Number of streamed Segment chains before path caches activate\n\
+                                   (default %d)\n\
+  --se-segment-max-window=INT\n\
+                                 Skip streamed Segment chain windows larger than INT\n\
+                                   (0 disables; default %d)\n\
+  --se-segment-min-kmer-avg-quality=FLOAT\n\
+                                 Skip Segment kmers with average Phred quality below FLOAT\n\
+                                   (<0 disables; default %g for illumina-pe/se;\n\
+                                   10 for sbx/pacbio/nanopore)\n\
+  --se-segment-max-kmer-bad-bases=INT\n\
+                                 Skip Segment kmers with more than INT bad bases\n\
+                                   (<0 disables; default %d for illumina-pe/se;\n\
+                                   3 for sbx/pacbio/nanopore, so 4 bad bases skip)\n\
+  --se-segment-bad-base-quality=INT\n\
+                                 Phred quality below INT counts as a bad Segment kmer base\n\
+                                   (default %d for illumina-pe/se;\n\
+                                   5 for sbx/pacbio/nanopore)\n\
+  --segment-max-avg-kmer-positions=INT\n\
+                                 If avg plus+minus positions per surviving Segment kmer\n\
+                                   exceeds INT, remove highest-position kmers until the\n\
+                                   remaining average is at or below INT\n\
+                                   (0 disables; base default %d; --tune illumina-pe/se\n\
+                                   resolves to 100000, sbx/pacbio/nanopore to 10000\n\
+                                   unless this CLI is explicit)\n\
+  --segment-repetitive-kmer-filter=INT\n\
+                                 Apply the built-in simple-repeat kmer mask during\n\
+                                   genomic Segment kmer collection and cleanup\n\
+                                   (0=no, 1=yes; default %d)\n\
+  --segment-max-kmer-positions=INT\n\
+                                 Remove a Segment kmer strand before exhaustive diagonal\n\
+                                   construction if its raw genomic positions exceed INT\n\
+                                   (0 disables; default %d)\n\
+  --segment-diagonal-algorithm=STRING\n\
+                                 Segment diagonal retention algorithm: width-or-count keeps\n\
+                                   diagonals with near-maximum query span or maximum kmer\n\
+                                   support; adaptive-hybrid additionally applies fanout-triggered\n\
+                                   hybrid width/count/density ranking plus coordinate spread\n\
+                                   (default adaptive-hybrid after tune resolution)\n\
+  --segment-diagonal-adaptive-hybrid-floor-per-kmer=INT\n\
+                                 Minimum selected Segment diagonals kept per effective kmer\n\
+                                   when adaptive-hybrid triggers (default %d)\n\
+  --segment-diagonal-adaptive-hybrid-budget-per-kmer=INT\n\
+                                 Adaptive-hybrid selected diagonal budget per effective kmer\n\
+                                   when filtering triggers (default %d)\n\
+  --segment-diagonal-adaptive-hybrid-hard-max=INT\n\
+                                 Optional raw adaptive-hybrid diagonal cap after per-kmer\n\
+                                   budgeting (0 disables; default %d)\n\
+  --segment-diagonal-adaptive-hybrid-weak-width-per-kmer=INT\n\
+                                 Adaptive-hybrid weak-width fanout threshold per effective\n\
+                                   kmer (default %d)\n\
+  --segment-diagonal-adaptive-hybrid-weak-support-divisor=INT\n\
+                                 Adaptive-hybrid weak-fanout strong-support divisor\n\
+                                   (default %d)\n\
+  --segment-diagonal-adaptive-hybrid-strong-support-fraction=FLOAT\n\
+                                 Support fraction required for a strongly supported diagonal\n\
+                                   in adaptive-hybrid (default %g)\n\
+  --segment-diagonal-stats-weak-support-fraction=FLOAT\n\
+                                 Diagnostic-only support fraction reported as weak Segment\n\
+                                   support (default %g)\n\
+  --se-max-mismatches=FLOAT      Single-end maximum mismatches allowed, as a fraction\n\
+                                   of read length or an integer count (<0 disables;\n\
+                                   default %g)\n\
+  --se-max-softclip=FLOAT        Single-end maximum soft-clipped bases allowed, as a\n\
+                                   fraction of read length or an integer count (<0\n\
+                                   disables; default %g)\n\
+  --se-quality-ranker=INT        Rank single-end paths by a quality score before\n\
+                                   coverage-based tie-breaking (default %d)\n\
+  --se-quality-match-reward=FLOAT\n\
+                                 Reward per matched base for single-end quality ranker\n\
+                                   (default %g)\n\
+  --se-quality-mismatch-penalty=FLOAT\n\
+                                 Penalty per mismatch for single-end quality ranker\n\
+                                   (default %g)\n\
+  --se-quality-indel-penalty=FLOAT\n\
+                                 Penalty per inserted/deleted base for single-end quality\n\
+                                   ranker (default %g)\n\
+  --se-quality-softclip-penalty=FLOAT\n\
+                                 Penalty per soft-clipped or otherwise uncovered base\n\
+                                   for single-end quality ranker (default %g)\n\
+  --se-quality-error-rate-penalty=FLOAT\n\
+                                 Penalty multiplier for error burden scaled by error\n\
+                                   rate, errors*(errors/aligned_bases) (default %g)\n\
+  --se-quality-rank-margin=FLOAT Keep paths within this fraction of the best single-end\n\
+                                   quality score for old comparator tie-breaking\n\
+                                   (default %g)\n\
+  --se-quality-split-ranker=INT  Rank compatible split-path sets by combined quality\n\
+                                   before greedy overlap pruning (default %d)\n\
+  --se-quality-split-gap-penalty=FLOAT\n\
+                                 Penalty per uncovered query base between split-path\n\
+                                   set members (default %g)\n\
+  --se-quality-split-segment-penalty=FLOAT\n\
+                                 Penalty per additional split-path set member\n\
+                                   for single-end quality ranker (default %g)\n\
   --query-unk-mismatch=INT       Whether to count unknown (N) characters in the query as a mismatch\n\
                                    (0=no (default), 1=yes)\n\
   --genome-unk-mismatch=INT      Whether to count unknown (N) characters in the genome as a mismatch\n\
                                    (0=no, 1=yes).  If --use-mask is specified, default is no, otherwise yes.\n\
-");
+",single_end_split_paths_p,split_path_max_overlap,split_path_min_segment,
+		  split_path_min_combined_coverage_float,
+		  se_ext_dedup_exact_chains_p,se_ext_equiv_prev_prune_p,
+		  se_keep_trpath_candidates_p,se_materialize_equiv_splice_alts_p,
+		  se_segment_stream_chains_p,
+	  se_segment_dedup_exact_chains_p,se_segment_prefix_skip_p,
+	  se_segment_qstart_anchor_cache_p,se_path_qend_local_cache_p,
+	  se_emitted_path_dedup_p,se_segment_equiv_prev_prune_p,
+	  se_segment_cache_threshold,se_segment_max_window,
+	  se_segment_min_kmer_avg_quality,se_segment_max_kmer_bad_bases,
+	  se_segment_bad_base_quality,
+	  segment_max_avg_kmer_positions,
+	  segment_repetitive_kmer_filter_p,segment_max_kmer_positions,
+	  adaptive_hybrid_floor_per_kmer,
+	  adaptive_hybrid_budget_per_kmer,adaptive_hybrid_hard_max,
+	  adaptive_hybrid_weak_width_per_kmer,adaptive_hybrid_weak_support_divisor,
+	  adaptive_hybrid_strong_support_fraction,stats_weak_support_fraction,
+	  se_max_mismatches_filter_float,se_max_softclip_filter_float,
+	  se_quality_ranker_p,se_quality_match_reward,se_quality_mismatch_penalty,
+	  se_quality_indel_penalty,se_quality_softclip_penalty,
+	  se_quality_error_rate_penalty,se_quality_rank_margin,
+	  se_quality_split_ranker_p,se_quality_split_gap_penalty,
+	  se_quality_split_segment_penalty);
 
   fprintf(stdout,"\
   --maxsearch=INT                Maximum number of alignments to find (default %d).\n\
@@ -5060,6 +7344,18 @@ is still designed to be fast.\n\
   fprintf(stdout,"\
   --indel-endlength=INT          Minimum length at end required for indel alignments (default %d)\n\
 ",min_indel_end_matches);
+  fprintf(stdout,"\
+  --max-recursive-ends=INT       Maximum recursive end-extension depth for indel/splice\n\
+                                   recovery (default %d)\n\
+",max_recursive_ends);
+  fprintf(stdout,"\
+  --min-support-indel=INT        Minimum adjusted anchor support required for indel\n\
+                                   alignments (default %d)\n\
+",min_support_indel);
+  fprintf(stdout,"\
+  --indel-support-mismatch-penalty=INT\n\
+                                 Mismatch penalty used in indel support checks (default %d)\n\
+",indel_support_mismatch_penalty);
 
   fprintf(stdout,"\
   --max-insertions=INT           Maximum number of insertions allowed (default %d)\n\
@@ -5175,6 +7471,48 @@ is still designed to be fast.\n\
 ");
   fprintf(stdout,"\n");
 
+  /* TGGA options */
+  fprintf(stdout,"Options for TGGA (transcriptome-guided genomic alignment)\n");
+  fprintf(stdout,"\
+  --refine-partial-tgga           Allows partial alignments to transcriptome to be refined\n");
+  fprintf(stdout,"\
+  --tr-chain-search=STRING        Compatibility selector: legacy or chain.\n\
+                                   Prefer --align-cascade=TR-CHAIN for TR-chain\n\
+                                   and TR-EXACT,TR-PREVALENT,TR-EXTN for legacy\n\
+                                   (default %s)\n\
+  --tr-chain-seed-source=STRING   Seed source for TR-CHAIN: k13 or fm\n\
+                                   (default k13)\n\
+  --tr-chain-engine=STRING        Chain engine for TR-CHAIN: trdiag or fm-lchain\n\
+                                   (default trdiag).  fm-lchain requires\n\
+                                   --tr-chain-seed-source=fm\n\
+  --tr-chain-rescue-transcriptome=STRING\n\
+                                   Optional same-coordinate direct K11 transcriptome DB\n\
+                                   used only when primary K13 TR-chain emits zero paths\n\
+  --tr-chain-fm-prefix=STRING     Minibwa FM transcriptome index prefix for\n\
+                                   --tr-chain-seed-source=fm\n\
+  --tr-chain-fm-min-seed-len=INT  Minimum FM seed length (default %d)\n\
+  --tr-chain-fm-max-occ=INT       Maximum FM interval occurrences materialized\n\
+                                   per seed interval (default %d)\n\
+  --tr-chain-fm-max-sub-occ=INT   Maximum occurrence count for FM sub-SMEM\n\
+                                   expansion (default %d)\n\
+  --tr-chain-max-indel=INT        Maximum transcript-space insertion/deletion length allowed\n\
+                                   between chained anchors (default %d)\n\
+  --tr-chain-score-min-ratio=FLOAT\n\
+                                   Keep TR-chain candidates with score >= this fraction\n\
+                                   of the best score before conversion (default %.2f)\n\
+  --tr-chain-frontier-cap=INT     Maximum TR-chain candidates converted after score\n\
+                                   filtering (default %d)\n\
+  --tr-chain-max-seed-occ=INT     Maximum occurrences sampled per query k-mer/strand\n\
+                                   for direct transcriptome index seeds; 0=unlimited\n\
+                                   (default %d)\n\
+  --tr-chain-max-anchors=INT      Maximum scored anchors chained per read/seed-source;\n\
+                                   0=unlimited (default %d)\n",
+		  tr_chain_search_p == true ? "chain" : "legacy",
+		  tr_chain_fm_min_seed_len,tr_chain_fm_max_occ,
+		  tr_chain_fm_max_sub_occ,tr_chain_max_indel,
+		  tr_chain_score_min_ratio,tr_chain_frontier_cap,
+		  tr_chain_max_seed_occ,tr_chain_max_anchors);
+  fprintf(stdout,"\n");
 
   /* Paired-end options */
   fprintf(stdout,"Options for paired-end reads\n");
@@ -5191,10 +7529,6 @@ is still designed to be fast.\n\
 ",pairmax_rna);
 
   fprintf(stdout,"\
-  --resolve-inner=INT            Whether to resolve soft-clipping on the insides of paired-end reads (default %d)\n\
-",resolve_inner_p);
-
-  fprintf(stdout,"\
   --pairexpect=INT               Expected paired-end length, used for resolving soft-clipping on the insides\n\
                                    of paired-end reads, and for pairing DNA-seq reads (default %d)\n\
 ",expected_pairlength);
@@ -5203,6 +7537,178 @@ is still designed to be fast.\n\
   --pairdev=INT                  Allowable deviation from expected paired-end length, used for\n\
                                    resolving soft-clipping on the insides of paired-end reads (default %d).\n\
 ",pairlength_deviation);
+
+  fprintf(stdout,"\
+  --paired-terminal-anchor-min-score=INT\n\
+                                 Minimum segment-chain score for retaining a non-best terminal anchor\n\
+                                   for paired-end concordance (default %d).\n\
+",paired_terminal_anchor_min_score);
+
+  fprintf(stdout,"\
+  --paired-terminal-anchor-slop=INT\n\
+                                 Number of bases from either read end still considered terminal for\n\
+                                   paired-end anchor retention (default %d).\n\
+",paired_terminal_anchor_slop);
+
+  fprintf(stdout,"\
+  --paired-segment-exact-max-mismatch-divisor=INT\n\
+                                 Divisor for retaining low-mismatch full-read SEGMENT1 hits\n\
+                                   before paired-end chain solving.  The maximum mismatches\n\
+                                   retained are read length / INT (default %d).\n\
+",paired_segment_exact_max_mismatch_divisor);
+
+  fprintf(stdout,"\
+  --paired-mate-rescue-gapped=INT\n\
+                                 Allow paired mate rescue to run bounded gapped\n\
+                                   local completion (0=no, 1=yes; default %d).\n\
+",paired_mate_rescue_gapped_p);
+
+  fprintf(stdout,"\
+  --paired-preeval-ungapped-mate=INT\n\
+                                 Allow pre-eval paired mate rescue to emit bounded\n\
+                                   ungapped mate completions before pair evaluation\n\
+                                   (0=no, 1=yes; default %d).\n\
+",paired_preeval_ungapped_mate_p);
+
+  fprintf(stdout,"\
+  --paired-preeval-rescue-skip=INT\n\
+                                 Skip pre-eval paired mate rescue when an existing\n\
+                                   paired result is already score-complete or has\n\
+                                   zero paired end penalty (0=no, 1=yes; default %d).\n\
+",paired_preeval_rescue_skip_p);
+
+  fprintf(stdout,"\
+  --paired-segment-stream-chains=INT\n\
+                                 Stream paired SEGMENT1 chains directly into path solving\n\
+                                   in materialized-equivalent order instead of retaining\n\
+                                   the complete chain forest (0=no, 1=yes; default %d).\n\
+",paired_segment_stream_chains_p);
+
+  fprintf(stdout,"\
+  --paired-solve-all-anchor-first=INT\n\
+                                 In solve-all fallback, solve the mate with fewer genomic\n\
+                                   candidate diagonals first and try local mate rescue before\n\
+                                   solving the other mate globally (0=no, 1=yes; default %d).\n\
+",paired_solve_all_anchor_first_p);
+
+  fprintf(stdout,"\
+  --paired-postsolve-reliable-anchors-first=INT\n\
+                                 After solve-all fallback, try local mate rescue from\n\
+                                   reliable anchors before broad rescue (0=no, 1=yes;\n\
+                                   default %d).\n\
+",paired_postsolve_reliable_anchors_first_p);
+
+  fprintf(stdout,"\
+  --paired-seg1-exhaustive-concordance=INT\n\
+                                 Promote mate-concordant SEGMENT1 exhaustive candidates into\n\
+                                   paired-end concordance before mate rescue (0=no, 1=yes;\n\
+                                   default %d).\n\
+",paired_seg1_exhaustive_concordance_p);
+
+  fprintf(stdout,"\
+  --paired-duplicate-auxinfo-frontier=INT\n\
+                                 Re-solve retained paired diagonals when later methods\n\
+                                   merge new auxinfo into them (0=no, 1=yes; default %d).\n\
+",paired_duplicate_auxinfo_frontier_p);
+
+  fprintf(stdout,"\
+  --paired-mate-minpure-floor=INT\n\
+                                 Require genome pure-minimizer specificity while choosing\n\
+                                   paired mate-rescue diagonals. Candidates must pass both\n\
+                                   the existing support floor and this specificity floor\n\
+                                   on a 1..%u scale (default %u).\n\
+",STAGE1_MINPURE_SPECIFICITY_SCALE,paired_mate_minpure_floor);
+
+  fprintf(stdout,"\
+  --minpure-diagonal-debug=INT\n\
+                                 Emit one stderr TSV row for every raw exhaustive\n\
+                                   segment diagonal with chromosome coordinates and\n\
+                                   pure-minimizer frequency/specificity stats\n\
+                                   (0=no, 1=yes; default %d).\n\
+",minpure_diagonal_debug_p);
+
+  fprintf(stdout,"\
+  --pathpair-equal-coverage-diff-tiebreak=INT\n\
+                                 For equal paired coverage, rank by fewer diffs and\n\
+                                   then fewer indels (0=no, 1=yes; default %d).\n\
+",pathpair_equal_coverage_diff_tiebreak_p);
+
+  fprintf(stdout,"\
+  --paired-transcript-completion=INT\n\
+                                 Complete partial paired-end transcriptome paths\n\
+                                   using a bounded local indel search\n\
+                                   (0=no, 1=yes; default %d).\n\
+",paired_transcript_completion_p);
+
+  fprintf(stdout,"\
+  --paired-tr-adjacent-indel-repair=INT\n\
+                                 Try adjacent transcript diagonals for paired TR_EXT\n\
+                                   qstart indel repair (0=no, 1=yes; default %d).\n\
+",paired_tr_adjacent_indel_repair_p);
+
+  fprintf(stdout,"\
+  --score-match=FLOAT          Per-match reward for alignment candidate scoring\n\
+                                   (default %g).\n\
+  --score-mismatch=FLOAT       Per-mismatch penalty for alignment candidate scoring\n\
+                                   (default %g).\n\
+  --score-indel-open=FLOAT     Per-insertion/deletion event penalty for alignment\n\
+                                   candidate scoring (default %g).\n\
+  --score-indel-extend=FLOAT   Per-extra-indel-base penalty after the open event\n\
+                                   for alignment candidate scoring (default %g).\n\
+  --score-long-indel-open=FLOAT\n\
+                                 Second affine gap-open penalty for long gaps\n\
+                                   (default %g; reserved for later use).\n\
+  --score-long-indel-extend=FLOAT\n\
+                                 Second affine gap-extend penalty for long gaps\n\
+                                   (default %g; reserved for later use).\n\
+  --score-splice-unannotated=FLOAT\n\
+                                 Raw penalty for each unannotated splice junction\n\
+                                   in final paired scoring (default %g).\n\
+  --score-pair-transcript-discordance=FLOAT\n\
+                                 Raw penalty when both mates have transcript\n\
+                                   evidence but no shared valid transcript\n\
+                                   in final paired scoring (default %g).\n\
+  --score-pair-margin=FLOAT     Keep final paired alignments with score >=\n\
+                                   best_score * (1 - margin). Must be >= 0\n\
+                                   and < 1 (default %g).\n\
+  --score-min-read=FLOAT        Minimum raw final score for each mate in a\n\
+                                   reported pair (default %g).\n\
+  --score-min-pair=FLOAT        Minimum raw final paired score for a reported\n\
+                                   pair (default %g).\n\
+",score_match_reward,score_mismatch_penalty,
+    score_indel_open_penalty,score_indel_extend_penalty,
+    score_long_indel_open_penalty,score_long_indel_extend_penalty,
+    score_splice_unannotated_penalty,
+    score_pair_transcript_discordance_penalty,
+    score_pair_margin,score_min_read,score_min_pair);
+
+  fprintf(stdout,"\
+  --tr-score-ranker=INT         Rank transcript paths by score during TR path\n\
+                                   selection (0=no, 1=yes; default %d).\n\
+  --tr-score-match-reward=FLOAT\n\
+                                 Legacy alias for --score-match\n\
+                                   (default %g).\n\
+  --tr-score-mismatch-penalty=FLOAT\n\
+                                 Legacy alias for --score-mismatch\n\
+                                   (default %g).\n\
+  --tr-score-indel-open-penalty=FLOAT\n\
+                                 Legacy alias for --score-indel-open\n\
+                                   (default %g).\n\
+  --tr-score-indel-extend-penalty=FLOAT\n\
+                                 Legacy alias for --score-indel-extend\n\
+                                   (default %g).\n\
+  --tr-score-softclip-penalty=FLOAT\n\
+                                 Per-softclipped-base penalty for --tr-score-ranker\n\
+                                   (default %g).\n\
+  --tr-score-transcript-discordance-penalty=FLOAT\n\
+                                 Pair-level penalty when the two TR paths use\n\
+                                   different transcript ids (default %g).\n\
+  --tr-quality-*                Accepted aliases for the earlier TR score CLI;\n\
+                                   --tr-quality-indel-penalty sets both open\n\
+                                   and extend penalties.\n\
+",tr_score_ranker_p,tr_score_match_reward,tr_score_mismatch_penalty,
+    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+    tr_score_softclip_penalty,tr_score_transcript_discordance_penalty);
 
 #if 0
   fprintf(stdout,"\n");
@@ -5217,15 +7723,15 @@ is still designed to be fast.\n\
   fprintf(stdout,"Options for quality scores\n");
   fprintf(stdout,"\
   --quality-protocol=STRING      Protocol for input quality scores.  Allowed values:\n\
-                                   illumina (ASCII 64-126) (equivalent to -J 64 -j -31)\n\
-                                   sanger   (ASCII 33-126) (equivalent to -J 33 -j 0)\n\
+                                   illumina (ASCII 64-126) (equivalent to --quality-zero-score 64 --quality-print-shift -31)\n\
+                                   sanger   (ASCII 33-126) (equivalent to --quality-zero-score 33 --quality-print-shift 0)\n\
                                  Default is sanger (no quality print shift)\n\
                                  SAM output files should have quality scores in sanger protocol\n\
 \n\
                                  Or you can customize this behavior with these flags:\n\
-  -J, --quality-zero-score=INT   FASTQ quality scores are zero at this ASCII value\n\
+  --quality-zero-score=INT       FASTQ quality scores are zero at this ASCII value\n\
                                    (default is 33 for sanger protocol; for Illumina, select 64)\n\
-  -j, --quality-print-shift=INT  Shift FASTQ quality scores by this amount in output\n\
+  --quality-print-shift=INT      Shift FASTQ quality scores by this amount in output\n\
                                    (default is 0 for sanger protocol; to change Illumina input\n\
                                    to Sanger output, select -31)\n\
 ");
@@ -5234,7 +7740,9 @@ is still designed to be fast.\n\
   fprintf(stdout,"Output options\n");
   fprintf(stdout,"\
   -n, --npaths=INT               Maximum number of paths to print (default %d).\n\
-",maxpaths_report);
+  --n-splice-paths=INT          Maximum number of splice/middle-exon paths to try\n\
+                                   per splice expansion (default %d).\n\
+",maxpaths_report,n_splice_paths);
   fprintf(stdout,"\
   -Q, --quiet-if-excessive       If more than maximum number of paths are found,\n\
                                    then nothing is printed.\n\
@@ -5252,7 +7760,6 @@ is still designed to be fast.\n\
   --only-concordant              Print only concordant alignments (concordant_uniq, concordant_mult, concordant_circular)\n\
   --omit-concordant-uniq         Do not print any concordant_uniq alignments\n\
   --omit-concordant-mult         Do not print any concordant_mult alignments\n\
-  --omit-softclipped             Do not allow any alignments with soft clips\n\
   --only-tr-consistent           Print only alignments with consistent transcripts (XX field present, identical if paired-end)\n\
 ");
 
@@ -5310,7 +7817,7 @@ is still designed to be fast.\n\
   --md-report-snps               In MD string, when known SNPs are given by the -v flag,\n\
                                    prints difference nucleotides when they differ\n\
                                    from reference but match a known alternate allele\n\
-  --no-soft-clips                Does not allow soft clips at ends.  Mismatches will be counted over the entire query\n\
+  --no-soft-clips                Does not allow soft clips at ends\n\
   --extend-soft-clips            Extends alignments through soft clipped regions.  CIGAR string and coordinates\n\
                                    will be revised, but mismatches and the MD string will reflect the clipped CIGAR\n\
   --action-if-cigar-error        Action to take if there is a disagreement between CIGAR length and sequence length\n\
@@ -5333,4 +7840,3 @@ is still designed to be fast.\n\
 ");
   return;
 }
-

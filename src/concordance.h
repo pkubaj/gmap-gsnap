@@ -23,13 +23,16 @@
 #include "listpool.h"
 #include "hitlistpool.h"
 #include "pathpool.h"
+#include "trpathpool.h"
 #include "transcriptpool.h"
 #include "vectorpool.h"
 
 
 extern List_T
-Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3, List_T pathpairs,
-
+Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
+		int *end_score_paired, int *end_score_5, int *end_score_3,
+		
+		List_T pathpairs,
 		List_T newtrpaths5, List_T newtrpaths3,
 		List_T trpaths5, List_T trpaths3,
 		    
@@ -43,14 +46,15 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 		int nmismatches_filter_5, int nmismatches_filter_3,
 		int mincoverage_filter_5, int mincoverage_filter_3,
 
-		int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
-		Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-		Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir);
+		Trpathpool_T trpathpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir,
+		bool paired_tr_adjacent_indel_repair_p);
 
 extern void
 Concordance_setup (int subopt_levels_in, Chrpos_T pairmax_transcriptome_in,
@@ -59,4 +63,3 @@ Concordance_setup (int subopt_levels_in, Chrpos_T pairmax_transcriptome_in,
 
 #undef T
 #endif
-

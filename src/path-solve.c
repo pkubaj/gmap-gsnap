@@ -7,14 +7,18 @@
 
 #include "path.h"
 #include "path-solve.h"
+#include "debug_groups.h"
+#include "parameters.h"
 #include "path-eval.h"
 #include "path-trim.h"
+#include "accel-profile-stats.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "assert.h"
+#include "mem.h"
 
 #include "genomebits_count.h"
 #include "genomebits_indel.h"
@@ -41,6 +45,14 @@
 #include "repair.h"
 #include "transcript-remap.h"
 
+/* EXT-anchor reuse machinery (lookup/store + shadow/copy-check telemetry).
+   Compiled only for the explicit reuse build, the substitution proof, or a
+   stats build measuring reuse opportunity.  Off by default, so production
+   builds carry no per-chain shadow-key overhead and never consult the cache. */
+#if defined(GSNAP_EXT_ANCHOR_REUSE_ENABLE) || defined(GSNAP_EXT_ANCHOR_SUBSTITUTION_PROOF) || defined(GSNAP_ACCEL_PROFILE_STATS)
+#define GSNAP_EXT_ANCHOR_PROOF 1
+#endif
+
 
 /* One of these appears to slow down program significantly, but for
    RNA velocity, we need to at least remap paths */
@@ -53,82 +65,1619 @@
 
 /* #define MAX_DEPTH_MIDDLE 5	-- Was 3, but that can be limiting with multiple indels */
 /* #define MAX_DEPTH_LOCAL 2 */
-#define MAX_RECURSIVE_ENDS 2	/* Needs to be 2 or more, because the case of 1 is already checked */
-
-#define MIN_SUPPORT_INDEL 6	/* Also defined in kmer-search.c */
 
 #define PROB_SLOP 0.2
 
 
 /* Creation and freeing of paths */
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_DEEP) || defined(DEBUG_SINGLE_DEEP) || defined(DEBUG_PATH_CORE)
 #define debug0(x) x
 #else
 #define debug0(x)
 #endif
 
 /* Decision on whether to consider path */
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_PAIRED_DEEP) || defined(DEBUG_SINGLE_DEEP) || defined(DEBUG_PATH_CORE)
 #define debug1(x) x
 #else
 #define debug1(x)
 #endif
 
 /* endpoints_acceptable_p */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PAIRED_DEEP) || defined(DEBUG_SINGLE_DEEP) || defined(DEBUG_PATH_CORE)
 #define debug2(x) x
 #else
 #define debug2(x)
 #endif
 
 /* qstart and qend resolve */
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PAIRED_DEEP) || defined(DEBUG_SINGLE_DEEP) || defined(DEBUG_PATH_CORE)
 #define debug3(x) x
 #else
 #define debug3(x)
 #endif
 
 /* Path_nmatches */
-#ifdef DEBUG7
+#if defined(DEBUG7) || defined(DEBUG_PATH_CORE)
 #define debug7(x) x
 #else
 #define debug7(x)
 #endif
 
 /* Path_solve_from_univdiagonal */
-#ifdef DEBUG6
+#if defined(DEBUG6) || defined(DEBUG_PATH_CORE)
 #define debug6(x) x
 #else
 #define debug6(x)
 #endif
 
 /* Path_extend */
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_PATH_CORE)
 #define debug11(x) x
 #else
 #define debug11(x)
 #endif
 
+/* Path_solve_from_chain */
+#ifdef DEBUG12
+#define debug12(x) x
+#else
+#define debug12(x)
+#endif
+
 /* best_path_genome */
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
 #define debug13(x) x
 #else
 #define debug13(x)
 #endif
 
 /* Path_solve_junctions, Path_add_junctions */
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
 #define debug14(x) x
 #else
 #define debug14(x)
 #endif
 
 /* Location of path */
-#ifdef DEBUG20
+#if defined(DEBUG20) || defined(DEBUG_PATH_CORE)
 #define debug20(x) x
 #else
 #define debug20(x)
 #endif
+
+#define SEGMENT_CACHE_SIZE 4096
+#define SEGMENT_CACHE_MASK (SEGMENT_CACHE_SIZE - 1)
+#define EMITTED_PATH_CACHE_SIZE 65536
+#define EMITTED_PATH_CACHE_MASK (EMITTED_PATH_CACHE_SIZE - 1)
+/* Single-anchor path caching is only an optimization; large path lists are safer to recompute. */
+#define SEGMENT_CACHE_MAX_CACHED_PATHS 32
+#define EXT_ANCHOR_RESULT_CACHE_SIZE 2
+
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+static unsigned long long ext_anchor_lookup_count = 0ULL;
+static unsigned long long ext_anchor_hit_count = 0ULL;
+static unsigned long long ext_anchor_first_seen_count = 0ULL;
+static unsigned long long ext_anchor_second_seen_count = 0ULL;
+static unsigned long long ext_anchor_promoted_count = 0ULL;
+static unsigned long long ext_anchor_table_reject_count = 0ULL;
+static unsigned long long ext_anchor_large_result_reject_count = 0ULL;
+static bool ext_anchor_report_registered_p = false;
+static bool ext_anchor_report_enabled_p = false;
+
+#define EXT_ANCHOR_COUNT(counter) do { \
+    if (ext_anchor_report_enabled_p == true) { \
+      __atomic_fetch_add(&(counter),1ULL,__ATOMIC_RELAXED); \
+    } \
+  } while (0)
+
+static void
+ext_anchor_reuse_report (void) {
+  fprintf(stderr,"ext_anchor_reuse_summary\tlookups=%llu\thits=%llu\tfirst_seen=%llu\t"
+	  "second_seen=%llu\tpromoted=%llu\ttable_rejects=%llu\tlarge_result_rejects=%llu\n",
+	  __atomic_load_n(&ext_anchor_lookup_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_hit_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_first_seen_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_second_seen_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_promoted_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_table_reject_count,__ATOMIC_RELAXED),
+	  __atomic_load_n(&ext_anchor_large_result_reject_count,__ATOMIC_RELAXED));
+}
+#endif
+
+struct Path_segment_cache_entry_T {
+  bool occupiedp;
+  int qstart;
+  int qend;
+  int nmismatches;
+  int querylength;
+  int localdb_nmismatches_allowed;
+  Chrnum_T chrnum;
+  Univcoord_T chroffset;
+  Univcoord_T chrhigh;
+  Univcoord_T univdiagonal;
+  bool plusp;
+  int genestrand;
+  bool first_read_p;
+  bool find_splices_p;
+  List_T sense_paths;
+  List_T antisense_paths;
+};
+
+struct Path_segment_qend_cache_entry_T {
+  bool occupiedp;
+  int head_qstart;
+  int head_qend;
+  int head_nmismatches;
+  Univcoord_T head_univdiagonal;
+  int next_qstart;
+  int next_qend;
+  int next_nmismatches;
+  Univcoord_T next_univdiagonal;
+  int querylength;
+  int localdb_nmismatches_allowed;
+  Chrnum_T chrnum;
+  Univcoord_T chroffset;
+  Univcoord_T chrhigh;
+  bool plusp;
+  int genestrand;
+  bool first_read_p;
+  bool find_splices_p;
+};
+
+struct Path_segment_qstart_cache_entry_T {
+  bool occupiedp;
+  int head_qstart;
+  int head_qend;
+  int head_nmismatches;
+  Univcoord_T head_univdiagonal;
+  int next_qstart;
+  int next_qend;
+  int next_nmismatches;
+  Univcoord_T next_univdiagonal;
+  int querylength;
+  int localdb_nmismatches_allowed;
+  Chrnum_T chrnum;
+  Univcoord_T chroffset;
+  Univcoord_T chrhigh;
+  bool plusp;
+  int genestrand;
+  bool first_read_p;
+  bool find_splices_p;
+};
+
+struct Path_qend_local_cache_entry_T {
+  bool occupiedp;
+  int depth;
+  int querylength;
+  int max_nblocks;
+  int localdb_nmismatches_allowed;
+  Chrnum_T chrnum;
+  Univcoord_T chroffset;
+  Univcoord_T chrhigh;
+  bool plusp;
+  int genestrand;
+  int sensedir;
+  bool innerp;
+  bool find_splices_p;
+  bool salvagep;
+  Path_T key_path;
+  List_T result_paths;
+};
+
+struct Path_emitted_path_entry_T {
+  bool occupiedp;
+  Path_T key_path;
+};
+
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+struct Path_ext_anchor_result_entry_T {
+  bool occupiedp;
+  struct Accel_profile_ext_anchor_key_T key;
+  List_T sense_paths;
+  List_T antisense_paths;
+};
+
+struct Path_ext_anchor_cache_T {
+  struct Path_ext_anchor_result_entry_T entries[EXT_ANCHOR_RESULT_CACHE_SIZE];
+};
+#endif
+
+struct Path_segment_cache_T {
+  bool emitted_path_dedup_p;
+  int qstart_nentries;
+  struct Path_segment_cache_entry_T entries[SEGMENT_CACHE_SIZE];
+  int qend_nentries;
+  struct Path_segment_qend_cache_entry_T qend_entries[SEGMENT_CACHE_SIZE];
+  int qstart_pair_nentries;
+  struct Path_segment_qstart_cache_entry_T qstart_pair_entries[SEGMENT_CACHE_SIZE];
+  int qend_local_nentries;
+  struct Path_qend_local_cache_entry_T qend_local_entries[SEGMENT_CACHE_SIZE];
+  int emitted_path_nentries;
+  struct Path_emitted_path_entry_T emitted_path_entries[EMITTED_PATH_CACHE_SIZE];
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+  unsigned long long qend_local_lookup_attempts;
+  unsigned long long qend_local_hits;
+  unsigned long long qend_local_empty_hits;
+  unsigned long long qend_local_nonempty_hits;
+  unsigned long long qend_local_empty_misses;
+  unsigned long long qend_local_full_misses;
+  unsigned long long qend_local_inserts;
+  unsigned long long qend_local_skip_uncacheable_lookup;
+  unsigned long long qend_local_skip_uncacheable_insert;
+  unsigned long long qend_local_skip_large_result;
+  unsigned long long qend_local_skip_full;
+  unsigned long long emitted_path_marks;
+  unsigned long long emitted_path_skips;
+  unsigned long long emitted_path_skip_uncacheable;
+  unsigned long long emitted_path_skip_full;
+#endif
+};
+
+
+static unsigned long long
+segment_cache_mix (unsigned long long h, unsigned long long x) {
+  h ^= x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  return h;
+}
+
+static unsigned int
+segment_cache_hash (Univdiag_T univdiag, int querylength, int localdb_nmismatches_allowed,
+		   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		   bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) univdiag->qstart);
+  h = segment_cache_mix(h,(unsigned long long) univdiag->qend);
+  h = segment_cache_mix(h,(unsigned long long) univdiag->nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) univdiag->univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) querylength);
+  h = segment_cache_mix(h,(unsigned long long) localdb_nmismatches_allowed);
+  h = segment_cache_mix(h,(unsigned long long) chrnum);
+  h = segment_cache_mix(h,(unsigned long long) chroffset);
+  h = segment_cache_mix(h,(unsigned long long) chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) plusp);
+  h = segment_cache_mix(h,(unsigned long long) genestrand);
+  h = segment_cache_mix(h,(unsigned long long) first_read_p);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+
+  return (unsigned int) (h & SEGMENT_CACHE_MASK);
+}
+
+static bool
+segment_cache_entry_matches_p (struct Path_segment_cache_entry_T *entry, Univdiag_T univdiag,
+			      int querylength, int localdb_nmismatches_allowed,
+			      Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			      bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  return entry->qstart == univdiag->qstart &&
+    entry->qend == univdiag->qend &&
+    entry->nmismatches == univdiag->nmismatches &&
+    entry->querylength == querylength &&
+    entry->localdb_nmismatches_allowed == localdb_nmismatches_allowed &&
+    entry->chrnum == chrnum &&
+    entry->chroffset == chroffset &&
+    entry->chrhigh == chrhigh &&
+    entry->univdiagonal == univdiag->univdiagonal &&
+    entry->plusp == plusp &&
+    entry->genestrand == genestrand &&
+    entry->first_read_p == first_read_p &&
+    entry->find_splices_p == find_splices_p;
+}
+
+static List_T
+segment_cache_copy_paths (List_T old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			 Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  List_T new = NULL, p;
+
+  for (p = old; p != NULL; p = List_next(p)) {
+    new = Hitlist_push(new,hitlistpool,
+		       (void *) Path_copy((Path_T) List_head(p),intlistpool,univcoordlistpool,
+					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool)
+		       hitlistpool_trace(__FILE__,__LINE__));
+  }
+
+  return List_reverse(new);
+}
+
+static List_T
+solver_result_copy_paths (List_T old, Intlistpool_T intlistpool,
+			  Univcoordlistpool_T univcoordlistpool,
+			  Listpool_T listpool, Pathpool_T pathpool,
+			  Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			  Transcriptpool_T transcriptpool) {
+  List_T new = NULL, p;
+  for (p = old; p != NULL; p = List_next(p)) {
+    new = Hitlist_push(new,hitlistpool,
+	(void *) Path_copy_solver_result((Path_T) List_head(p),intlistpool,
+	  univcoordlistpool,listpool,pathpool,vectorpool,transcriptpool,hitlistpool)
+	hitlistpool_trace(__FILE__,__LINE__));
+  }
+  return List_reverse(new);
+}
+
+static bool
+segment_cache_small_path_list_p (List_T sense_paths, List_T antisense_paths) {
+  List_T p;
+  int npaths = 0;
+
+  for (p = sense_paths; p != NULL; p = List_next(p)) {
+    if (++npaths > SEGMENT_CACHE_MAX_CACHED_PATHS) {
+      return false;
+    }
+  }
+
+  for (p = antisense_paths; p != NULL; p = List_next(p)) {
+    if (++npaths > SEGMENT_CACHE_MAX_CACHED_PATHS) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static unsigned long long
+qend_local_intlist_hash (Intlist_T list) {
+  Intlist_T p;
+  unsigned long long hash = 1469598103934665603ULL;
+  int n = 0;
+
+  for (p = list; p != NULL; p = Intlist_next(p)) {
+    hash = segment_cache_mix(hash,(unsigned long long) Intlist_head(p));
+    n++;
+  }
+
+  return segment_cache_mix(hash,(unsigned long long) n);
+}
+
+static unsigned long long
+qend_local_univcoordlist_hash (Univcoordlist_T list) {
+  Univcoordlist_T p;
+  unsigned long long hash = 1469598103934665603ULL;
+  int n = 0;
+
+  for (p = list; p != NULL; p = Univcoordlist_next(p)) {
+    hash = segment_cache_mix(hash,(unsigned long long) Univcoordlist_head(p));
+    n++;
+  }
+
+  return segment_cache_mix(hash,(unsigned long long) n);
+}
+
+static unsigned long long
+qend_local_junction_list_hash (List_T list) {
+  List_T p;
+  Junction_T junction;
+  unsigned long long hash = 1469598103934665603ULL;
+  int n = 0;
+
+  for (p = list; p != NULL; p = List_next(p)) {
+    junction = (Junction_T) List_head(p);
+    if (junction == (Junction_T) NULL) {
+      hash = segment_cache_mix(hash,0xabcdefULL);
+    } else {
+      hash = segment_cache_mix(hash,(unsigned long long) junction->type);
+      hash = segment_cache_mix(hash,(unsigned long long) junction->nindels);
+      if (junction->type == SPLICE_JUNCTION || junction->type == AMB_JUNCTION) {
+	hash = segment_cache_mix(hash,(unsigned long long) junction->splice_distance);
+	hash = segment_cache_mix(hash,(unsigned long long) junction->sensedir);
+      } else if (junction->type == CHIMERA_JUNCTION) {
+	hash = segment_cache_mix(hash,(unsigned long long) junction->donor1);
+	hash = segment_cache_mix(hash,(unsigned long long) junction->donor2);
+	hash = segment_cache_mix(hash,(unsigned long long) junction->acceptor1);
+	hash = segment_cache_mix(hash,(unsigned long long) junction->acceptor2);
+      }
+    }
+    n++;
+  }
+
+  return segment_cache_mix(hash,(unsigned long long) n);
+}
+
+static bool
+qend_local_junction_equal_p (Junction_T x, Junction_T y) {
+  if (x == y) {
+    return true;
+  } else if (x == (Junction_T) NULL || y == (Junction_T) NULL) {
+    return false;
+  } else if (x->type != y->type || x->nindels != y->nindels) {
+    return false;
+  } else if (x->type == SPLICE_JUNCTION || x->type == AMB_JUNCTION) {
+    return x->splice_distance == y->splice_distance && x->sensedir == y->sensedir &&
+      x->donor_prob == y->donor_prob && x->acceptor_prob == y->acceptor_prob;
+  } else if (x->type == CHIMERA_JUNCTION) {
+    return x->donor1 == y->donor1 && x->donor2 == y->donor2 &&
+      x->acceptor1 == y->acceptor1 && x->acceptor2 == y->acceptor2 &&
+      x->donor_prob == y->donor_prob && x->acceptor_prob == y->acceptor_prob;
+  } else {
+    return true;
+  }
+}
+
+static bool
+qend_local_junction_list_equal_p (List_T x, List_T y) {
+  while (x != (List_T) NULL && y != (List_T) NULL) {
+    if (qend_local_junction_equal_p((Junction_T) List_head(x),(Junction_T) List_head(y)) == false) {
+      return false;
+    } else {
+      x = List_next(x);
+      y = List_next(y);
+    }
+  }
+
+  return (x == (List_T) NULL && y == (List_T) NULL) ? true : false;
+}
+
+static bool
+qend_local_cacheable_path_p (Path_T path) {
+  if (path == (Path_T) NULL) {
+    return false;
+  } else if (path->qstart_alts != NULL || path->qend_alts != NULL) {
+    return false;
+  } else if (path->circular_endpoints != NULL) {
+    return false;
+  } else if (path->fusion_querystart_junction != NULL || path->fusion_queryend_junction != NULL ||
+	     path->fusion_endpoints != NULL) {
+    return false;
+  } else if (path->transcripts != NULL || path->invalid_transcripts != NULL ||
+	     path->fusion_transcripts != NULL || path->fusion_invalid_transcripts != NULL ||
+	     path->genomic_diff != NULL || path->transcriptome_method_p == true) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+static bool
+qend_local_cache_stats_print_p (unsigned long long count) {
+  return (count <= 16ULL || (count & 0x3ffULL) == 0ULL) ? true : false;
+}
+
+static void
+qend_local_cache_stats_report (Path_segment_cache_T cache, const char *event, Path_T path, int depth) {
+  fprintf(stderr,
+	  "[QEND_LOCAL_CACHE] event=%s attempts=%llu hits=%llu empty_hits=%llu nonempty_hits=%llu inserts=%llu empty_misses=%llu "
+	  "full_misses=%llu skip_uncache_lookup=%llu skip_uncache_insert=%llu "
+	  "skip_large=%llu skip_full=%llu path_marks=%llu path_skips=%llu "
+	  "path_uncacheable=%llu path_full=%llu nentries=%d path_nentries=%d depth=%d",
+	  event,cache->qend_local_lookup_attempts,cache->qend_local_hits,
+	  cache->qend_local_empty_hits,cache->qend_local_nonempty_hits,
+	  cache->qend_local_inserts,cache->qend_local_empty_misses,
+	  cache->qend_local_full_misses,cache->qend_local_skip_uncacheable_lookup,
+	  cache->qend_local_skip_uncacheable_insert,cache->qend_local_skip_large_result,
+	  cache->qend_local_skip_full,cache->emitted_path_marks,
+	  cache->emitted_path_skips,cache->emitted_path_skip_uncacheable,
+	  cache->emitted_path_skip_full,cache->qend_local_nentries,
+	  cache->emitted_path_nentries,depth);
+
+  if (path != (Path_T) NULL) {
+    fprintf(stderr," qstart=%d qend=%d main=%u method=%d sensedir=%d\n",
+	    Path_qstart(path),Path_qend(path),path->main_univdiagonal,path->method,path->sensedir);
+  } else {
+    fprintf(stderr,"\n");
+  }
+
+  return;
+}
+
+static void
+qend_local_cache_stats_maybe_report (Path_segment_cache_T cache, Path_T path, int depth) {
+  if ((cache->qend_local_lookup_attempts & 0x3ffULL) == 0ULL) {
+    qend_local_cache_stats_report(cache,"periodic",path,depth);
+  }
+
+  return;
+}
+#endif
+
+static unsigned int
+qend_local_cache_hash (Path_T path, int depth, int querylength, int max_nblocks,
+		       int localdb_nmismatches_allowed,
+		       Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		       bool plusp, int genestrand, int sensedir, bool innerp,
+		       bool find_splices_p, bool salvagep) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) path->plusp);
+  h = segment_cache_mix(h,(unsigned long long) path->genestrand);
+  h = segment_cache_mix(h,(unsigned long long) path->sensedir);
+  h = segment_cache_mix(h,(unsigned long long) path->querylength);
+  h = segment_cache_mix(h,(unsigned long long) path->chrnum);
+  h = segment_cache_mix(h,(unsigned long long) path->chroffset);
+  h = segment_cache_mix(h,(unsigned long long) path->chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) path->main_univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) path->method);
+  h = segment_cache_mix(h,(unsigned long long) path->splice5p);
+  h = segment_cache_mix(h,(unsigned long long) path->splice3p);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype5);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype3);
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->endpoints));
+  h = segment_cache_mix(h,qend_local_univcoordlist_hash(path->univdiagonals));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->nmismatches));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->ref_nmismatches));
+  h = segment_cache_mix(h,qend_local_junction_list_hash(path->junctions));
+
+  h = segment_cache_mix(h,(unsigned long long) depth);
+  h = segment_cache_mix(h,(unsigned long long) querylength);
+  h = segment_cache_mix(h,(unsigned long long) max_nblocks);
+  h = segment_cache_mix(h,(unsigned long long) localdb_nmismatches_allowed);
+  h = segment_cache_mix(h,(unsigned long long) chrnum);
+  h = segment_cache_mix(h,(unsigned long long) chroffset);
+  h = segment_cache_mix(h,(unsigned long long) chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) plusp);
+  h = segment_cache_mix(h,(unsigned long long) genestrand);
+  h = segment_cache_mix(h,(unsigned long long) sensedir);
+  h = segment_cache_mix(h,(unsigned long long) innerp);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+  h = segment_cache_mix(h,(unsigned long long) salvagep);
+
+  return (unsigned int) (h & EMITTED_PATH_CACHE_MASK);
+}
+
+static bool
+qend_local_path_equal_p (Path_T x, Path_T y) {
+  if (x == y) {
+    return true;
+  } else if (x == (Path_T) NULL || y == (Path_T) NULL) {
+    return false;
+  } else if (x->plusp == y->plusp && x->genestrand == y->genestrand &&
+	     x->sensedir == y->sensedir && x->querylength == y->querylength &&
+	     x->chrnum == y->chrnum && x->chroffset == y->chroffset &&
+	     x->chrhigh == y->chrhigh &&
+	     x->main_univdiagonal == y->main_univdiagonal &&
+	     x->method == y->method &&
+	     x->splice5p == y->splice5p && x->splice3p == y->splice3p &&
+	     x->splicetype5 == y->splicetype5 && x->splicetype3 == y->splicetype3 &&
+	     x->ambig_prob_5 == y->ambig_prob_5 && x->ambig_prob_3 == y->ambig_prob_3 &&
+	     Intlist_equal(x->endpoints,y->endpoints) == true &&
+	     Univcoordlist_equal(x->univdiagonals,y->univdiagonals) == true &&
+	     Intlist_equal(x->nmismatches,y->nmismatches) == true &&
+	     Intlist_equal(x->ref_nmismatches,y->ref_nmismatches) == true &&
+	     qend_local_junction_list_equal_p(x->junctions,y->junctions) == true) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+static unsigned long long
+pathsolve_path_fingerprint (Path_T path) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) path->plusp);
+  h = segment_cache_mix(h,(unsigned long long) path->genestrand);
+  h = segment_cache_mix(h,(unsigned long long) path->sensedir);
+  h = segment_cache_mix(h,(unsigned long long) path->querylength);
+  h = segment_cache_mix(h,(unsigned long long) path->chrnum);
+  h = segment_cache_mix(h,(unsigned long long) path->chroffset);
+  h = segment_cache_mix(h,(unsigned long long) path->chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) path->main_univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) path->method);
+  h = segment_cache_mix(h,(unsigned long long) path->splice5p);
+  h = segment_cache_mix(h,(unsigned long long) path->splice3p);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype5);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype3);
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->endpoints));
+  h = segment_cache_mix(h,qend_local_univcoordlist_hash(path->univdiagonals));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->nmismatches));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->ref_nmismatches));
+  h = segment_cache_mix(h,qend_local_junction_list_hash(path->junctions));
+  return h;
+}
+
+static unsigned long long
+pathsolve_frontier_fingerprint (Path_T path, const char *side, int depth,
+				bool innerp, bool find_splices_p, bool salvagep) {
+  unsigned long long h = 1469598103934665603ULL;
+  Junction_T junction = path->junctions == NULL ? NULL : (Junction_T) List_head(path->junctions);
+
+  h = segment_cache_mix(h,(unsigned long long) path->plusp);
+  h = segment_cache_mix(h,(unsigned long long) path->genestrand);
+  h = segment_cache_mix(h,(unsigned long long) path->sensedir);
+  h = segment_cache_mix(h,(unsigned long long) path->querylength);
+  h = segment_cache_mix(h,(unsigned long long) path->chrnum);
+  h = segment_cache_mix(h,(unsigned long long) path->chroffset);
+  h = segment_cache_mix(h,(unsigned long long) path->chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) Intlist_head(path->endpoints));
+  h = segment_cache_mix(h,(unsigned long long) Univcoordlist_head(path->univdiagonals));
+  h = segment_cache_mix(h,(unsigned long long) Intlist_head(path->nmismatches));
+  h = segment_cache_mix(h,(unsigned long long) Intlist_head(path->ref_nmismatches));
+  if (junction == NULL) {
+    h = segment_cache_mix(h,0ULL);
+  } else {
+    h = segment_cache_mix(h,(unsigned long long) junction->type);
+    h = segment_cache_mix(h,(unsigned long long) junction->nindels);
+    h = segment_cache_mix(h,(unsigned long long) junction->splice_distance);
+    h = segment_cache_mix(h,(unsigned long long) junction->sensedir);
+  }
+  h = segment_cache_mix(h,(unsigned long long) (side != NULL && !strcmp(side,"qstart")));
+  h = segment_cache_mix(h,(unsigned long long) depth);
+  h = segment_cache_mix(h,(unsigned long long) innerp);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+  h = segment_cache_mix(h,(unsigned long long) salvagep);
+  return h;
+}
+
+static unsigned long long
+spliceends_call_fingerprint (const char *side, int sensedir, Univcoord_T univdiagonal,
+			     int querylength, int boundary, int exon_origin,
+			     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			     bool plusp, int genestrand, int localdb_nmismatches_allowed,
+			     bool innerp, bool salvagep, int max_nblocks,
+			     Stage1_T stage1, Knownsplicing_T knownsplicing,
+			     Spliceendsgen_T spliceendsgen, Compress_T query_compress,
+			     char *queryptr, Genomebits_T genomebits,
+			     Genomebits_T genomebits_alt, bool find_splices_p) {
+  unsigned long long h = 1469598103934665603ULL;
+  h = segment_cache_mix(h,(unsigned long long) (side != NULL && !strcmp(side,"qstart")));
+  h = segment_cache_mix(h,(unsigned long long) sensedir);
+  h = segment_cache_mix(h,(unsigned long long) univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) querylength);
+  h = segment_cache_mix(h,(unsigned long long) boundary);
+  h = segment_cache_mix(h,(unsigned long long) exon_origin);
+  h = segment_cache_mix(h,(unsigned long long) chrnum);
+  h = segment_cache_mix(h,(unsigned long long) chroffset);
+  h = segment_cache_mix(h,(unsigned long long) chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) plusp);
+  h = segment_cache_mix(h,(unsigned long long) genestrand);
+  h = segment_cache_mix(h,(unsigned long long) localdb_nmismatches_allowed);
+  h = segment_cache_mix(h,(unsigned long long) innerp);
+  h = segment_cache_mix(h,(unsigned long long) salvagep);
+  h = segment_cache_mix(h,(unsigned long long) max_nblocks);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) stage1);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) knownsplicing);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) spliceendsgen);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) query_compress);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) queryptr);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) genomebits);
+  h = segment_cache_mix(h,(unsigned long long) (uintptr_t) genomebits_alt);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+  return h;
+}
+
+static unsigned long long
+spliceends_result_fingerprint (Spliceends_T spliceends, int nspliceends,
+			       int nosplice_trimpos, int farsplice_trimpos,
+			       int nosplice_nmismatches, int farsplice_nmismatches,
+			       bool splicep, Splicetype_T splicetype,
+			       double ambig_prob) {
+  unsigned long long h = 1469598103934665603ULL;
+  union { double d; unsigned long long u; } bits;
+  int i;
+  h = segment_cache_mix(h,(unsigned long long) nspliceends);
+  h = segment_cache_mix(h,(unsigned long long) nosplice_trimpos);
+  h = segment_cache_mix(h,(unsigned long long) farsplice_trimpos);
+  h = segment_cache_mix(h,(unsigned long long) nosplice_nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) farsplice_nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) splicep);
+  h = segment_cache_mix(h,(unsigned long long) splicetype);
+  bits.d = ambig_prob;
+  h = segment_cache_mix(h,bits.u);
+  if (spliceends != NULL) {
+    h = segment_cache_mix(h,(unsigned long long) spliceends->boundedp);
+    h = segment_cache_mix(h,(unsigned long long) spliceends->nspliceends);
+    h = segment_cache_mix(h,(unsigned long long) spliceends->splicetype);
+    h = segment_cache_mix(h,(unsigned long long) spliceends->sensedir);
+    for (i = 0; i < nspliceends; i++) {
+      h = segment_cache_mix(h,(unsigned long long) spliceends->splice_qpos[i]);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->medial_nmismatches[i]);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->partners[i]);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->distal_univdiags[i]->univdiagonal);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->distal_univdiags[i]->qstart);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->distal_univdiags[i]->qend);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->distal_univdiags[i]->nmismatches);
+      bits.d = spliceends->medial_probs[i];
+      h = segment_cache_mix(h,bits.u);
+      bits.d = spliceends->distal_probs[i];
+      h = segment_cache_mix(h,bits.u);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->medial_support[i]);
+      h = segment_cache_mix(h,(unsigned long long) spliceends->distal_support[i]);
+    }
+  }
+  return h;
+}
+
+static void
+profile_pathsolve_result (unsigned long long state_id, const char *side, int depth,
+			  unsigned long long input_path_hash,
+			  unsigned long long frontier_hash,
+			  List_T paths, List_T old_head) {
+  unsigned long long h = 1469598103934665603ULL;
+  List_T p;
+  int npaths = 0;
+
+  if (state_id == 0ULL) return;
+  for (p = paths; p != old_head && p != NULL; p = List_next(p)) {
+    h = segment_cache_mix(h,pathsolve_path_fingerprint((Path_T) List_head(p)));
+    npaths++;
+  }
+  /* If old_head is not reached, ownership/list topology changed unexpectedly;
+     encode that fact rather than silently treating a partial walk as exact. */
+  if (p != old_head) h = segment_cache_mix(h,0xbad0bad0bad0bad0ULL);
+  Accel_profile_pathsolve_result(state_id,side,depth,input_path_hash,frontier_hash,npaths,h);
+}
+#endif
+
+static unsigned int
+emitted_path_hash (Path_T path) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) path->plusp);
+  h = segment_cache_mix(h,(unsigned long long) path->genestrand);
+  h = segment_cache_mix(h,(unsigned long long) path->sensedir);
+  h = segment_cache_mix(h,(unsigned long long) path->querylength);
+  h = segment_cache_mix(h,(unsigned long long) path->chrnum);
+  h = segment_cache_mix(h,(unsigned long long) path->chroffset);
+  h = segment_cache_mix(h,(unsigned long long) path->chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) path->main_univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) path->method);
+  h = segment_cache_mix(h,(unsigned long long) path->splice5p);
+  h = segment_cache_mix(h,(unsigned long long) path->splice3p);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype5);
+  h = segment_cache_mix(h,(unsigned long long) path->splicetype3);
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->endpoints));
+  h = segment_cache_mix(h,qend_local_univcoordlist_hash(path->univdiagonals));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->nmismatches));
+  h = segment_cache_mix(h,qend_local_intlist_hash(path->ref_nmismatches));
+  h = segment_cache_mix(h,qend_local_junction_list_hash(path->junctions));
+
+  return (unsigned int) (h & EMITTED_PATH_CACHE_MASK);
+}
+
+static bool
+emitted_path_seen_or_mark (Path_segment_cache_T cache, Path_T path,
+			   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			   Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			   Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_emitted_path_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return false;
+  } else if (qend_local_cacheable_path_p(path) == false) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    cache->emitted_path_skip_uncacheable++;
+    if (qend_local_cache_stats_print_p(cache->emitted_path_skip_uncacheable) == true) {
+      qend_local_cache_stats_report(cache,"path-uncacheable",path,/*depth*/-1);
+    }
+#endif
+    return false;
+  }
+
+  hash = emitted_path_hash(path);
+  for (i = 0; i < EMITTED_PATH_CACHE_SIZE; i++) {
+    entry = &(cache->emitted_path_entries[(hash + i) & EMITTED_PATH_CACHE_MASK]);
+
+    if (entry->occupiedp == false) {
+      if (cache->emitted_path_nentries >= EMITTED_PATH_CACHE_SIZE) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+	cache->emitted_path_skip_full++;
+	if (qend_local_cache_stats_print_p(cache->emitted_path_skip_full) == true) {
+	  qend_local_cache_stats_report(cache,"path-full-table",path,/*depth*/-1);
+	}
+#endif
+	return false;
+      }
+
+      entry->occupiedp = true;
+      entry->key_path =
+	Path_copy(path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,vectorpool,transcriptpool,hitlistpool);
+      cache->emitted_path_nentries++;
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+      cache->emitted_path_marks++;
+      if (qend_local_cache_stats_print_p(cache->emitted_path_marks) == true) {
+	qend_local_cache_stats_report(cache,"path-mark",path,/*depth*/-1);
+      }
+#endif
+      return false;
+
+    } else if (qend_local_path_equal_p(entry->key_path,path) == true) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+      cache->emitted_path_skips++;
+      if (qend_local_cache_stats_print_p(cache->emitted_path_skips) == true) {
+	qend_local_cache_stats_report(cache,"path-skip",path,/*depth*/-1);
+      }
+#endif
+      return true;
+    }
+  }
+
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+  cache->emitted_path_skip_full++;
+  if (qend_local_cache_stats_print_p(cache->emitted_path_skip_full) == true) {
+    qend_local_cache_stats_report(cache,"path-full-table",path,/*depth*/-1);
+  }
+#endif
+
+  return false;
+}
+
+static List_T
+filter_emitted_paths (List_T paths, Path_segment_cache_T cache,
+		      Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		      Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+		      Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  List_T kept = (List_T) NULL, p;
+  Path_T path;
+
+  if (cache == (Path_segment_cache_T) NULL || paths == (List_T) NULL) {
+    return paths;
+  }
+
+  for (p = paths; p != (List_T) NULL; p = List_next(p)) {
+    path = (Path_T) List_head(p);
+    if (emitted_path_seen_or_mark(cache,path,intlistpool,univcoordlistpool,
+				  listpool,pathpool,vectorpool,hitlistpool,transcriptpool) == true) {
+      Path_free(&path,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+    } else {
+      kept = Hitlist_push(kept,hitlistpool,(void *) path
+			  hitlistpool_trace(__FILE__,__LINE__));
+    }
+  }
+
+  Hitlistpool_free_list(&paths,hitlistpool
+			hitlistpool_trace(__FILE__,__LINE__));
+  return List_reverse(kept);
+}
+
+static bool
+qend_local_cache_entry_matches_p (struct Path_qend_local_cache_entry_T *entry,
+				  Path_T path, int depth, int querylength, int max_nblocks,
+				  int localdb_nmismatches_allowed,
+				  Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				  bool plusp, int genestrand, int sensedir, bool innerp,
+				  bool find_splices_p, bool salvagep) {
+  return entry->depth == depth &&
+    entry->querylength == querylength &&
+    entry->max_nblocks == max_nblocks &&
+    entry->localdb_nmismatches_allowed == localdb_nmismatches_allowed &&
+    entry->chrnum == chrnum &&
+    entry->chroffset == chroffset &&
+    entry->chrhigh == chrhigh &&
+    entry->plusp == plusp &&
+    entry->genestrand == genestrand &&
+    entry->sensedir == sensedir &&
+    entry->innerp == innerp &&
+    entry->find_splices_p == find_splices_p &&
+    entry->salvagep == salvagep &&
+    qend_local_path_equal_p(entry->key_path,path) == true;
+}
+
+
+static bool
+qend_local_cache_lookup (List_T *qend_paths, Path_segment_cache_T cache, Path_T path,
+			 int depth, int querylength, int max_nblocks, int localdb_nmismatches_allowed,
+			 Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			 bool plusp, int genestrand, int sensedir, bool innerp,
+			 bool find_splices_p, bool salvagep,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			 Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_qend_local_cache_entry_T *entry;
+  List_T copies, p;
+  Path_T result_path;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return false;
+  } else if (qend_local_cacheable_path_p(path) == false) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    cache->qend_local_skip_uncacheable_lookup++;
+    if (qend_local_cache_stats_print_p(cache->qend_local_skip_uncacheable_lookup) == true) {
+      qend_local_cache_stats_report(cache,"lookup-uncacheable",path,depth);
+    }
+#endif
+    return false;
+  }
+
+  #ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+  cache->qend_local_lookup_attempts++;
+  qend_local_cache_stats_maybe_report(cache,path,depth);
+#endif
+
+  hash = qend_local_cache_hash(path,depth,querylength,max_nblocks,localdb_nmismatches_allowed,
+			       chrnum,chroffset,chrhigh,plusp,genestrand,
+			       sensedir,innerp,find_splices_p,salvagep);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qend_local_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == false) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+      cache->qend_local_empty_misses++;
+#endif
+      return false;
+    } else if (qend_local_cache_entry_matches_p(entry,path,depth,querylength,max_nblocks,
+						localdb_nmismatches_allowed,chrnum,
+						chroffset,chrhigh,plusp,genestrand,
+						sensedir,innerp,find_splices_p,salvagep) == true) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+      cache->qend_local_hits++;
+      if (entry->result_paths == NULL) {
+	cache->qend_local_empty_hits++;
+      } else {
+	cache->qend_local_nonempty_hits++;
+      }
+      if (qend_local_cache_stats_print_p(cache->qend_local_hits) == true) {
+	qend_local_cache_stats_report(cache,"hit",path,depth);
+      }
+#endif
+      if (cache->emitted_path_dedup_p == true) {
+	copies = (List_T) NULL;
+	for (p = entry->result_paths; p != (List_T) NULL; p = List_next(p)) {
+	  result_path = (Path_T) List_head(p);
+	  if (emitted_path_seen_or_mark(cache,result_path,intlistpool,univcoordlistpool,
+					listpool,pathpool,vectorpool,hitlistpool,transcriptpool) == false) {
+	    copies = Hitlist_push(copies,hitlistpool,
+				  (void *) Path_copy(result_path,intlistpool,univcoordlistpool,
+						     listpool,pathpool,vectorpool,transcriptpool,hitlistpool)
+				  hitlistpool_trace(__FILE__,__LINE__));
+	  }
+	}
+	copies = List_reverse(copies);
+      } else {
+	copies = segment_cache_copy_paths(entry->result_paths,intlistpool,univcoordlistpool,
+					  listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+      }
+      *qend_paths = List_append(copies,*qend_paths);
+      return true;
+    }
+  }
+
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+  cache->qend_local_full_misses++;
+  if (qend_local_cache_stats_print_p(cache->qend_local_full_misses) == true) {
+    qend_local_cache_stats_report(cache,"lookup-full-table",path,depth);
+  }
+#endif
+
+  return false;
+}
+
+static bool
+qend_local_added_paths_small_p (List_T current, List_T old_head) {
+  List_T p;
+  int npaths = 0;
+
+  for (p = current; p != old_head; p = List_next(p)) {
+    if (p == (List_T) NULL || ++npaths > SEGMENT_CACHE_MAX_CACHED_PATHS) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static List_T
+qend_local_copy_added_paths (List_T current, List_T old_head,
+			     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			     Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  List_T copies = NULL, p;
+
+  for (p = current; p != old_head; p = List_next(p)) {
+    copies = Hitlist_push(copies,hitlistpool,
+			  (void *) Path_copy((Path_T) List_head(p),intlistpool,univcoordlistpool,
+					     listpool,pathpool,vectorpool,transcriptpool,hitlistpool)
+			  hitlistpool_trace(__FILE__,__LINE__));
+  }
+
+  return List_reverse(copies);
+}
+
+static void
+qend_local_cache_insert (Path_segment_cache_T cache, Path_T path,
+			 List_T old_qend_paths, List_T current_qend_paths,
+			 int depth, int querylength, int max_nblocks, int localdb_nmismatches_allowed,
+			 Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			 bool plusp, int genestrand, int sensedir, bool innerp,
+			 bool find_splices_p, bool salvagep,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			 Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_qend_local_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return;
+  } else if (cache->qend_local_nentries >= SEGMENT_CACHE_SIZE) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    cache->qend_local_skip_full++;
+    if (qend_local_cache_stats_print_p(cache->qend_local_skip_full) == true) {
+      qend_local_cache_stats_report(cache,"insert-full-table",path,depth);
+    }
+#endif
+    return;
+  } else if (qend_local_cacheable_path_p(path) == false) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    cache->qend_local_skip_uncacheable_insert++;
+    if (qend_local_cache_stats_print_p(cache->qend_local_skip_uncacheable_insert) == true) {
+      qend_local_cache_stats_report(cache,"insert-uncacheable",path,depth);
+    }
+#endif
+    return;
+  } else if (qend_local_added_paths_small_p(current_qend_paths,old_qend_paths) == false) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    cache->qend_local_skip_large_result++;
+    if (qend_local_cache_stats_print_p(cache->qend_local_skip_large_result) == true) {
+      qend_local_cache_stats_report(cache,"insert-large-result",path,depth);
+    }
+#endif
+    return;
+  }
+
+  hash = qend_local_cache_hash(path,depth,querylength,max_nblocks,localdb_nmismatches_allowed,
+			       chrnum,chroffset,chrhigh,plusp,genestrand,
+			       sensedir,innerp,find_splices_p,salvagep);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qend_local_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == true) {
+      if (qend_local_cache_entry_matches_p(entry,path,depth,querylength,max_nblocks,
+					   localdb_nmismatches_allowed,chrnum,
+					   chroffset,chrhigh,plusp,genestrand,
+					   sensedir,innerp,find_splices_p,salvagep) == true) {
+	return;
+      }
+    } else {
+      entry->occupiedp = true;
+      entry->depth = depth;
+      entry->querylength = querylength;
+      entry->max_nblocks = max_nblocks;
+      entry->localdb_nmismatches_allowed = localdb_nmismatches_allowed;
+      entry->chrnum = chrnum;
+      entry->chroffset = chroffset;
+      entry->chrhigh = chrhigh;
+      entry->plusp = plusp;
+      entry->genestrand = genestrand;
+      entry->sensedir = sensedir;
+      entry->innerp = innerp;
+      entry->find_splices_p = find_splices_p;
+      entry->salvagep = salvagep;
+      entry->key_path =
+	Path_copy(path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,vectorpool,transcriptpool,hitlistpool);
+      entry->result_paths =
+	qend_local_copy_added_paths(current_qend_paths,old_qend_paths,
+				    intlistpool,univcoordlistpool,listpool,pathpool,
+				    vectorpool,hitlistpool,transcriptpool);
+      cache->qend_local_nentries++;
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+      cache->qend_local_inserts++;
+      if (qend_local_cache_stats_print_p(cache->qend_local_inserts) == true) {
+	qend_local_cache_stats_report(cache,"insert",path,depth);
+      }
+#endif
+      return;
+    }
+  }
+
+  return;
+}
+
+Path_segment_cache_T
+Path_segment_cache_new (bool emitted_path_dedup_p) {
+  Path_segment_cache_T new = (Path_segment_cache_T) CALLOC(1,sizeof(struct Path_segment_cache_T));
+
+  new->emitted_path_dedup_p = emitted_path_dedup_p;
+  return new;
+}
+
+Path_ext_anchor_cache_T
+Path_ext_anchor_cache_new (void) {
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+  ext_anchor_report_enabled_p = getenv("GSNAP_EXT_ANCHOR_REUSE_REPORT") != NULL;
+  if (ext_anchor_report_enabled_p == true &&
+      ext_anchor_report_registered_p == false) {
+    atexit(ext_anchor_reuse_report);
+    ext_anchor_report_registered_p = true;
+  }
+  return (Path_ext_anchor_cache_T) CALLOC(1,sizeof(struct Path_ext_anchor_cache_T));
+#else
+  return (Path_ext_anchor_cache_T) NULL;
+#endif
+}
+
+void
+Path_ext_anchor_cache_free (Path_ext_anchor_cache_T *old,
+			    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			    Listpool_T listpool, Pathpool_T pathpool,
+			    Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+  int i;
+  if (*old != NULL) {
+    for (i = 0; i < EXT_ANCHOR_RESULT_CACHE_SIZE; i++) {
+      if ((*old)->entries[i].occupiedp == true) {
+	Path_gc(&(*old)->entries[i].sense_paths,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+	Path_gc(&(*old)->entries[i].antisense_paths,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+      }
+    }
+    FREE(*old);
+    *old = (Path_ext_anchor_cache_T) NULL;
+  }
+#else
+  (void) old; (void) intlistpool; (void) univcoordlistpool; (void) listpool;
+  (void) pathpool; (void) transcriptpool; (void) hitlistpool;
+#endif
+}
+
+void
+Path_segment_cache_free (Path_segment_cache_T *old,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool,
+			 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
+  int i;
+
+  if (*old) {
+#ifdef GSNAP_QEND_LOCAL_CACHE_STATS
+    qend_local_cache_stats_report(*old,"free",(Path_T) NULL,/*depth*/-1);
+#endif
+    for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+      if ((*old)->entries[i].occupiedp == true) {
+	Path_gc(&(*old)->entries[i].sense_paths,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+	Path_gc(&(*old)->entries[i].antisense_paths,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+      }
+      if ((*old)->qend_local_entries[i].occupiedp == true) {
+	Path_free(&(*old)->qend_local_entries[i].key_path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+	Path_gc(&(*old)->qend_local_entries[i].result_paths,intlistpool,univcoordlistpool,
+		listpool,pathpool,transcriptpool,hitlistpool);
+      }
+    }
+    for (i = 0; i < EMITTED_PATH_CACHE_SIZE; i++) {
+      if ((*old)->emitted_path_entries[i].occupiedp == true) {
+	Path_free(&(*old)->emitted_path_entries[i].key_path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+      }
+    }
+    FREE(*old);
+    *old = (Path_segment_cache_T) NULL;
+  }
+
+  return;
+}
+
+static bool
+segment_cache_lookup (List_T *qstart_sense_paths, List_T *qstart_antisense_paths,
+		     Path_segment_cache_T cache, Univdiag_T univdiag,
+		     int querylength, int localdb_nmismatches_allowed,
+		     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		     bool plusp, int genestrand, bool first_read_p, bool find_splices_p,
+		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+		     Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_segment_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return false;
+  }
+
+  hash = segment_cache_hash(univdiag,querylength,localdb_nmismatches_allowed,
+			   chrnum,chroffset,chrhigh,plusp,genestrand,
+			   first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == false) {
+      return false;
+    } else if (segment_cache_entry_matches_p(entry,univdiag,querylength,
+					    localdb_nmismatches_allowed,chrnum,
+					    chroffset,chrhigh,plusp,genestrand,
+					    first_read_p,find_splices_p) == true) {
+      *qstart_sense_paths =
+	segment_cache_copy_paths(entry->sense_paths,intlistpool,univcoordlistpool,
+				listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+      *qstart_antisense_paths =
+	segment_cache_copy_paths(entry->antisense_paths,intlistpool,univcoordlistpool,
+				listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void
+segment_cache_insert (Path_segment_cache_T cache, Univdiag_T univdiag,
+		     List_T qstart_sense_paths, List_T qstart_antisense_paths,
+		     int querylength, int localdb_nmismatches_allowed,
+		     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		     bool plusp, int genestrand, bool first_read_p, bool find_splices_p,
+		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+		     Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_segment_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL || cache->qstart_nentries >= SEGMENT_CACHE_SIZE) {
+    return;
+  } else if (segment_cache_small_path_list_p(qstart_sense_paths,qstart_antisense_paths) == false) {
+    return;
+  }
+
+  hash = segment_cache_hash(univdiag,querylength,localdb_nmismatches_allowed,
+			   chrnum,chroffset,chrhigh,plusp,genestrand,
+			   first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == true) {
+      if (segment_cache_entry_matches_p(entry,univdiag,querylength,
+				       localdb_nmismatches_allowed,chrnum,
+				       chroffset,chrhigh,plusp,genestrand,
+				       first_read_p,find_splices_p) == true) {
+	return;
+      }
+    } else {
+      entry->occupiedp = true;
+      entry->qstart = univdiag->qstart;
+      entry->qend = univdiag->qend;
+      entry->nmismatches = univdiag->nmismatches;
+      entry->querylength = querylength;
+      entry->localdb_nmismatches_allowed = localdb_nmismatches_allowed;
+      entry->chrnum = chrnum;
+      entry->chroffset = chroffset;
+      entry->chrhigh = chrhigh;
+      entry->univdiagonal = univdiag->univdiagonal;
+      entry->plusp = plusp;
+      entry->genestrand = genestrand;
+      entry->first_read_p = first_read_p;
+      entry->find_splices_p = find_splices_p;
+      entry->sense_paths =
+	segment_cache_copy_paths(qstart_sense_paths,intlistpool,univcoordlistpool,
+				listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+      entry->antisense_paths =
+	segment_cache_copy_paths(qstart_antisense_paths,intlistpool,univcoordlistpool,
+				listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+      cache->qstart_nentries++;
+      return;
+    }
+  }
+
+  return;
+}
+
+static unsigned int
+segment_qend_cache_hash (Univdiag_T head, Univdiag_T next, int querylength,
+			 int localdb_nmismatches_allowed, Chrnum_T chrnum,
+			 Univcoord_T chroffset, Univcoord_T chrhigh,
+			 bool plusp, int genestrand, bool first_read_p,
+			 bool find_splices_p) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) head->qstart);
+  h = segment_cache_mix(h,(unsigned long long) head->qend);
+  h = segment_cache_mix(h,(unsigned long long) head->nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) head->univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) next->qstart);
+  h = segment_cache_mix(h,(unsigned long long) next->qend);
+  h = segment_cache_mix(h,(unsigned long long) next->nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) next->univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) querylength);
+  h = segment_cache_mix(h,(unsigned long long) localdb_nmismatches_allowed);
+  h = segment_cache_mix(h,(unsigned long long) chrnum);
+  h = segment_cache_mix(h,(unsigned long long) chroffset);
+  h = segment_cache_mix(h,(unsigned long long) chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) plusp);
+  h = segment_cache_mix(h,(unsigned long long) genestrand);
+  h = segment_cache_mix(h,(unsigned long long) first_read_p);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+
+  return (unsigned int) (h & SEGMENT_CACHE_MASK);
+}
+
+static bool
+segment_qend_cache_entry_matches_p (struct Path_segment_qend_cache_entry_T *entry,
+				    Univdiag_T head, Univdiag_T next,
+				    int querylength, int localdb_nmismatches_allowed,
+				    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				    bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  return entry->head_qstart == head->qstart &&
+    entry->head_qend == head->qend &&
+    entry->head_nmismatches == head->nmismatches &&
+    entry->head_univdiagonal == head->univdiagonal &&
+    entry->next_qstart == next->qstart &&
+    entry->next_qend == next->qend &&
+    entry->next_nmismatches == next->nmismatches &&
+    entry->next_univdiagonal == next->univdiagonal &&
+    entry->querylength == querylength &&
+    entry->localdb_nmismatches_allowed == localdb_nmismatches_allowed &&
+    entry->chrnum == chrnum &&
+    entry->chroffset == chroffset &&
+    entry->chrhigh == chrhigh &&
+    entry->plusp == plusp &&
+    entry->genestrand == genestrand &&
+    entry->first_read_p == first_read_p &&
+    entry->find_splices_p == find_splices_p;
+}
+
+static bool
+segment_qend_cache_contains (Path_segment_cache_T cache, Univdiag_T head, Univdiag_T next,
+			     int querylength, int localdb_nmismatches_allowed,
+			     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			     bool plusp, int genestrand, bool first_read_p,
+			     bool find_splices_p) {
+  struct Path_segment_qend_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return false;
+  }
+
+  hash = segment_qend_cache_hash(head,next,querylength,localdb_nmismatches_allowed,
+				 chrnum,chroffset,chrhigh,plusp,genestrand,
+				 first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qend_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == false) {
+      return false;
+    } else if (segment_qend_cache_entry_matches_p(entry,head,next,querylength,
+						  localdb_nmismatches_allowed,chrnum,
+						  chroffset,chrhigh,plusp,genestrand,
+						  first_read_p,find_splices_p) == true) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool
+Path_segment_cache_qend_known_p (Path_segment_cache_T cache,
+				 int head_qstart, int head_qend, int head_nmismatches,
+				 Univcoord_T head_univdiagonal,
+				 int next_qstart, int next_qend, int next_nmismatches,
+				 Univcoord_T next_univdiagonal,
+				 int querylength, int localdb_nmismatches_allowed,
+				 Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				 bool plusp, int genestrand, bool first_read_p,
+				 bool find_splices_p) {
+  struct Univdiag_T head, next;
+
+  head.univdiagonal = head_univdiagonal;
+  head.qstart = head_qstart;
+  head.qend = head_qend;
+  head.nmismatches = head_nmismatches;
+
+  next.univdiagonal = next_univdiagonal;
+  next.qstart = next_qstart;
+  next.qend = next_qend;
+  next.nmismatches = next_nmismatches;
+
+  return segment_qend_cache_contains(cache,&head,&next,querylength,
+				     localdb_nmismatches_allowed,chrnum,
+				     chroffset,chrhigh,plusp,genestrand,
+				     first_read_p,find_splices_p);
+}
+
+static void
+segment_qend_cache_insert (Path_segment_cache_T cache, Univdiag_T head, Univdiag_T next,
+			   int querylength, int localdb_nmismatches_allowed,
+			   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			   bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  struct Path_segment_qend_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL || cache->qend_nentries >= SEGMENT_CACHE_SIZE) {
+    return;
+  }
+
+  hash = segment_qend_cache_hash(head,next,querylength,localdb_nmismatches_allowed,
+				 chrnum,chroffset,chrhigh,plusp,genestrand,
+				 first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qend_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == true) {
+      if (segment_qend_cache_entry_matches_p(entry,head,next,querylength,
+					     localdb_nmismatches_allowed,chrnum,
+					     chroffset,chrhigh,plusp,genestrand,
+					     first_read_p,find_splices_p) == true) {
+	return;
+      }
+    } else {
+      entry->occupiedp = true;
+      entry->head_qstart = head->qstart;
+      entry->head_qend = head->qend;
+      entry->head_nmismatches = head->nmismatches;
+      entry->head_univdiagonal = head->univdiagonal;
+      entry->next_qstart = next->qstart;
+      entry->next_qend = next->qend;
+      entry->next_nmismatches = next->nmismatches;
+      entry->next_univdiagonal = next->univdiagonal;
+      entry->querylength = querylength;
+      entry->localdb_nmismatches_allowed = localdb_nmismatches_allowed;
+      entry->chrnum = chrnum;
+      entry->chroffset = chroffset;
+      entry->chrhigh = chrhigh;
+      entry->plusp = plusp;
+      entry->genestrand = genestrand;
+      entry->first_read_p = first_read_p;
+      entry->find_splices_p = find_splices_p;
+      cache->qend_nentries++;
+      return;
+    }
+  }
+
+  return;
+}
+
+
+static unsigned int
+segment_qstart_cache_hash (Univdiag_T head, Univdiag_T next, int querylength,
+			   int localdb_nmismatches_allowed, Chrnum_T chrnum,
+			   Univcoord_T chroffset, Univcoord_T chrhigh,
+			   bool plusp, int genestrand, bool first_read_p,
+			   bool find_splices_p) {
+  unsigned long long h = 1469598103934665603ULL;
+
+  h = segment_cache_mix(h,(unsigned long long) head->qstart);
+  h = segment_cache_mix(h,(unsigned long long) head->qend);
+  h = segment_cache_mix(h,(unsigned long long) head->nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) head->univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) next->qstart);
+  h = segment_cache_mix(h,(unsigned long long) next->qend);
+  h = segment_cache_mix(h,(unsigned long long) next->nmismatches);
+  h = segment_cache_mix(h,(unsigned long long) next->univdiagonal);
+  h = segment_cache_mix(h,(unsigned long long) querylength);
+  h = segment_cache_mix(h,(unsigned long long) localdb_nmismatches_allowed);
+  h = segment_cache_mix(h,(unsigned long long) chrnum);
+  h = segment_cache_mix(h,(unsigned long long) chroffset);
+  h = segment_cache_mix(h,(unsigned long long) chrhigh);
+  h = segment_cache_mix(h,(unsigned long long) plusp);
+  h = segment_cache_mix(h,(unsigned long long) genestrand);
+  h = segment_cache_mix(h,(unsigned long long) first_read_p);
+  h = segment_cache_mix(h,(unsigned long long) find_splices_p);
+
+  return (unsigned int) (h & SEGMENT_CACHE_MASK);
+}
+
+static bool
+segment_qstart_cache_entry_matches_p (struct Path_segment_qstart_cache_entry_T *entry,
+				      Univdiag_T head, Univdiag_T next,
+				      int querylength, int localdb_nmismatches_allowed,
+				      Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				      bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  return entry->head_qstart == head->qstart &&
+    entry->head_qend == head->qend &&
+    entry->head_nmismatches == head->nmismatches &&
+    entry->head_univdiagonal == head->univdiagonal &&
+    entry->next_qstart == next->qstart &&
+    entry->next_qend == next->qend &&
+    entry->next_nmismatches == next->nmismatches &&
+    entry->next_univdiagonal == next->univdiagonal &&
+    entry->querylength == querylength &&
+    entry->localdb_nmismatches_allowed == localdb_nmismatches_allowed &&
+    entry->chrnum == chrnum &&
+    entry->chroffset == chroffset &&
+    entry->chrhigh == chrhigh &&
+    entry->plusp == plusp &&
+    entry->genestrand == genestrand &&
+    entry->first_read_p == first_read_p &&
+    entry->find_splices_p == find_splices_p;
+}
+
+static bool
+segment_qstart_cache_contains (Path_segment_cache_T cache, Univdiag_T head, Univdiag_T next,
+			       int querylength, int localdb_nmismatches_allowed,
+			       Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			       bool plusp, int genestrand, bool first_read_p,
+			       bool find_splices_p) {
+  struct Path_segment_qstart_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL) {
+    return false;
+  }
+
+  hash = segment_qstart_cache_hash(head,next,querylength,localdb_nmismatches_allowed,
+				   chrnum,chroffset,chrhigh,plusp,genestrand,
+				   first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qstart_pair_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == false) {
+      return false;
+    } else if (segment_qstart_cache_entry_matches_p(entry,head,next,querylength,
+						    localdb_nmismatches_allowed,chrnum,
+						    chroffset,chrhigh,plusp,genestrand,
+						    first_read_p,find_splices_p) == true) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool
+Path_segment_cache_qstart_known_p (Path_segment_cache_T cache,
+				   int head_qstart, int head_qend, int head_nmismatches,
+				   Univcoord_T head_univdiagonal,
+				   int next_qstart, int next_qend, int next_nmismatches,
+				   Univcoord_T next_univdiagonal,
+				   int querylength, int localdb_nmismatches_allowed,
+				   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				   bool plusp, int genestrand, bool first_read_p,
+				   bool find_splices_p) {
+  struct Univdiag_T head, next;
+
+  head.univdiagonal = head_univdiagonal;
+  head.qstart = head_qstart;
+  head.qend = head_qend;
+  head.nmismatches = head_nmismatches;
+
+  next.univdiagonal = next_univdiagonal;
+  next.qstart = next_qstart;
+  next.qend = next_qend;
+  next.nmismatches = next_nmismatches;
+
+  return segment_qstart_cache_contains(cache,&head,&next,querylength,
+				       localdb_nmismatches_allowed,chrnum,
+				       chroffset,chrhigh,plusp,genestrand,
+				       first_read_p,find_splices_p);
+}
+
+static void
+segment_qstart_cache_insert (Path_segment_cache_T cache, Univdiag_T head, Univdiag_T next,
+			     int querylength, int localdb_nmismatches_allowed,
+			     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			     bool plusp, int genestrand, bool first_read_p, bool find_splices_p) {
+  struct Path_segment_qstart_cache_entry_T *entry;
+  unsigned int hash;
+  int i;
+
+  if (cache == (Path_segment_cache_T) NULL || cache->qstart_pair_nentries >= SEGMENT_CACHE_SIZE) {
+    return;
+  }
+
+  hash = segment_qstart_cache_hash(head,next,querylength,localdb_nmismatches_allowed,
+				   chrnum,chroffset,chrhigh,plusp,genestrand,
+				   first_read_p,find_splices_p);
+  for (i = 0; i < SEGMENT_CACHE_SIZE; i++) {
+    entry = &(cache->qstart_pair_entries[(hash + i) & SEGMENT_CACHE_MASK]);
+    if (entry->occupiedp == true) {
+      if (segment_qstart_cache_entry_matches_p(entry,head,next,querylength,
+					       localdb_nmismatches_allowed,chrnum,
+					       chroffset,chrhigh,plusp,genestrand,
+					       first_read_p,find_splices_p) == true) {
+	return;
+      }
+    } else {
+      entry->occupiedp = true;
+      entry->head_qstart = head->qstart;
+      entry->head_qend = head->qend;
+      entry->head_nmismatches = head->nmismatches;
+      entry->head_univdiagonal = head->univdiagonal;
+      entry->next_qstart = next->qstart;
+      entry->next_qend = next->qend;
+      entry->next_nmismatches = next->nmismatches;
+      entry->next_univdiagonal = next->univdiagonal;
+      entry->querylength = querylength;
+      entry->localdb_nmismatches_allowed = localdb_nmismatches_allowed;
+      entry->chrnum = chrnum;
+      entry->chroffset = chroffset;
+      entry->chrhigh = chrhigh;
+      entry->plusp = plusp;
+      entry->genestrand = genestrand;
+      entry->first_read_p = first_read_p;
+      entry->find_splices_p = find_splices_p;
+      cache->qstart_pair_nentries++;
+      return;
+    }
+  }
+
+  return;
+}
 
 
 
@@ -153,6 +1702,17 @@ static bool splicingp;
 
 static int max_insertionlen;
 static int max_deletionlen;
+static Chrpos_T shortsplicedist;
+static int n_splice_paths = 1;
+static int max_recursive_ends = 2; /* Needs to be 2 or more, because the case of 1 is already checked */
+static int min_support_indel = 6;
+static int indel_support_mismatch_penalty = 3;
+static bool materialize_equiv_splice_alts_p = false;
+
+static inline bool
+sufficient_indel_support_p (int support, int nmismatches) {
+  return support - indel_support_mismatch_penalty*nmismatches >= min_support_indel;
+}
 
 /* For splice plus indel */
 /* static int max_splice_deletionlen = 3; */
@@ -172,9 +1732,8 @@ attach_indel_qstart_simple (int adj, T path, int indel_pos,
 			    Genomebits_T genomebits, Genomebits_T genomebits_alt,
 			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh, bool find_splices_p, 
 
-			    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			    unsigned short *localdb_alloc, 
+			    unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 
 			    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 			    Listpool_T listpool, Pathpool_T pathpool, Univdiagpool_T univdiagpool,
@@ -197,11 +1756,12 @@ attach_indel_qstart_simple (int adj, T path, int indel_pos,
   debug13(printf("Calling Spliceends_qstart_trim with indel_pos %d\n",indel_pos));
   splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,
 				    &found_sensedir,&splicetype5,&ambig_prob_5,
-				    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
+				    stage1,knownsplicing,try_sensedir,
 				    distal_univdiagonal,querylength,
 				    /*pos3*/indel_pos,exon_origin,chrnum,chroffset,chrhigh,
 				    plusp,genestrand,mismatch_positions_alloc,
 				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				    localdb_tally,localdb_overflowp,max_nblocks,
 				    univdiagpool,vectorpool,spliceendsgen,
 				    query_compress,queryptr,
 				    genomebits,genomebits_alt,find_splices_p);
@@ -277,7 +1837,7 @@ attach_indel_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   int nindels, indel_pos;
   int supporti, supportj;
   int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j;
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   int qstart;
 #endif
   
@@ -290,7 +1850,7 @@ attach_indel_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   /* Assume that left+qend gives a coordinate within genome */
   qend = Intlist_second_value(path->endpoints) /*+ ninserts*/;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   if (path->junctions == NULL) {
     /* ninserts = 0; */
   } else {
@@ -329,10 +1889,10 @@ attach_indel_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
       supportj = qend - (indel_pos + nindels);
       debug13(printf("(1) supporti %d - %d, supportj %d - (%d + %d)\n",
 		     indel_pos,low_qstart,qend,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(1) Not enough support for indel: supporti %d and mismatches %d\n",
 		       supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(1) Not enough support for indel: supportj %d and mismatches %d\n",
 		       supportj,nmismatches_j));
       } else {
@@ -357,7 +1917,7 @@ attach_indel_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(1) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       low_qstart,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
@@ -381,9 +1941,9 @@ attach_indel_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
       supportj = qend - indel_pos;
       debug13(printf("(2) supporti %d - %d, supportj %d - %d\n",
 		     indel_pos,low_qstart,qend,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(2) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(2) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_5(path,/*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
@@ -443,11 +2003,12 @@ attach_splice_qstart (T path, int splice_qpos, int trimpos, int nmismatches_to_t
   debug13(printf("attach_splice_qstart with splice_qpos %d, trimpos %d\n",splice_qpos,trimpos));
 #if 0
   splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,&found_sensedir,&splicetype5,&ambig_prob_5,
-				    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
+				    stage1,knownsplicing,try_sensedir,
 				    distal_univdiagonal,querylength,
 				    /*pos3*/splice_qpos,exon_origin,chrnum,chroffset,
 				    plusp,genestrand,mismatch_positions_alloc,
 				    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				    localdb_tally,localdb_overflowp,max_nblocks,
 				    univdiagpool,vectorpool,spliceendsgen,
 				    query_compress,queryptr,
 				    genomebits,genomebits_alt,find_splices_p);
@@ -571,13 +2132,13 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
 		       Univcoord_T chroffset, Univcoord_T chrhigh, int querylength,
 		       Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 		       Stage1_T stage1, Compress_T query_compress, char *queryptr,
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		       unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		       Localdb_T localdb, int localdb_nmismatches_allowed,
 		       bool plusp, int genestrand, bool innerp,
 		       Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		       Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-		       Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int try_sensedir) {
+		       Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int try_sensedir, int middle_rank) {
   T newpath = NULL;
   Univcoord_T univdiagonal, low_left;
   int qend;
@@ -587,18 +2148,12 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   List_T new_junctions;
   int ignore;
 
-  int type, typei, typej;
-  int nindels, indel_pos, splice_qpos, splice_qpos_i, splice_qpos_j, trimpos5, trimpos3;
-  Univcoord_T middle_univdiagonal;
-  Chrpos_T splice_distance, splice_distance_i, splice_distance_j;
-  double donor1_prob, acceptor1_prob, donor2_prob, acceptor2_prob;
+  int nindels, indel_pos;
   int supporti, supportj;
-  int nmismatches_i, nmismatches_j, nmismatches_indel,
-    ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel,
-    nmismatches, ref_nmismatches, nmismatches_middle, ref_nmismatches_middle;
-  int cont_trimpos, cont_nmismatches, cont_ref_nmismatches;
+  int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j, nmismatches, ref_nmismatches;
+  int cont_trimpos, cont_nmismatches;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   int qstart;
 #endif
   
@@ -616,7 +2171,7 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   /* Assume that left+qend gives a coordinate within genome */
   qend = Intlist_second_value(path->endpoints) /*+ ninserts*/;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   if (path->junctions == NULL) {
     /* ninserts = 0; */
   } else {
@@ -662,9 +2217,11 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
       Intlist_head_set(newpath->endpoints,low_qstart);
     }
     
+#if 0
   } else if (low_univdiagonal > univdiagonal + max_insertionlen) {
-    /* Impossible */
+    /* Possible with segment search */
     debug13(printf("Impossible\n"));
+#endif
 
   } else if (low_univdiagonal > univdiagonal) {
     /* (A) Insertion */
@@ -685,9 +2242,9 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
       supportj = qend - (indel_pos + nindels);
       debug13(printf("(3) supporti %d - %d, supportj %d - (%d + %d)\n",
 		     indel_pos,low_qstart,qend,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(3) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(3) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_5(path,/*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
@@ -711,7 +2268,7 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,low_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(2) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       low_qstart,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
@@ -735,9 +2292,9 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
       supportj = qend - indel_pos;
       debug13(printf("(4) supporti %d - %d, supportj %d - %d\n",
 		     indel_pos,low_qstart,qend,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(4) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(4) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_5(path,/*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
@@ -775,6 +2332,10 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
     debug13(printf("No splicing on circular chromosomes\n"));
 #endif
 
+  } else if (low_univdiagonal + shortsplicedist < univdiagonal) {
+    /* Gap is too large for a splice */
+    debug13(printf("Gap from %u to %u is too large for a splice\n",low_univdiagonal,univdiagonal));
+
   } else if (splicingp == false) {
     /* Unable to try splicing */
 
@@ -793,13 +2354,13 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
     if (Splice_resolve_qstart(&new_univdiagonals,&new_nmismatches,&new_ref_nmismatches,&new_endpoints,&new_junctions,
 			      /*univdiagonal_i*/low_univdiagonal,/*univdiagonal_j*/univdiagonal,
 			      stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-			      streamspace_max_alloc,streamspace_alloc,
-			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,localdb,
 			      localdb_nmismatches_allowed,
 			      /*pos5*/low_qstart,/*pos3*/qend,querylength,cont_trimpos,cont_nmismatches,
 			      indelinfo,spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
 			      /*sensedir*/try_sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,innerp,
-			      /*allow_indels_p*/true,/*find_middle_p*/true) == 0) {
+			      /*allow_indels_p*/true,/*find_middle_p*/true,middle_rank) == 0) {
       debug13(printf("Splice_resolve_qstart: fails\n"));
       newpath = (T) NULL;
 
@@ -825,6 +2386,7 @@ attach_unknown_qstart (T path, Univcoord_T low_univdiagonal, int low_qstart,
   }
 
   debug13(printf("attach_unknown_qstart is returning newpath %p\n",newpath));
+  debug13(Path_print(newpath));
 
   assert(newpath != path);
   return newpath;
@@ -842,9 +2404,9 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 
 			 Stage1_T stage1, Knownsplicing_T knownsplicing, Compress_T query_compress, char *queryptr,
 
-			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			 unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+			 unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			 Localdb_T localdb, int localdb_nmismatches_allowed,
 			 bool plusp, int querylength, bool innerp,
 
 			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -855,7 +2417,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
   T newpath, nextpath;
   Univcoord_T distal_univdiagonal;
   int best_endpoint, distal_trimpos;
-  int n_good_partners, goodi, i;
+  int n_good_partners, goodi, i, middle_rank;
 
   debug13(printf("Entered multiadd_splice_qstarts with %d partners at univdiagonal %u, common_splice_qpos %d.  Current path: ",
 		 npartners,univdiagonal,splice_qpos));
@@ -864,7 +2426,7 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 
   if (npartners == 1) {
     /* Needed to find spliceindel, where distal_prob is not known yet */
-    debug13(printf("Only one partner\n"));
+    debug13(printf("Only one partner: position %u\n",distal_splice_positions[0]));
     n_good_partners = 1;
     goodi = 0;
 
@@ -879,11 +2441,56 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 			  medial_support,medial_nmismatches,
 			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
 			  innerp) == true) {
+	debug13(printf("position %d:%d is good\n",i,distal_splice_positions[i]));
 	n_good_partners += 1;
 	goodi = i;
       }
     }
     debug13(printf("%d partners are good\n",n_good_partners));
+  }
+
+  if (materialize_equiv_splice_alts_p == true && n_good_partners > 1) {
+    bool have_equiv = false, equivalentp = true;
+    Univcoord_T equiv_univdiagonal = 0;
+    int equiv_qstart = 0, equiv_qend = 0, equiv_nmismatches = 0, equiv_support = 0;
+    double best_prob = -1.0;
+
+    for (i = 0; i < npartners; i++) {
+      if (distal_univdiags[i]->univdiagonal < univdiagonal &&
+	  Splice_accept_p(splice_qpos,querylength,distal_probs[i],medial_prob,
+			  /*univdiagonal_i*/distal_univdiags[i]->univdiagonal,
+			  /*univdiagonal_j*/univdiagonal,
+			  distal_support[i],distal_univdiags[i]->nmismatches,
+			  medial_support,medial_nmismatches,
+			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+			  innerp) == true) {
+	if (have_equiv == false) {
+	  have_equiv = true;
+	  equiv_univdiagonal = distal_univdiags[i]->univdiagonal;
+	  equiv_qstart = distal_univdiags[i]->qstart;
+	  equiv_qend = distal_univdiags[i]->qend;
+	  equiv_nmismatches = distal_univdiags[i]->nmismatches;
+	  equiv_support = distal_support[i];
+	} else if (distal_univdiags[i]->univdiagonal != equiv_univdiagonal ||
+		   distal_univdiags[i]->qstart != equiv_qstart ||
+		   distal_univdiags[i]->qend != equiv_qend ||
+		   distal_univdiags[i]->nmismatches != equiv_nmismatches ||
+		   distal_support[i] != equiv_support) {
+	  equivalentp = false;
+	}
+
+	if (distal_probs[i] > best_prob) {
+	  best_prob = distal_probs[i];
+	  goodi = i;
+	}
+      }
+    }
+
+    if (have_equiv == true && equivalentp == true) {
+      debug13(printf("Collapsing %d equivalent qstart splice partners at univdiagonal %u, %d..%d\n",
+		     n_good_partners,equiv_univdiagonal,equiv_qstart,equiv_qend));
+      n_good_partners = 1;
+    }
   }
 
   if (n_good_partners == 0) {
@@ -918,22 +2525,26 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
       /* Previously called attach_splice_qstart, but that did not handle spliceindels */
 #endif
 
-    } else if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/distal_univdiagonal,
-						/*low_qstart*/distal_trimpos,
-						path->chroffset,path->chrhigh,querylength,
-						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-						stage1,query_compress,queryptr,
-						streamspace_max_alloc,streamspace_alloc,
-						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-						localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
-						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-						vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
-      /* Skip */
-      
     } else {
-      assert(newpath != path);
-      newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_fwd(newpath)
-			      hitlistpool_trace(__FILE__,__LINE__));
+      for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/distal_univdiagonal,
+						  /*low_qstart*/distal_trimpos,
+						  path->chroffset,path->chrhigh,querylength,
+						  stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+						  stage1,query_compress,queryptr,
+						  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						  localdb_tally,localdb_overflowp,max_nblocks,localdb,
+						  localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+						  intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+						  vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,middle_rank)) == NULL) {
+	  break;
+	} else {
+	  assert(newpath != path);
+	  newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_fwd(newpath)
+				  hitlistpool_trace(__FILE__,__LINE__));
+	}
+      }
+      newpaths = List_reverse(newpaths);
     }
       
     return newpaths;
@@ -948,24 +2559,27 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 				    innerp)) > 0) {
     debug13(printf("Found a best outer splice\n"));
 
-    if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/distal_univdiagonal,
-					 /*low_qstart*/distal_trimpos,
-					 path->chroffset,path->chrhigh,querylength,
-					 stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-					 stage1,query_compress,queryptr,
-					 streamspace_max_alloc,streamspace_alloc,
-					 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					 localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
-					 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-					 vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
-      /* Skip */
-      return (List_T) NULL;
-      
-    } else {
-      assert(newpath != path);
-      return Hitlist_push(NULL,hitlistpool,(void *) Path_expect_fwd(newpath)
-			  hitlistpool_trace(__FILE__,__LINE__));
+    newpaths = (List_T) NULL;
+    for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+      if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/distal_univdiagonal,
+					       /*low_qstart*/distal_trimpos,
+					       path->chroffset,path->chrhigh,querylength,
+					       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					       stage1,query_compress,queryptr,
+					       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					       localdb_tally,localdb_overflowp,max_nblocks,localdb,
+					       localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+					       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					       vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,middle_rank)) == NULL) {
+	break;
+      } else {
+	assert(newpath != path);
+	newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_fwd(newpath)
+				 hitlistpool_trace(__FILE__,__LINE__));
+      }
     }
+    return List_reverse(newpaths);
+
 
   } else if ((qstart_alts =
 	      Altsplice_qstart_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,querylength,
@@ -1015,11 +2629,11 @@ multiadd_splice_qstarts (T path, Univcoord_T univdiagonal, Splicetype_T splicety
 						 path->chroffset,path->chrhigh,querylength,
 						 stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 						 stage1,query_compress,queryptr,
-						 streamspace_max_alloc,streamspace_alloc,
 						 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-						 localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+						 localdb_tally,localdb_overflowp,max_nblocks,localdb,
+						 localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 						 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-						 vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
+						 vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,/*middle_rank*/0)) == NULL) {
       /* Keep outer altsplice */
       return Hitlist_push(NULL,hitlistpool,(void *) Path_expect_fwd(newpath)
 			  hitlistpool_trace(__FILE__,__LINE__));
@@ -1061,9 +2675,8 @@ attach_indel_qend_simple (int adj, T path, int indel_pos,
 			  Genomebits_T genomebits, Genomebits_T genomebits_alt,
 			  Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh, bool find_splices_p,
 
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, 
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 
 			  Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 			  Listpool_T listpool, Pathpool_T pathpool, Univdiagpool_T univdiagpool,
@@ -1086,11 +2699,12 @@ attach_indel_qend_simple (int adj, T path, int indel_pos,
   debug13(printf("Calling Spliceends_qend_trim with indel_pos %d\n",indel_pos));
   splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 				  &found_sensedir,&splicetype3,&ambig_prob_3,
-				  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
+				  stage1,knownsplicing,try_sensedir,
 				  distal_univdiagonal,querylength,
 				  /*pos5*/indel_pos,exon_origin,chrnum,chroffset,chrhigh,
 				  plusp,genestrand,mismatch_positions_alloc,
 				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				  localdb_tally,localdb_overflowp,max_nblocks,
 				  univdiagpool,vectorpool,spliceendsgen,
 				  query_compress,queryptr,
 				  genomebits,genomebits_alt,find_splices_p);
@@ -1168,7 +2782,7 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   int nindels, indel_pos;
   int supporti, supportj;
   int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j;
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   int qend;
 #endif
 
@@ -1192,7 +2806,7 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   /* Assume that left+qstart gives a coordinate within genome */
   qstart = Intlist_second_value(path->endpoints) + ninserts;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   qend = Intlist_head(path->endpoints) /*+ ninserts*/;
   printf("Entering attach_indel_qend with univdiagonal %u %d..%d and high_univdiagonal %u with high_qend %d (diff %d)\n",
 	 univdiagonal,qstart,qend,high_univdiagonal,high_univdiagonal - univdiagonal,high_qend);
@@ -1225,9 +2839,9 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
       supportj = high_qend - (indel_pos + nindels);
       debug13(printf("(5) supporti %d - %d, supportj %d - (%d + %d)\n",
 		     indel_pos,qstart,high_qend,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(5) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(5) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -1251,7 +2865,7 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(3) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       qstart,high_qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
 	
 	debug13(Path_print(newpath));
@@ -1277,9 +2891,9 @@ attach_indel_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
       supportj = high_qend - indel_pos;
       debug13(printf("(6) supporti %d - %d, supportj %d - %d\n",
 		     indel_pos,qstart,high_qend,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(6) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(6) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -1342,11 +2956,12 @@ attach_splice_qend (T path, int splice_qpos, int trimpos, int nmismatches_to_tri
 #if 0
   splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 				  &found_sensedir,&splicetype3,&ambig_prob_3,
-				  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,try_sensedir,
+				  stage1,knownsplicing,try_sensedir,
 				  distal_univdiagonal,querylength,
 				  /*pos5*/splice_qpos,exon_origin,chrnum,chroffset,chrhigh,
 				  plusp,genestrand,mismatch_positions_alloc,
 				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				  localdb_tally,localdb_overflowp,max_nblocks,
 				  univdiagpool,vectorpool,spliceendsgen,
 				  query_compress,queryptr,
 				  genomebits,genomebits_alt,find_splices_p);
@@ -1468,13 +3083,13 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 		     Univcoord_T chroffset, Univcoord_T chrhigh, int querylength,
 		     Indelinfo_T indelinfo, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 		     Stage1_T stage1, Compress_T query_compress, char *queryptr,
-		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		     unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		     unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		     Localdb_T localdb, int localdb_nmismatches_allowed,
 		     bool plusp, int genestrand, bool innerp,
 		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-		     Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int try_sensedir) {
+		     Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int try_sensedir, int middle_rank) {
   T newpath = NULL;
   Univcoord_T univdiagonal, left;
   int qstart, ninserts;
@@ -1484,18 +3099,12 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   List_T new_junctions;
   int ignore;
 
-  int type, typei, typej;
-  int nindels, indel_pos, splice_qpos, splice_qpos_i, splice_qpos_j, trimpos5, trimpos3;
-  Univcoord_T middle_univdiagonal;
-  Chrpos_T splice_distance, splice_distance_i, splice_distance_j;
-  double donor1_prob, acceptor1_prob, donor2_prob, acceptor2_prob;
+  int nindels, indel_pos;
   int supporti, supportj;
-  int nmismatches_i, nmismatches_j, nmismatches_indel,
-    ref_nmismatches_i, ref_nmismatches_j, ref_nmismatches_indel,
-    nmismatches, ref_nmismatches, nmismatches_middle, ref_nmismatches_middle;
-  int cont_trimpos, cont_nmismatches, cont_ref_nmismatches;
+  int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j, nmismatches, ref_nmismatches;
+  int cont_trimpos, cont_nmismatches;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   int qend;
 #endif
 
@@ -1527,7 +3136,7 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   /* Assume that left+qstart gives a coordinate within genome */
   qstart = Intlist_second_value(path->endpoints) + ninserts;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   qend = Intlist_head(path->endpoints) /*+ ninserts*/;
   printf("Entering attach_unknown_qend with try_sensedir %d, univdiagonal %u %d..%d and high_univdiagonal %u (diff %d)\n",
 	 try_sensedir,univdiagonal - chroffset,qstart,qend,high_univdiagonal - chroffset,high_univdiagonal - univdiagonal);
@@ -1574,9 +3183,11 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
       Intlist_head_set(newpath->endpoints,high_qend);
     }
 
+#if 0
   } else if (high_univdiagonal + max_insertionlen < univdiagonal) {
-    /* Impossible */
+    /* Possible with segment search */
     debug13(printf("Impossible\n"));
+#endif
 
   } else if (high_univdiagonal < univdiagonal) {
     /* (A) Insertion */
@@ -1597,9 +3208,9 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
       supportj = high_qend - (indel_pos + nindels);
       debug13(printf("(7) supporti %d - %d, supportj %d - (%d + %d)\n",
 		     indel_pos,qstart,high_qend,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(7) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(7) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -1623,7 +3234,7 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(4) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       qstart,high_qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
 	
 	debug13(Path_print(newpath));
@@ -1649,9 +3260,9 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
       supportj = high_qend - indel_pos;
       debug13(printf("(8) supporti %d - %d, supportj %d - %d\n",
 		     indel_pos,qstart,high_qend,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("(8) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("(8) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	newpath = Path_copy_3(path,/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -1678,7 +3289,7 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
 	
 	newpath->univdiagonals = Univcoordlistpool_push(newpath->univdiagonals,univcoordlistpool,high_univdiagonal
 							univcoordlistpool_trace(__FILE__,__LINE__));
-	debug13(printf("Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug13(printf("(2) Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		       qstart,high_qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
 	
 	debug13(Path_print(newpath));
@@ -1694,6 +3305,10 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   } else if (splicingp == false) {
     /* Unable to try splicing */
 
+  } else if (high_univdiagonal > univdiagonal + shortsplicedist) {
+    /* Gap is too large for a splice */
+    debug13(printf("Gap from %u to %u is too large for a splice\n",univdiagonal,high_univdiagonal));
+
   } else {
     /* (C) Splice with or without indel */
     left = univdiagonal - (Univcoord_T) querylength;
@@ -1708,13 +3323,13 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
     if (Splice_resolve_qend(&new_univdiagonals,&new_nmismatches,&new_ref_nmismatches,&new_endpoints,&new_junctions,
 			    /*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/high_univdiagonal,
 			    stage1,query_compress,queryptr,plusp,chroffset,chrhigh,
-			    streamspace_max_alloc,streamspace_alloc,
-			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			    localdb_tally,localdb_overflowp,max_nblocks,localdb,
 			    localdb_nmismatches_allowed,
 			    /*pos5*/qstart,/*pos3*/high_qend,querylength,cont_trimpos,cont_nmismatches,
 			    indelinfo,spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
 			    /*sensedir*/try_sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,innerp,
-			    /*allow_indels_p*/true,/*find_middle_p*/true) == 0) {
+			    /*allow_indels_p*/true,/*find_middle_p*/true,middle_rank) == 0) {
       debug13(printf("Splice_resolve_qend: fails\n"));
       newpath = (T) NULL;
 
@@ -1740,6 +3355,7 @@ attach_unknown_qend (T path, Univcoord_T high_univdiagonal, int high_qend,
   }
 
   debug13(printf("attach_unknown_qend is returning newpath %p\n",newpath));
+  debug13(Path_print(newpath));
 
   assert(newpath != path);
   return newpath;
@@ -1757,9 +3373,9 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 
 		       Stage1_T stage1, Knownsplicing_T knownsplicing, Compress_T query_compress, char *queryptr,
 
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		       unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		       Localdb_T localdb, int localdb_nmismatches_allowed,
 		       bool plusp, int querylength, bool innerp,
 
 		       Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -1770,7 +3386,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
   T newpath, nextpath;
   Univcoord_T distal_univdiagonal;
   int best_endpoint, distal_trimpos;
-  int n_good_partners, goodi, i;
+  int n_good_partners, goodi, i, middle_rank;
 
   debug13(printf("Entered multiadd_splice_qends with %d partners at univdiagonal %u, common_splice_qpos %d.  Current path: ",
 		 npartners,univdiagonal,splice_qpos));
@@ -1779,7 +3395,7 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 
   if (npartners == 1) {
     /* Needed to find spliceindel, where distal_prob is not known yet */
-    debug13(printf("Only one partner\n"));
+    debug13(printf("Only one partner: position %u\n",distal_splice_positions[0]));
     n_good_partners = 1;
     goodi = 0;
   } else {
@@ -1793,11 +3409,56 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 			  distal_support[i],distal_univdiags[i]->nmismatches,
 			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
 			  innerp) == true) {
+	debug13(printf("position %d:%d is good\n",i,distal_splice_positions[i]));
 	n_good_partners += 1;
 	goodi = i;
       }
     }
     debug13(printf("%d partners are good\n",n_good_partners));
+  }
+
+  if (materialize_equiv_splice_alts_p == true && n_good_partners > 1) {
+    bool have_equiv = false, equivalentp = true;
+    Univcoord_T equiv_univdiagonal = 0;
+    int equiv_qstart = 0, equiv_qend = 0, equiv_nmismatches = 0, equiv_support = 0;
+    double best_prob = -1.0;
+
+    for (i = 0; i < npartners; i++) {
+      if (univdiagonal < distal_univdiags[i]->univdiagonal &&
+	  Splice_accept_p(splice_qpos,querylength,medial_prob,distal_probs[i],
+			  /*univdiagonal_i*/univdiagonal,
+			  /*univdiagonal_j*/distal_univdiags[i]->univdiagonal,
+			  medial_support,medial_nmismatches,
+			  distal_support[i],distal_univdiags[i]->nmismatches,
+			  plusp,/*sense_forward_p*/found_sensedir == SENSE_FORWARD,
+			  innerp) == true) {
+	if (have_equiv == false) {
+	  have_equiv = true;
+	  equiv_univdiagonal = distal_univdiags[i]->univdiagonal;
+	  equiv_qstart = distal_univdiags[i]->qstart;
+	  equiv_qend = distal_univdiags[i]->qend;
+	  equiv_nmismatches = distal_univdiags[i]->nmismatches;
+	  equiv_support = distal_support[i];
+	} else if (distal_univdiags[i]->univdiagonal != equiv_univdiagonal ||
+		   distal_univdiags[i]->qstart != equiv_qstart ||
+		   distal_univdiags[i]->qend != equiv_qend ||
+		   distal_univdiags[i]->nmismatches != equiv_nmismatches ||
+		   distal_support[i] != equiv_support) {
+	  equivalentp = false;
+	}
+
+	if (distal_probs[i] > best_prob) {
+	  best_prob = distal_probs[i];
+	  goodi = i;
+	}
+      }
+    }
+
+    if (have_equiv == true && equivalentp == true) {
+      debug13(printf("Collapsing %d equivalent qend splice partners at univdiagonal %u, %d..%d\n",
+		     n_good_partners,equiv_univdiagonal,equiv_qstart,equiv_qend));
+      n_good_partners = 1;
+    }
   }
 
 
@@ -1833,21 +3494,25 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
       /* Previously called attach_splice_qend, but that did not handle spliceindels */
 #endif
 
-    } else if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/distal_univdiagonal,/*high_qend*/distal_trimpos,
-					      path->chroffset,path->chrhigh,querylength,
-					      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-					      stage1,query_compress,queryptr,
-					      streamspace_max_alloc,streamspace_alloc,
-					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					      localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
-					      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-					      vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
-      /* Skip */
-      
     } else {
-      assert(newpath != path);
-      newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_rev(newpath)
-			      hitlistpool_trace(__FILE__,__LINE__));
+      for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/distal_univdiagonal,/*high_qend*/distal_trimpos,
+						path->chroffset,path->chrhigh,querylength,
+						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+						stage1,query_compress,queryptr,
+						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						localdb_tally,localdb_overflowp,max_nblocks,localdb,
+						localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+						vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,middle_rank)) == NULL) {
+	  break;
+	} else {
+	  assert(newpath != path);
+	  newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_rev(newpath)
+				  hitlistpool_trace(__FILE__,__LINE__));
+	}
+      }
+      newpaths = List_reverse(newpaths);
     }
 
     return newpaths;
@@ -1862,23 +3527,26 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 				  innerp)) > 0) {
     debug13(printf("Found a best outer splice\n"));
 
-    if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/distal_univdiagonal,/*high_qend*/distal_trimpos,
-				       path->chroffset,path->chrhigh,querylength,
-				       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-				       stage1,query_compress,queryptr,
-				       streamspace_max_alloc,streamspace_alloc,
-				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				       localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
-				       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-				       vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
-      /* Skip */
-      return (List_T) NULL;
-      
-    } else {
-      assert(newpath != path);
-      return Hitlist_push(NULL,hitlistpool,(void *) Path_expect_rev(newpath)
-			  hitlistpool_trace(__FILE__,__LINE__));
+    newpaths = (List_T) NULL;
+    for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+      if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/distal_univdiagonal,/*high_qend*/distal_trimpos,
+					     path->chroffset,path->chrhigh,querylength,
+					     stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					     stage1,query_compress,queryptr,
+					     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					     localdb_tally,localdb_overflowp,max_nblocks,localdb,
+					     localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+					     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					     vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,middle_rank)) == NULL) {
+	break;
+      } else {
+	assert(newpath != path);
+	newpaths = Hitlist_push(newpaths,hitlistpool,(void *) Path_expect_rev(newpath)
+				 hitlistpool_trace(__FILE__,__LINE__));
+      }
     }
+    return List_reverse(newpaths);
+
 
   } else if ((qend_alts =
 	      Altsplice_qend_new(&best_endpoint,boundedp,splice_qpos,anchor_qpos,querylength,
@@ -1927,11 +3595,11 @@ multiadd_splice_qends (T path, Univcoord_T univdiagonal, Splicetype_T splicetype
 					       path->chroffset,path->chrhigh,querylength,
 					       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 					       stage1,query_compress,queryptr,
-					       streamspace_max_alloc,streamspace_alloc,
 					       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					       localdb,localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
+					       localdb_tally,localdb_overflowp,max_nblocks,localdb,
+					       localdb_nmismatches_allowed,plusp,/*genestrand*/0,innerp,
 					       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-					       vectorpool,hitlistpool,/*try_sensedir*/found_sensedir)) == NULL) {
+					       vectorpool,hitlistpool,/*try_sensedir*/found_sensedir,/*middle_rank*/0)) == NULL) {
       /* Keep outer altsplice */
       return Hitlist_push(NULL,hitlistpool,(void *) Path_expect_rev(newpath)
 			  hitlistpool_trace(__FILE__,__LINE__));
@@ -1953,7 +3621,7 @@ static bool
 endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
   Intlist_T p;
   List_T q;
-  Junction_T junction;
+  Junction_T junction, next_junction;
   int last_endpoint;
 
   debug2(printf("Evaluating endpoints for acceptability: %s\n",Intlist_to_string(endpoints)));
@@ -1963,12 +3631,23 @@ endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
   for (p = Intlist_next(endpoints), q = junctions; Intlist_next(p) != NULL; p = Intlist_next(p), q = List_next(q)) {
     last_endpoint = Intlist_head(p);
     junction = (Junction_T) List_head(q);
-    if (last_endpoint + Junction_ninserts(junction) >= Intlist_second_value(p)) {
-      debug2(printf("Endpoint %d + %d >= %d, so unacceptable\n",
+    if (last_endpoint + Junction_ninserts(junction) > Intlist_second_value(p)) {
+      debug2(printf("Endpoint %d + %d > %d, so unacceptable\n",
+		    last_endpoint,Junction_ninserts(junction),Intlist_second_value(p)));
+      return false;
+    } else if (last_endpoint + Junction_ninserts(junction) == Intlist_second_value(p) &&
+	       (Parameters_fix_splice_boundary_indels_p == false ||
+		q == NULL || List_next(q) == NULL ||
+		(next_junction = (Junction_T) List_head(List_next(q))) == NULL ||
+		!(((Junction_type(junction) == INS_JUNCTION || Junction_type(junction) == DEL_JUNCTION) &&
+		   Junction_type(next_junction) == SPLICE_JUNCTION) ||
+		  (Junction_type(junction) == SPLICE_JUNCTION &&
+		   (Junction_type(next_junction) == INS_JUNCTION || Junction_type(next_junction) == DEL_JUNCTION))))) {
+      debug2(printf("Endpoint %d + %d == %d without an enabled indel/splice boundary, so unacceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_second_value(p)));
       return false;
     } else {
-      debug2(printf("Endpoint %d + %d < %d, so acceptable\n",
+      debug2(printf("Endpoint %d + %d <= %d, so acceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_second_value(p)));
     }
   }
@@ -1978,14 +3657,38 @@ endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
 
 
 static bool
-endpoints_monotonic_p (Intlist_T endpoints) {
+indel_splice_boundary_p (Junction_T junction, Junction_T next_junction) {
+  Junctiontype_T type, next_type;
+
+  if (Parameters_fix_splice_boundary_indels_p == false) {
+    return false;
+  } else if (junction == NULL || next_junction == NULL) {
+    return false;
+  }
+
+  type = Junction_type(junction);
+  next_type = Junction_type(next_junction);
+  return (((type == INS_JUNCTION || type == DEL_JUNCTION) && next_type == SPLICE_JUNCTION) ||
+          (type == SPLICE_JUNCTION && (next_type == INS_JUNCTION || next_type == DEL_JUNCTION))) ? true : false;
+}
+
+static bool
+endpoints_monotonic_p (Intlist_T endpoints, List_T junctions) {
   int prev_endpoint;
   Intlist_T q;
+  List_T j;
+  Junction_T junction, next_junction;
 
   prev_endpoint = Intlist_head(endpoints);
-  for (q = Intlist_next(endpoints); q != NULL; q = Intlist_next(q)) {
-    if (Intlist_head(q) <= prev_endpoint) {
+  for (q = Intlist_next(endpoints), j = junctions; q != NULL; q = Intlist_next(q), j = (j == NULL) ? NULL : List_next(j)) {
+    if (Intlist_head(q) < prev_endpoint) {
       return false;
+    } else if (Intlist_head(q) == prev_endpoint) {
+      junction = (j == NULL) ? NULL : (Junction_T) List_head(j);
+      next_junction = (j == NULL || List_next(j) == NULL) ? NULL : (Junction_T) List_head(List_next(j));
+      if (indel_splice_boundary_p(junction,next_junction) == false) {
+        return false;
+      }
     }
     prev_endpoint = Intlist_head(q);
   }
@@ -2043,7 +3746,7 @@ compute_exon_origin (Intlist_T endpoints, List_T junctions) {
 
 /* chrnum is fixed from middle_diagonal */
 static List_T
-combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
+combine_leftright_paths (int *found_score, int *end_score, Univcoord_T main_univdiagonal,
 			 List_T qstart_paths, List_T qend_paths,
 			 Compress_T query_compress, Compress_T query_compress_fwd,
 			 Compress_T query_compress_rev, char *queryptr, int querylength,
@@ -2052,9 +3755,8 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 			 int *mismatch_positions_alloc, Stage1_T stage1,
 			 Knownsplicing_T knownsplicing, Spliceendsgen_T spliceendsgen,
 
-			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			 unsigned short *localdb_alloc, 
+			 unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 
 			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 			 Listpool_T listpool, Pathpool_T pathpool, Univdiagpool_T univdiagpool,
@@ -2086,7 +3788,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 
 
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   printf("\n");
   printf("*** %s: Entered combine_leftright_paths with %d qstart paths and %d qend paths\n",
 	 sensedir == SENSE_FORWARD ? "sense" : "antisense",List_length(qstart_paths),List_length(qend_paths));
@@ -2235,7 +3937,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
   best_qend_paths = qend_paths;
 #endif
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   printf("Now have %d best qstart paths and %d best qend paths\n",
 	 List_length(best_qstart_paths),List_length(best_qend_paths));
   for (a = best_qstart_paths; a != NULL; a = List_next(a)) {
@@ -2472,12 +4174,13 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 	  debug13(printf("Calling Spliceends_qend_trim with pos5 %d\n",pos5 + ninserts));
 	  splice3p = Spliceends_qend_trim(&trimpos,&nmismatches_to_trimpos,
 					  &found_sensedir,&splicetype3,&ambig_prob_3,
-					  stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,sensedir,
+					  stage1,knownsplicing,sensedir,
 					  Univcoordlist_head(univdiagonals),querylength,
 					  pos5 + ninserts,
 					  exon_origin,chrnum,chroffset,chrhigh,
 					  plusp,genestrand,mismatch_positions_alloc,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					  localdb_tally,localdb_overflowp,max_nblocks,
 					  univdiagpool,vectorpool,spliceendsgen,
 					  query_compress,queryptr,
 					  genomebits,genomebits_alt,find_splices_p);
@@ -2541,11 +4244,12 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 	  exon_origin = compute_exon_origin(endpoints,junctions);
 	  debug13(printf("Calling Spliceends_qstart_trim with pos3 %d\n",pos3));
 	  splice5p = Spliceends_qstart_trim(&trimpos,&nmismatches_to_trimpos,&found_sensedir,&splicetype5,&ambig_prob_5,
-					    stage1,streamspace_max_alloc,streamspace_alloc,knownsplicing,sensedir,
+					    stage1,knownsplicing,sensedir,
 					    Univcoordlist_head(univdiagonals),querylength,pos3,
 					    exon_origin,chrnum,chroffset,chrhigh,
 					    plusp,genestrand,mismatch_positions_alloc,
 					    novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					    localdb_tally,localdb_overflowp,max_nblocks,
 					    univdiagpool,vectorpool,spliceendsgen,
 					    query_compress,queryptr,
 					    genomebits,genomebits_alt,find_splices_p);
@@ -2584,7 +4288,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 	}
 	  
 	debug13(printf("Before Path_create, endpoints are %s\n",Intlist_to_string(endpoints)));
-	if (endpoints_monotonic_p(endpoints) == false) {
+	if (endpoints_monotonic_p(endpoints,junctions) == false) {
 	  Intlistpool_free_list(&endpoints,intlistpool
 				intlistpool_trace(__FILE__,__LINE__));
 	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
@@ -2604,7 +4308,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 			     splice3p,splicetype3,ambig_prob_3,
 			     qstart_path->qstart_alts,qend_path->qend_alts,
 			     query_compress_fwd,query_compress_rev,pathpool,vectorpool);
-	  Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+	  Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
 	  debug13(printf("++ Combined path %p: ",path));
 	  debug13(Path_print(path));
 	  debug13(printf("\n"));
@@ -2629,7 +4333,7 @@ combine_leftright_paths (int *found_score, Univcoord_T main_univdiagonal,
 			hitlistpool_trace(__FILE__,__LINE__));
 #endif
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   printf("\n");
   printf("*** Exiting combine_leftright_paths.  Paths now has length %d\n",List_length(paths));
 #endif
@@ -2692,9 +4396,25 @@ check_for_ascending_qstart (int prev_qstart, Univcoord_T prev_univdiagonal, List
 static void
 compute_qstart_local (List_T *qstart_paths,
 		      int depth, Path_T path, char *queryptr, int querylength,
-		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
 		      Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+		      Compress_T query_compress, Chrnum_T chrnum, Univcoord_T chroffset,
+		      Univcoord_T chrhigh, Intlistpool_T intlistpool,
+		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
+		      Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		      Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
+		      Hitlistpool_T hitlistpool, Spliceendsgen_T spliceendsgen,
+		      int localdb_nmismatches_allowed, bool plusp, int genestrand,
+		      int sensedir, bool innerp, bool find_splices_p, bool salvagep);
+
+static void
+compute_qstart_local_work (List_T *qstart_paths,
+		      int depth, Path_T path, char *queryptr, int querylength,
+		      int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
+		      Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress, 
 		      Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 		      Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -2703,10 +4423,10 @@ compute_qstart_local (List_T *qstart_paths,
 		      Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
 		      bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p, bool salvagep) {
   List_T newpaths = NULL, p;
-  /* int orig_qstart; */
   T splice_path, end_path, newpath, parent;
   Univcoord_T indel_univdiagonal, univdiagonal;
   int qstart, pos3, exon_origin, indel_pos, trimpos, adj;
+  int orig_qstart, child_qstart;
   int nmismatches_i;
 
   bool splice5p;
@@ -2716,13 +4436,17 @@ compute_qstart_local (List_T *qstart_paths,
   int nosplice_trimpos, medial_splice_trimpos_0;
   double ambig_prob_5;
   int nosplice_nmismatches, medial_splice_nmismatches_0;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long spliceends_key_hash, spliceends_result_hash;
+#endif
 
 
   debug13(printf("Entering compute_qstart_local, salvage %d, at depth %d with path:\n",salvagep,depth));
   debug13(Path_print(path));
   debug13(printf("\n"));
-
   Path_expect_fwd(path);
+
+  orig_qstart = Path_qstart(path);
 
   if (path->qstart_alts != NULL) {
     /* Not possible to add localdb because of the ambiguity */
@@ -2746,10 +4470,10 @@ compute_qstart_local (List_T *qstart_paths,
 				 hitlistpool_trace(__FILE__,__LINE__));
     return;
 
-#if 0
-  } else if (depth > MAX_DEPTH_LOCAL) {
+  } else if (depth > max_recursive_ends) {
     /* Too much recursive depth */
-    debug13(printf("compute_qstart_local is unextended because of depth %d\n",depth));
+    debug13(printf("compute_qstart_local is unextended because depth %d > max %d\n",
+		   depth,max_recursive_ends));
     newpath = Path_copy(path,intlistpool,univcoordlistpool,listpool,
 			pathpool,vectorpool,transcriptpool,hitlistpool);
     debug20(printf("(3) Putting into unextended qstart paths: ")); debug20(Path_print(newpath));
@@ -2757,7 +4481,6 @@ compute_qstart_local (List_T *qstart_paths,
     *qstart_paths = Hitlist_push(*qstart_paths,hitlistpool,(void *) Path_expect_fwd(newpath)
 				 hitlistpool_trace(__FILE__,__LINE__));
     return;
-#endif
 
   } else if (splicingp == false) {
     /* Not able to try splicing */
@@ -2771,7 +4494,8 @@ compute_qstart_local (List_T *qstart_paths,
 
   } else {
     /* Attempt to extend */
-    /* orig_qstart = Path_qstart(path); */
+    debug13(printf("compute_qstart_local extension state: depth %d, orig_qstart %d\n",
+		   depth,orig_qstart));
 
     /* pos3 is the end of the current segment.  qstart is the
        approximate start of the current segment.  pos5 (0) to qstart
@@ -2781,6 +4505,13 @@ compute_qstart_local (List_T *qstart_paths,
     /* left = univdiagonal - (Univcoord_T) querylength; */
     
     exon_origin = Path_exon_origin(path);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    spliceends_key_hash = spliceends_call_fingerprint(
+      "qstart",sensedir,univdiagonal,querylength,pos3,exon_origin,
+      chrnum,chroffset,chrhigh,plusp,genestrand,localdb_nmismatches_allowed,
+      innerp,salvagep,max_nblocks,stage1,knownsplicing,spliceendsgen,
+      query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
+#endif
     debug13(printf("(SPLICE) Calling Spliceends_trimmed_qstarts with univdiagonal %u, pos3 %d, exon_origin %d\n",
 		   univdiagonal,pos3,exon_origin));
     nspliceends = Spliceends_trimmed_qstarts(&spliceends,&nosplice_trimpos,&medial_splice_trimpos_0,
@@ -2791,9 +4522,17 @@ compute_qstart_local (List_T *qstart_paths,
 					     chrnum,chroffset,chrhigh,plusp,genestrand,
 					     localdb_nmismatches_allowed,innerp,salvagep,
 					     mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-					     localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
-					     knownsplicing,univdiagpool,vectorpool,spliceendsgen,
+					     localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					     stage1,knownsplicing,univdiagpool,vectorpool,spliceendsgen,
 					     query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    spliceends_result_hash = spliceends_result_fingerprint(
+      spliceends,nspliceends,nosplice_trimpos,medial_splice_trimpos_0,
+      nosplice_nmismatches,medial_splice_nmismatches_0,splice5p,splicetype5,
+      ambig_prob_5);
+    Accel_profile_spliceends_result("qstart",spliceends_key_hash,nspliceends,
+				    spliceends_result_hash);
+#endif
     /* path->spliceends_qstart = pos3; */
     debug13(printf("Spliceends_trimmed_qstarts returning %d spliceends, nosplice %d (%d nmismatches), medial splice %d (%d nmismatches)\n",
 		   nspliceends,nosplice_trimpos,nosplice_nmismatches,medial_splice_trimpos_0,medial_splice_nmismatches_0));
@@ -2808,7 +4547,7 @@ compute_qstart_local (List_T *qstart_paths,
       debug13(printf("=> Actually, not solving for splice because nosplice_trimpos is %d\n",nosplice_trimpos));
       
     } else {
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
       printf("=> Got %d spliceends\n",nspliceends);
       for (int i = 0; i < nspliceends; i++) {
 	printf("splice_qpos %d => partner %u, %d..%d, splicedist %u, mismatches %d, prob %f, trimpos %d\n",
@@ -2841,8 +4580,8 @@ compute_qstart_local (List_T *qstart_paths,
 						       &(spliceends->distal_univdiags[i]),&(spliceends->distal_probs[i]),
 						       /*npartners*/(j - i),
 						       stage1,knownsplicing,query_compress,queryptr,
-						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						       localdb_tally,localdb_overflowp,max_nblocks,
 						       localdb,localdb_nmismatches_allowed,plusp,querylength,innerp,
 						       intlistpool,univcoordlistpool,listpool,
 						       hitlistpool,pathpool,transcriptpool,vectorpool,sensedir));
@@ -2852,6 +4591,11 @@ compute_qstart_local (List_T *qstart_paths,
 
     /* Spliceends_free(&spliceends); */
     Spliceendsgen_return(spliceendsgen,&spliceends);
+
+    if (newpaths != NULL) {
+      debug13(printf("compute_qstart_local has %d splice child paths; still trying start indel\n",
+		     List_length(newpaths)));
+    }
 
     if (1 || newpaths == NULL) {
       /* Always try an indel, since splice may be incorrect */
@@ -2866,12 +4610,13 @@ compute_qstart_local (List_T *qstart_paths,
       /* univdiagonal = Univcoordlist_head(path->univdiagonals); */
       /* left = univdiagonal - (Univcoord_T) querylength; */
       
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
       if (nosplice_trimpos != 0) {
 	printf("(INDEL) Calling Genomebits_indel_solve_low and Spliceends_indel_qstart with %d..%d\n",0,nosplice_trimpos);
       }
 #endif
       
+      debug13(printf("nosplice_trimpos at qstart is %d\n",nosplice_trimpos));
       if (nosplice_trimpos == 0) {
 	/* Already extended to the start */
 	debug13(printf("Actually, not solving for indel because nosplice_trimpos is %d\n",nosplice_trimpos));
@@ -2883,8 +4628,8 @@ compute_qstart_local (List_T *qstart_paths,
 						       plusp,genestrand,mismatch_positions_alloc,
 						       stage1,knownsplicing,spliceendsgen,query_compress,queryptr,
 						       genomebits,genomebits_alt,chrnum,chroffset,chrhigh,find_splices_p,
-						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						       localdb_tally,localdb_overflowp,max_nblocks,
 						       intlistpool,univcoordlistpool,listpool,
 						       pathpool,univdiagpool,vectorpool)) != NULL) {
 	debug13(printf("=> Indel of adj %d\n",adj));
@@ -2907,7 +4652,7 @@ compute_qstart_local (List_T *qstart_paths,
 		  Spliceends_indel_qstart(nosplice_trimpos,univdiagonal,querylength,chroffset,chrhigh,
 					  plusp,genestrand,localdb_nmismatches_allowed,
 					  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					  stage1,streamspace_max_alloc,streamspace_alloc,
+					  localdb_tally,localdb_overflowp,max_nblocks,stage1,
 					  univdiagpool,query_compress,queryptr)) != 0 &&
 		 (newpath = attach_indel_qstart(path,/*low_diagonal*/indel_univdiagonal,/*low_qstart*/0,
 						chroffset,chrhigh,querylength,stage1->indelinfo,
@@ -3090,27 +4835,29 @@ compute_qstart_local (List_T *qstart_paths,
 
     } else {
       /* Extensions were added, so recurse */
+      debug13(printf("compute_qstart_local recursing over %d child paths from depth %d, orig_qstart %d\n",
+		     List_length(newpaths),depth,orig_qstart));
+      Accel_profile_pathsolve_children("qstart",depth,List_length(newpaths));
       for (p = newpaths; p != NULL; p = List_next(p)) {
 	parent = (T) List_head(p);
-#if 0
-	if (Path_qstart(parent) >= orig_qstart) {
-	  debug13(printf("New path has qstart %d >= orig_qstart %d, so not recursing\n",
-			 Path_qstart(parent),orig_qstart));
+	child_qstart = Path_qstart(parent);
+	if (child_qstart >= orig_qstart) {
+	  debug13(printf("Skipping compute_qstart_local non-progress child: depth %d -> %d, child qstart %d >= orig qstart %d\n",
+			 depth,depth+1,child_qstart,orig_qstart));
 	} else {
-#endif
+	  debug13(printf("compute_qstart_local progress child: depth %d -> %d, child qstart %d < orig qstart %d\n",
+			 depth,depth+1,child_qstart,orig_qstart));
 	  compute_qstart_local(&(*qstart_paths),depth+1,parent,queryptr,querylength,
-			       streamspace_max_alloc,streamspace_alloc,
 			       mismatch_positions_alloc,novel_univdiags_alloc,
 			       novel_diagonals_alloc,localdb_alloc,
+			       localdb_tally,localdb_overflowp,max_nblocks,
 			       stage1,knownsplicing,knownindels,
 			       query_compress,chrnum,chroffset,chrhigh,intlistpool,
 			       univcoordlistpool,listpool,pathpool,transcriptpool,
 			       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			       localdb_nmismatches_allowed,plusp,genestrand,
 			       sensedir,innerp,find_splices_p,salvagep);
-#if 0
 	}
-#endif
 	Path_free(&parent,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
       }
@@ -3120,29 +4867,84 @@ compute_qstart_local (List_T *qstart_paths,
 }
 
 
+static void
+compute_qstart_local (List_T *qstart_paths,
+		      int depth, Path_T path, char *queryptr, int querylength,
+		      int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
+		      Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+		      Compress_T query_compress, Chrnum_T chrnum, Univcoord_T chroffset,
+		      Univcoord_T chrhigh, Intlistpool_T intlistpool,
+		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
+		      Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		      Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
+		      Hitlistpool_T hitlistpool, Spliceendsgen_T spliceendsgen,
+		      int localdb_nmismatches_allowed, bool plusp, int genestrand,
+		      int sensedir, bool innerp, bool find_splices_p, bool salvagep) {
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  List_T old_qstart_paths = *qstart_paths;
+  unsigned long long state_id = Accel_profile_pathsolve_call("qstart",depth);
+  unsigned long long input_path_hash = pathsolve_path_fingerprint(path);
+  unsigned long long frontier_hash = pathsolve_frontier_fingerprint(
+    path,"qstart",depth,innerp,find_splices_p,salvagep);
+#endif
+
+  compute_qstart_local_work(qstart_paths,depth,path,queryptr,querylength,
+			    mismatch_positions_alloc,novel_univdiags_alloc,
+			    novel_diagonals_alloc,localdb_alloc,localdb_tally,
+			    localdb_overflowp,max_nblocks,stage1,knownsplicing,
+			    knownindels,query_compress,chrnum,chroffset,chrhigh,
+			    intlistpool,univcoordlistpool,listpool,pathpool,
+			    transcriptpool,univdiagpool,vectorpool,hitlistpool,
+			    spliceendsgen,localdb_nmismatches_allowed,plusp,
+			    genestrand,sensedir,innerp,find_splices_p,salvagep);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_pathsolve_result(state_id,"qstart",depth,input_path_hash,frontier_hash,
+			   *qstart_paths,old_qstart_paths);
+#endif
+}
+
 /* Recursively adds diagonals to the end of a path */
 /* Either returns NULL, which means caller should use the given path (or a copy)
-   as the result, or returns newpaths, which of which is different
+   as the result, or returns newpaths in qend_paths, which of which is different
    from path, where the caller needs to free path, if desired */
 
 /* unextended_paths are all fwd.  complete_paths are all rev */
 static void
 compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int querylength,
-		    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
 		    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress, 
 		    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 		    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 		    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
 		    Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
-		    bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p, bool salvagep) {
+		    bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p,
+		    bool salvagep, Path_segment_cache_T segment_cache,
+		    bool path_qend_local_cache_p);
+
+static void
+compute_qend_local_work (List_T *qend_paths, int depth, T path, char *queryptr, int querylength,
+			 int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
+			 Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			 int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			 Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress,
+			 Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			 Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			 Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
+			 bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p,
+			 bool salvagep, Path_segment_cache_T segment_cache,
+			 bool path_qend_local_cache_p) {
   List_T newpaths = NULL, p;
-  /* int orig_qend; */
   T splice_path, end_path, newpath, parent;
   Univcoord_T indel_univdiagonal, univdiagonal;
   int qend, pos5, exon_origin, indel_pos, trimpos, adj;
+  int orig_qend, child_qend;
   int nmismatches_j;
 
   bool splice3p;
@@ -3152,17 +4954,21 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
   int nosplice_trimpos, medial_splice_trimpos_0; /* Most proximal medial_splice_trimpos */
   double ambig_prob_3;
   int nosplice_nmismatches, medial_splice_nmismatches_0;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long spliceends_key_hash, spliceends_result_hash;
+#endif
 
 
   debug13(printf("Entering compute_qend_local, salvage %d, at depth %d with path:\n",salvagep,depth));
   debug13(Path_print(path));
   debug13(printf("\n"));
-
   Path_expect_rev(path);
+
+  orig_qend = Path_qend(path);
 
   if (path->qend_alts != NULL) {
     /* Not possible to add localdb because of the ambiguity */
-    debug13(printf("compute_qstart_local is complete because of qend_alts\n"));
+    debug13(printf("compute_qend_local is complete because of qend_alts\n"));
     path->completep = Path_completep(path,/*endtrim_allowed*/8,/*allow_ambig_p*/true);
     newpath = Path_copy(path,intlistpool,univcoordlistpool,listpool,
 			pathpool,vectorpool,transcriptpool,hitlistpool);
@@ -3182,10 +4988,10 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 			       hitlistpool_trace(__FILE__,__LINE__));
     return;
 
-#if 0
-  } else if (depth > MAX_DEPTH_LOCAL) {
+  } else if (depth > max_recursive_ends) {
     /* Too much recursive depth */
-    debug13(printf("compute_qend_local is unextended because of depth %d\n",depth));
+    debug13(printf("compute_qend_local is unextended because depth %d > max %d\n",
+		   depth,max_recursive_ends));
     newpath = Path_copy(path,intlistpool,univcoordlistpool,listpool,
 			pathpool,vectorpool,transcriptpool,hitlistpool);
     debug20(printf("(8) Putting into unextended qend paths: ")); debug20(Path_print(newpath));
@@ -3193,7 +4999,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
     *qend_paths = Hitlist_push(*qend_paths,hitlistpool,
 			       (void *) Path_expect_rev(newpath)
 			       hitlistpool_trace(__FILE__,__LINE__));
-#endif
+    return;
 
   } else if (splicingp == false) {
     /* Not able to try splicing */
@@ -3206,7 +5012,8 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 			       hitlistpool_trace(__FILE__,__LINE__));
   } else {
     /* Attempt to extend */
-    /* orig_qend = Path_qend(path); */
+    debug13(printf("compute_qend_local extension state: depth %d, orig_qend %d\n",
+		   depth,orig_qend));
 
     /* pos5 is the start of the current segment.  qend is the
        approximate end of the current segment.  qend to pos3
@@ -3219,6 +5026,13 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
     /* left = univdiagonal - (Univcoord_T) querylength; */
 
     exon_origin = Path_exon_origin(path);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    spliceends_key_hash = spliceends_call_fingerprint(
+      "qend",sensedir,univdiagonal,querylength,pos5,exon_origin,
+      chrnum,chroffset,chrhigh,plusp,genestrand,localdb_nmismatches_allowed,
+      innerp,salvagep,max_nblocks,stage1,knownsplicing,spliceendsgen,
+      query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
+#endif
     debug13(printf("(SPLICE) Calling Spliceends_trimmed_qends with univdiagonal %u, pos5 %d, exon_origin %d\n",
 		   univdiagonal,pos5,exon_origin));
     nspliceends = Spliceends_trimmed_qends(&spliceends,&nosplice_trimpos,&medial_splice_trimpos_0,
@@ -3228,9 +5042,17 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 					   /*qstart*/pos5,/*qend:querylength,*/exon_origin,chrnum,chroffset,chrhigh,
 					   plusp,genestrand,localdb_nmismatches_allowed,innerp,salvagep,
 					   mismatch_positions_alloc,novel_univdiags_alloc,novel_diagonals_alloc,
-					   localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+					   localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,stage1,
 					   knownsplicing,univdiagpool,vectorpool,spliceendsgen,
 					   query_compress,queryptr,genomebits,genomebits_alt,find_splices_p);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    spliceends_result_hash = spliceends_result_fingerprint(
+      spliceends,nspliceends,nosplice_trimpos,medial_splice_trimpos_0,
+      nosplice_nmismatches,medial_splice_nmismatches_0,splice3p,splicetype3,
+      ambig_prob_3);
+    Accel_profile_spliceends_result("qend",spliceends_key_hash,nspliceends,
+				    spliceends_result_hash);
+#endif
     /* path->spliceends_qend = pos5; */
     debug13(printf("Spliceends_trimmed_qends returning %d spliceends, nosplice %d (%d nmismatches), medial_splice %d (%d nmismatches)\n",
 		   nspliceends,nosplice_trimpos,nosplice_nmismatches,medial_splice_trimpos_0,medial_splice_nmismatches_0));
@@ -3246,7 +5068,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
       debug13(printf("=> Actually, not solving for splice because nosplice_trimpos is %d\n",nosplice_trimpos));
       
     } else {
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
       printf("=> Got %d spliceends\n",nspliceends);
       for (int i = 0; i < nspliceends; i++) {
 	printf("splice_qpos %d => partner %u, %d..%d, splicedist %u, mismatches %d, prob %f, trimpos %d\n",
@@ -3279,8 +5101,8 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 						     &(spliceends->distal_univdiags[i]),&(spliceends->distal_probs[i]),
 						     /*npartners*/(j - i),
 						     stage1,knownsplicing,query_compress,queryptr,
-						     streamspace_max_alloc,streamspace_alloc,
 						     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						     localdb_tally,localdb_overflowp,max_nblocks,
 						     localdb,localdb_nmismatches_allowed,plusp,querylength,innerp,
 						     intlistpool,univcoordlistpool,listpool,
 						     hitlistpool,pathpool,transcriptpool,vectorpool,sensedir));
@@ -3290,6 +5112,11 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 
     /* Spliceends_free(&spliceends); */
     Spliceendsgen_return(spliceendsgen,&spliceends);
+
+    if (newpaths != NULL) {
+      debug13(printf("compute_qend_local has %d splice child paths; still trying end indel\n",
+		     List_length(newpaths)));
+    }
 
     if (1 || newpaths == NULL) {
       /* Always try an indel, since splice may be incorrect */
@@ -3304,12 +5131,13 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
       /* univdiagonal = Univcoordlist_head(path->univdiagonals); */
       /* left = univdiagonal - (Univcoord_T) querylength; */
       
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
       if (nosplice_trimpos != querylength) {
 	printf("(INDEL) Calling Genomebits_indel_solve_high and Spliceends_indel_qend with %d..%d\n",nosplice_trimpos,querylength);
       }
 #endif
   
+      debug13(printf("nosplice_trimpos at qend is %d\n",nosplice_trimpos));
       if (nosplice_trimpos == querylength) {
 	/* Already extended to the end */
 	debug13(printf("Actually, not solving for indel because nosplice_trimpos is %d\n",nosplice_trimpos));
@@ -3321,8 +5149,8 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 						     plusp,genestrand,mismatch_positions_alloc,
 						     stage1,knownsplicing,spliceendsgen,query_compress,queryptr,
 						     genomebits,genomebits_alt,chrnum,chroffset,chrhigh,find_splices_p,
-						     streamspace_max_alloc,streamspace_alloc,
 						     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						     localdb_tally,localdb_overflowp,max_nblocks,
 						     intlistpool,univcoordlistpool,listpool,
 						     pathpool,univdiagpool,vectorpool)) != NULL) {
 	debug13(printf("=> Indel of adj %d\n",adj));
@@ -3345,7 +5173,7 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 		  Spliceends_indel_qend(nosplice_trimpos,univdiagonal,querylength,chroffset,chrhigh,
 					plusp,genestrand,localdb_nmismatches_allowed,
 					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					stage1,streamspace_max_alloc,streamspace_alloc,
+					localdb_tally,localdb_overflowp,max_nblocks,stage1,
 					univdiagpool,query_compress,queryptr)) != 0 &&
 		 (newpath = attach_indel_qend(path,/*high_diagonal*/indel_univdiagonal,/*high_qend*/querylength,
 					      chrhigh,querylength,stage1->indelinfo,
@@ -3539,27 +5367,30 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
 
     } else {
       /* Extensions were added, so recurse */
+      debug13(printf("compute_qend_local recursing over %d child paths from depth %d, orig_qend %d\n",
+		     List_length(newpaths),depth,orig_qend));
+      Accel_profile_pathsolve_children("qend",depth,List_length(newpaths));
       for (p = newpaths; p != NULL; p = List_next(p)) {
 	parent = (T) List_head(p);
-#if 0
-	if (Path_qend(parent) <= orig_qend) {
-	  debug13(printf("New path has qend %d <= orig_qend %d, so not recursing\n",
-			 Path_qend(parent),orig_qend));
+	child_qend = Path_qend(parent);
+	if (child_qend <= orig_qend) {
+	  debug13(printf("Skipping compute_qend_local non-progress child: depth %d -> %d, child qend %d <= orig qend %d\n",
+			 depth,depth+1,child_qend,orig_qend));
 	} else {
-#endif
+	  debug13(printf("compute_qend_local progress child: depth %d -> %d, child qend %d > orig qend %d\n",
+			 depth,depth+1,child_qend,orig_qend));
 	  compute_qend_local(&(*qend_paths),depth+1,parent,queryptr,querylength,
-			     streamspace_max_alloc,streamspace_alloc,
 			     mismatch_positions_alloc,novel_univdiags_alloc,
 			     novel_diagonals_alloc,localdb_alloc,
+			     localdb_tally,localdb_overflowp,max_nblocks,
 			     stage1,knownsplicing,knownindels,
 			     query_compress,chrnum,chroffset,chrhigh,intlistpool,
 			     univcoordlistpool,listpool,pathpool,transcriptpool,
 			     univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			     localdb_nmismatches_allowed,plusp,genestrand,
-			     sensedir,innerp,find_splices_p,salvagep);
-#if 0
+			     sensedir,innerp,find_splices_p,salvagep,segment_cache,
+			     path_qend_local_cache_p);
 	}
-#endif
 	Path_free(&parent,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
       }
@@ -3568,10 +5399,71 @@ compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int q
   }
 }
 
+static void
+compute_qend_local (List_T *qend_paths, int depth, T path, char *queryptr, int querylength,
+		    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
+		    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels, Compress_T query_compress,
+		    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+		    Spliceendsgen_T spliceendsgen, int localdb_nmismatches_allowed,
+		    bool plusp, int genestrand, int sensedir, bool innerp, bool find_splices_p,
+		    bool salvagep, Path_segment_cache_T segment_cache,
+		    bool path_qend_local_cache_p) {
+  List_T old_qend_paths = *qend_paths;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long state_id = Accel_profile_pathsolve_call("qend",depth);
+  unsigned long long input_path_hash = pathsolve_path_fingerprint(path);
+  unsigned long long frontier_hash = pathsolve_frontier_fingerprint(
+    path,"qend",depth,innerp,find_splices_p,salvagep);
+#endif
+  Path_segment_cache_T qend_local_cache =
+    path_qend_local_cache_p == true ? segment_cache : (Path_segment_cache_T) NULL;
+
+  if (qend_local_cache_lookup(&(*qend_paths),qend_local_cache,path,depth,querylength,
+			      max_nblocks,localdb_nmismatches_allowed,chrnum,chroffset,chrhigh,
+			      plusp,genestrand,sensedir,innerp,find_splices_p,salvagep,
+			      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			      hitlistpool,transcriptpool) == true) {
+    Accel_profile_pathsolve_cache("qend_local",/*hitp*/true);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    profile_pathsolve_result(state_id,"qend",depth,input_path_hash,frontier_hash,
+			     *qend_paths,old_qend_paths);
+#endif
+    return;
+  }
+  Accel_profile_pathsolve_cache("qend_local",/*hitp*/false);
+
+  compute_qend_local_work(&(*qend_paths),depth,path,queryptr,querylength,
+			  mismatch_positions_alloc,novel_univdiags_alloc,
+			  novel_diagonals_alloc,localdb_alloc,
+			  localdb_tally,localdb_overflowp,max_nblocks,
+			  stage1,knownsplicing,knownindels,query_compress,
+			  chrnum,chroffset,chrhigh,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,univdiagpool,vectorpool,
+			  hitlistpool,spliceendsgen,localdb_nmismatches_allowed,
+			  plusp,genestrand,sensedir,innerp,find_splices_p,salvagep,
+			  segment_cache,path_qend_local_cache_p);
+
+  qend_local_cache_insert(qend_local_cache,path,old_qend_paths,*qend_paths,depth,querylength,
+			  max_nblocks,localdb_nmismatches_allowed,chrnum,chroffset,chrhigh,
+			  plusp,genestrand,sensedir,innerp,find_splices_p,salvagep,
+			  intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			  hitlistpool,transcriptpool);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_pathsolve_result(state_id,"qend",depth,input_path_hash,frontier_hash,
+			   *qend_paths,old_qend_paths);
+#endif
+  return;
+}
+
 
 #ifdef REMAP_PATHS
 static List_T
-try_repairs (int *found_score, Path_T path,
+try_repairs (int *found_score, int *end_score, Path_T path,
 	     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 	     Shortread_T queryseq, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 	     Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -3611,7 +5503,7 @@ try_repairs (int *found_score, Path_T path,
 #ifdef TRY_REPAIRS
   for (r = repairs; r != NULL; r = List_next(r)) {
     repair = (Repair_T) List_head(r);
-    if ((newpath = Repair_path(&(*found_score),repair,path,path->sensedir,
+    if ((newpath = Repair_path(&(*found_score),&(*end_score),repair,path,path->sensedir,
 			       query_compress,query_compress_fwd,query_compress_rev,
 			       intlistpool,univcoordlistpool,listpool,
 			       pathpool,vectorpool,transcriptpool,hitlistpool)) == NULL) {
@@ -3638,10 +5530,11 @@ try_repairs (int *found_score, Path_T path,
 #endif
 
 
-/* Used for EXT, and for KMER_PREVALENT if a Path_solve_univdiagonal does not succeed */
+#if 0
+/* Used for SEGMENT1 if a Path_solve_univdiagonal does not succeed */
 /* Calls combine_leftright_paths, which calls Path_eval_nmatches */
 void
-Path_solve_from_diagonals (int *found_score,
+Path_solve_from_diagonals (int *found_score, int *end_score,
 
 			   List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
 			   List_T *sense_paths, List_T *antisense_paths,
@@ -3650,8 +5543,8 @@ Path_solve_from_diagonals (int *found_score,
 
 			   Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
 
-			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			   int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 			   int localdb_nmismatches_allowed,
 
 			   Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
@@ -3659,6 +5552,7 @@ Path_solve_from_diagonals (int *found_score,
 			   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			   bool plusp, int genestrand,
 			   bool paired_end_p, bool first_read_p,
+
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 			   Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
@@ -3668,7 +5562,7 @@ Path_solve_from_diagonals (int *found_score,
 
   int middle_diagonal_qstart = auxinfo->qstart;
   int middle_diagonal_qend = auxinfo->qend;
-  int middle_nmismatches = auxinfo->nmismatches;
+  /* int middle_nmismatches = auxinfo->nmismatches; */
   List_T qend_univdiags = auxinfo->right_univdiags;
   List_T qstart_univdiags = auxinfo->left_univdiags;
 
@@ -3681,14 +5575,15 @@ Path_solve_from_diagonals (int *found_score,
   Univdiag_T univdiag;
   bool qstart_innerp, qend_innerp;
   bool sense_completep, antisense_completep;
+  int middle_rank;
 
 
-  debug13(printf("Entered Path_solve_from_diagonals from method %s, find_splices_p %d, first_read_p %d, with middle_diagonal %u (#%d %u) %d..%d, %d qstart diagonals, and %d qend diagonals.  middle_nmismatches: %d\n",
+  debug13(printf("Entered Path_solve_from_diagonals from method %s, find_splices_p %d, first_read_p %d, with middle_diagonal %u (#%d %u) %d..%d, %d qstart diagonals, and %d qend diagonals\n",
 		 Method_string(method),find_splices_p,first_read_p,middle_univdiagonal,
 		 chrnum,middle_univdiagonal - chroffset,middle_diagonal_qstart,middle_diagonal_qend,
-		 List_length(qstart_univdiags),List_length(qend_univdiags),middle_nmismatches));
+		 List_length(qstart_univdiags),List_length(qend_univdiags)));
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   printf("Start: first_read_p %d, plusp %d\n",first_read_p,plusp);
   printf("Start: %d complete sense paths\n",List_length(*sense_paths));
   printf("Start: %d complete antisense paths\n",List_length(*antisense_paths));
@@ -3696,14 +5591,14 @@ Path_solve_from_diagonals (int *found_score,
   printf("Start: %d unextended antisense paths\n",List_length(*unextended_antisense_paths));
 
   for (p = qstart_univdiags; p != NULL; p = List_next(p)) {
-    printf("qstart diagonal %u %u %d..%d\n",
+    printf("qstart diagonal %u %d %d..%d\n",
 	   ((Univdiag_T) List_head(p))->univdiagonal,
 	   middle_univdiagonal - ((Univdiag_T) List_head(p))->univdiagonal,
 	   ((Univdiag_T) List_head(p))->qstart,
 	   ((Univdiag_T) List_head(p))->qend);
   }
   for (p = qend_univdiags; p != NULL; p = List_next(p)) {
-    printf("qend diagonal %u %u %d..%d\n",
+    printf("qend diagonal %u %d %d..%d\n",
 	   ((Univdiag_T) List_head(p))->univdiagonal,
 	   ((Univdiag_T) List_head(p))->univdiagonal - middle_univdiagonal,
 	   ((Univdiag_T) List_head(p))->qstart,
@@ -3732,7 +5627,7 @@ Path_solve_from_diagonals (int *found_score,
 
   /* Qstart */
   path = Path_new_for_qstart_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
-				       middle_nmismatches,plusp,first_read_p,genestrand,
+				       /*middle_nmismatches*/-1,plusp,first_read_p,genestrand,
 				       /*sensedir*/SENSE_FORWARD,querylength,
 				       method,chrnum,chroffset,chrhigh,
 				       /*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
@@ -3748,30 +5643,34 @@ Path_solve_from_diagonals (int *found_score,
     if (univdiag->univdiagonal < chroffset + querylength) {
       /* Skip, because univdiagonal is in an earlier chromosome */
 
-    } else if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/univdiag->univdiagonal,
-						/*low_qstart*/univdiag->qstart,
-						chroffset,chrhigh,querylength,
-						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-						stage1,query_compress,queryptr,
-						streamspace_max_alloc,streamspace_alloc,
-						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-						localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
-						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-						vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD)) != NULL) {
-
-      compute_qstart_local(&qstart_sense_paths,/*depth*/0,newpath,queryptr,querylength,
-			   streamspace_max_alloc,streamspace_alloc,
-			   mismatch_positions_alloc,novel_univdiags_alloc,
-			   novel_diagonals_alloc,localdb_alloc,
-			   stage1,knownsplicing,knownindels,
-			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			   univcoordlistpool,listpool,pathpool,transcriptpool,
-			   univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			   localdb_nmismatches_allowed,plusp,genestrand,
-			   /*try_sensedir*/SENSE_FORWARD,qstart_innerp,find_splices_p,/*salvagep*/false);
-
-      Path_free(&newpath,intlistpool,univcoordlistpool,
-		listpool,pathpool,transcriptpool,hitlistpool);
+    } else {
+      for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/univdiag->univdiagonal,
+					       /*low_qstart*/univdiag->qstart,
+					       chroffset,chrhigh,querylength,
+					       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					       stage1,query_compress,queryptr,
+					       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					       localdb_tally,localdb_overflowp,max_nblocks,
+					       localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
+					       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					       vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD,middle_rank)) == NULL) {
+	  break;
+	} else {
+	  compute_qstart_local(&qstart_sense_paths,/*depth*/0,newpath,queryptr,querylength,
+			       mismatch_positions_alloc,novel_univdiags_alloc,
+			       novel_diagonals_alloc,localdb_alloc,
+			       localdb_tally,localdb_overflowp,max_nblocks,
+			       stage1,knownsplicing,knownindels,
+			       query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			       univcoordlistpool,listpool,pathpool,transcriptpool,
+			       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			       localdb_nmismatches_allowed,plusp,genestrand,
+			       /*try_sensedir*/SENSE_FORWARD,qstart_innerp,find_splices_p,/*salvagep*/false);
+	  Path_free(&newpath,intlistpool,univcoordlistpool,
+		    listpool,pathpool,transcriptpool,hitlistpool);
+	}
+      }
     }
   }
 
@@ -3779,9 +5678,9 @@ Path_solve_from_diagonals (int *found_score,
     /* Always try without a qstart_univdiag, in case the given univdiag is bad */
     debug13(printf("Processing without a qstart sense univdiag\n"));
     compute_qstart_local(&qstart_sense_paths,/*depth*/0,path,queryptr,querylength,
-			 streamspace_max_alloc,streamspace_alloc,
 			 mismatch_positions_alloc,novel_univdiags_alloc,
 			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
 			 stage1,knownsplicing,knownindels,
 			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
 			 univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -3794,7 +5693,7 @@ Path_solve_from_diagonals (int *found_score,
 
   if (splicingp == true) {
     path = Path_new_for_qstart_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
-					 middle_nmismatches,plusp,first_read_p,genestrand,
+					 /*middle_nmismatches*/-1,plusp,first_read_p,genestrand,
 					 /*sensedir*/SENSE_ANTI,querylength,
 					 method,chrnum,chroffset,chrhigh,
 					 /*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
@@ -3809,28 +5708,34 @@ Path_solve_from_diagonals (int *found_score,
       if (univdiag->univdiagonal < chroffset + querylength) {
 	/* Skip, because univdiagonal is in an earlier chromosome */
 
-      } else if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/univdiag->univdiagonal,
-						  /*low_qstart*/univdiag->qstart,
-						  chroffset,chrhigh,querylength,
-						  stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-						  stage1,query_compress,queryptr,
-						  streamspace_max_alloc,streamspace_alloc,
-						  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-						  localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
-						  intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-						  vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI)) != NULL) {
-	compute_qstart_local(&qstart_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
-			     streamspace_max_alloc,streamspace_alloc,
-			     mismatch_positions_alloc,novel_univdiags_alloc,
-			     novel_diagonals_alloc,localdb_alloc,
-			     stage1,knownsplicing,knownindels,
-			     query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			     univcoordlistpool,listpool,pathpool,transcriptpool,
-			     univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			     localdb_nmismatches_allowed,plusp,genestrand,
-			     /*try_sensedir*/SENSE_ANTI,qstart_innerp,find_splices_p,/*salvagep*/false);
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
+      } else {
+	for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	  if ((newpath = attach_unknown_qstart(path,/*low_univdiagonal*/univdiag->univdiagonal,
+						 /*low_qstart*/univdiag->qstart,
+						 chroffset,chrhigh,querylength,
+						 stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+						 stage1,query_compress,queryptr,
+						 novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						 localdb_tally,localdb_overflowp,max_nblocks,
+						 localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
+						 intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+						 vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI,middle_rank)) == NULL) {
+	    break;
+	  } else {
+	    compute_qstart_local(&qstart_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
+				 mismatch_positions_alloc,novel_univdiags_alloc,
+				 novel_diagonals_alloc,localdb_alloc,
+				 localdb_tally,localdb_overflowp,max_nblocks,
+				 stage1,knownsplicing,knownindels,
+				 query_compress,chrnum,chroffset,chrhigh,intlistpool,
+				 univcoordlistpool,listpool,pathpool,transcriptpool,
+				 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+				 localdb_nmismatches_allowed,plusp,genestrand,
+				 /*try_sensedir*/SENSE_ANTI,qstart_innerp,find_splices_p,/*salvagep*/false);
+	    Path_free(&newpath,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
       }
     }
 
@@ -3838,9 +5743,9 @@ Path_solve_from_diagonals (int *found_score,
       /* Always try without a qstart_univdiag, in case the given univdiag is bad */
       debug13(printf("Processing without a qstart antisense univdiag\n"));
       compute_qstart_local(&qstart_antisense_paths,/*depth*/0,path,queryptr,querylength,
-			   streamspace_max_alloc,streamspace_alloc,
 			   mismatch_positions_alloc,novel_univdiags_alloc,
 			   novel_diagonals_alloc,localdb_alloc,
+			   localdb_tally,localdb_overflowp,max_nblocks,
 			   stage1,knownsplicing,knownindels,
 			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
 			   univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -3855,7 +5760,7 @@ Path_solve_from_diagonals (int *found_score,
 
   /* Qend */
   path = Path_new_for_qend_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
-				     middle_nmismatches,plusp,first_read_p,genestrand,
+				     /*middle_nmismatches*/-1,plusp,first_read_p,genestrand,
 				     /*sensedir*/SENSE_FORWARD,querylength,
 				     method,chrnum,chroffset,chrhigh,
 				     /*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -3871,33 +5776,36 @@ Path_solve_from_diagonals (int *found_score,
     if (univdiag->univdiagonal >= chrhigh) {
       /* Skip, because univdiagonal is in a later chromosome */
     
-    } else if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/univdiag->univdiagonal,
-#if 0
-					      /*high_qstart*/univdiag->qstart,
-#endif
-					      /*high_qend*/univdiag->qend,
-					      chroffset,chrhigh,querylength,
-					      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-					      stage1,query_compress,queryptr,
-					      streamspace_max_alloc,streamspace_alloc,
-					      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-					      localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
-					      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-					      vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD)) != NULL) {
-
-      compute_qend_local(&qend_sense_paths,/*depth*/0,newpath,queryptr,querylength,
-			 streamspace_max_alloc,streamspace_alloc,
-			 mismatch_positions_alloc,novel_univdiags_alloc,
-			 novel_diagonals_alloc,localdb_alloc,
-			 stage1,knownsplicing,knownindels,
-			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			 univcoordlistpool,listpool,pathpool,transcriptpool,
-			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			 localdb_nmismatches_allowed,plusp,genestrand,
-			 /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false);
-
-      Path_free(&newpath,intlistpool,univcoordlistpool,
-		listpool,pathpool,transcriptpool,hitlistpool);
+    } else {
+      for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/univdiag->univdiagonal,
+					     /*high_qend*/univdiag->qend,
+					     chroffset,chrhigh,querylength,
+					     stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					     stage1,query_compress,queryptr,
+					     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					     localdb_tally,localdb_overflowp,max_nblocks,
+					     localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
+					     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					     vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD,middle_rank)) == NULL) {
+	  break;
+	} else {
+	  compute_qend_local(&qend_sense_paths,/*depth*/0,newpath,queryptr,querylength,
+			     mismatch_positions_alloc,novel_univdiags_alloc,
+			     novel_diagonals_alloc,localdb_alloc,
+			     localdb_tally,localdb_overflowp,max_nblocks,
+			     stage1,knownsplicing,knownindels,
+			     query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			     univcoordlistpool,listpool,pathpool,transcriptpool,
+			     univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			     localdb_nmismatches_allowed,plusp,genestrand,
+			     /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false,
+				     /*segment_cache*/(Path_segment_cache_T) NULL,
+				     /*path_qend_local_cache_p*/false);
+	  Path_free(&newpath,intlistpool,univcoordlistpool,
+		    listpool,pathpool,transcriptpool,hitlistpool);
+	}
+      }
     }
   }
       
@@ -3905,22 +5813,24 @@ Path_solve_from_diagonals (int *found_score,
     /* Always try without a qend_univdiag, in case the given univdiag is bad */
     debug13(printf("Processing without a qend sense univdiag\n"));
     compute_qend_local(&qend_sense_paths,/*depth*/0,path,queryptr,querylength,
-		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
 		       stage1,knownsplicing,knownindels,
 		       query_compress,chrnum,chroffset,chrhigh,intlistpool,
 		       univcoordlistpool,listpool,pathpool,transcriptpool,
 		       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 		       localdb_nmismatches_allowed,plusp,genestrand,
-		       /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false);
+		       /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false,
+			       /*segment_cache*/(Path_segment_cache_T) NULL,
+			       /*path_qend_local_cache_p*/false);
   }
   Path_free(&path,intlistpool,univcoordlistpool,
 	    listpool,pathpool,transcriptpool,hitlistpool);
 
   if (splicingp == true) {
     path = Path_new_for_qend_extension(middle_univdiagonal,middle_diagonal_qstart,middle_diagonal_qend,
-				       middle_nmismatches,plusp,first_read_p,genestrand,
+				       /*middle_nmismatches*/-1,plusp,first_read_p,genestrand,
 				       /*sensedir*/SENSE_ANTI,querylength,
 				       method,chrnum,chroffset,chrhigh,
 				       /*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
@@ -3935,31 +5845,36 @@ Path_solve_from_diagonals (int *found_score,
       if (univdiag->univdiagonal >= chrhigh) {
 	/* Skip, because univdiagonal is in a later chromosome */
     
-      } else if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/univdiag->univdiagonal,
-#if 0
-						/*high_qstart*/univdiag->qstart,
-#endif
-						/*high_qend*/univdiag->qend,
-						chroffset,chrhigh,querylength,
-						stage1->indelinfo,stage1->spliceinfo,knownsplicing,
-						stage1,query_compress,queryptr,
-						streamspace_max_alloc,streamspace_alloc,
-						novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-						localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
-						intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-						vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI)) != NULL) {
-	compute_qend_local(&qend_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
-			   streamspace_max_alloc,streamspace_alloc,
-			   mismatch_positions_alloc,novel_univdiags_alloc,
-			   novel_diagonals_alloc,localdb_alloc,
-			   stage1,knownsplicing,knownindels,
-			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
-			   univcoordlistpool,listpool,pathpool,transcriptpool,
-			   univdiagpool,vectorpool,hitlistpool,spliceendsgen,
-			   localdb_nmismatches_allowed,plusp,genestrand,
-			   /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false);
-	Path_free(&newpath,intlistpool,univcoordlistpool,
-		  listpool,pathpool,transcriptpool,hitlistpool);
+      } else {
+	for (middle_rank = 0; middle_rank < n_splice_paths; middle_rank++) {
+	  if ((newpath = attach_unknown_qend(path,/*high_univdiagonal*/univdiag->univdiagonal,
+					       /*high_qend*/univdiag->qend,
+					       chroffset,chrhigh,querylength,
+					       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					       stage1,query_compress,queryptr,
+					       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					       localdb_tally,localdb_overflowp,max_nblocks,
+					       localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
+					       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					       vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI,middle_rank)) == NULL) {
+	    break;
+	  } else {
+	    compute_qend_local(&qend_antisense_paths,/*depth*/0,newpath,queryptr,querylength,
+			       mismatch_positions_alloc,novel_univdiags_alloc,
+			       novel_diagonals_alloc,localdb_alloc,
+			       localdb_tally,localdb_overflowp,max_nblocks,
+			       stage1,knownsplicing,knownindels,
+			       query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			       univcoordlistpool,listpool,pathpool,transcriptpool,
+			       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			       localdb_nmismatches_allowed,plusp,genestrand,
+			       /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false,
+			       /*segment_cache*/(Path_segment_cache_T) NULL,
+			       /*path_qend_local_cache_p*/false);
+	    Path_free(&newpath,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+	  }
+	}
       }
     }
 
@@ -3967,22 +5882,24 @@ Path_solve_from_diagonals (int *found_score,
       /* Always try without a qend_univdiag, in case the univdiag is bad */
       debug13(printf("Processing without a qend antisense univdiag\n"));
       compute_qend_local(&qend_antisense_paths,/*depth*/0,path,queryptr,querylength,
-			 streamspace_max_alloc,streamspace_alloc,
 			 mismatch_positions_alloc,novel_univdiags_alloc,
 			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
 			 stage1,knownsplicing,knownindels,
 			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
 			 univcoordlistpool,listpool,pathpool,transcriptpool,
 			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 			 localdb_nmismatches_allowed,plusp,genestrand,
-			 /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false);
+			 /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false,
+				       /*segment_cache*/(Path_segment_cache_T) NULL,
+				       /*path_qend_local_cache_p*/false);
     }
     Path_free(&path,intlistpool,univcoordlistpool,
 	      listpool,pathpool,transcriptpool,hitlistpool);
   }
 
   /* Qstart sense.  Also handles the non-splicing case. */
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   for (p = qstart_sense_paths; p != NULL; p = List_next(p)) {
     path = (T) List_head(p);
     printf("** Complete qstart path, sense %p: ",path);
@@ -4014,14 +5931,14 @@ Path_solve_from_diagonals (int *found_score,
 #endif
 
   if (qstart_sense_paths != NULL && qend_sense_paths != NULL) {
-    combined_sense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_univdiagonal,
+    combined_sense_paths = combine_leftright_paths(&(*found_score),&(*end_score),/*main_univdiagonal*/middle_univdiagonal,
 						   qstart_sense_paths,qend_sense_paths,
 						   query_compress,query_compress_fwd,query_compress_rev,
 						   queryptr,querylength,plusp,first_read_p,genestrand,
 						   /*sensedir*/SENSE_FORWARD,chrnum,chroffset,chrhigh,
 						   mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
-						   streamspace_max_alloc,streamspace_alloc,
 						   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						   localdb_tally,localdb_overflowp,max_nblocks,
 						   intlistpool,univcoordlistpool,listpool,pathpool,
 						   univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
 
@@ -4043,14 +5960,14 @@ Path_solve_from_diagonals (int *found_score,
 
 
   if (qstart_antisense_paths != NULL && qend_antisense_paths != NULL) {
-    combined_antisense_paths = combine_leftright_paths(&(*found_score),/*main_univdiagonal*/middle_univdiagonal,
+    combined_antisense_paths = combine_leftright_paths(&(*found_score),&(*end_score),/*main_univdiagonal*/middle_univdiagonal,
 						       qstart_antisense_paths,qend_antisense_paths,
 						       query_compress,query_compress_fwd,query_compress_rev,
 						       queryptr,querylength,plusp,first_read_p,genestrand,
 						       /*sensedir*/SENSE_ANTI,chrnum,chroffset,chrhigh,
 						       mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
-						       streamspace_max_alloc,streamspace_alloc,
 						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						       localdb_tally,localdb_overflowp,max_nblocks,
 						       intlistpool,univcoordlistpool,listpool,pathpool,
 						       univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
     Path_gc(&qstart_antisense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
@@ -4122,7 +6039,7 @@ Path_solve_from_diagonals (int *found_score,
 				    hitlistpool_trace(__FILE__,__LINE__));
 #endif
 
-      } else if ((repaired_paths = try_repairs(&(*found_score),
+      } else if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
 					       path,query_compress_fwd,query_compress_rev,queryseq,
 					       intlistpool,uintlistpool,univcoordlistpool,listpool,
 					       transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
@@ -4165,7 +6082,7 @@ Path_solve_from_diagonals (int *found_score,
 					hitlistpool_trace(__FILE__,__LINE__));
 #endif
 
-      } else if ((repaired_paths = try_repairs(&(*found_score),
+      } else if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
 					       path,query_compress_fwd,query_compress_rev,queryseq,
 					       intlistpool,uintlistpool,univcoordlistpool,listpool,
 					       transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
@@ -4188,7 +6105,7 @@ Path_solve_from_diagonals (int *found_score,
   }
 
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_PATH_CORE)
   printf("Result: first_read_p %d, plusp %d\n",first_read_p,plusp);
   printf("Result: %d complete sense paths\n",List_length(*sense_paths));
   printf("Result: %d complete antisense paths\n",List_length(*antisense_paths));
@@ -4206,14 +6123,16 @@ Path_solve_from_diagonals (int *found_score,
 
   return;
 }
+#endif
 
 
 /* Used for KMER_EXACT1 */
 /* Calls Genome_count_mismatches_substring, which sets nmismatches correctly */
 bool
-Path_solve_exact (int *found_score,
+Path_solve_exact (int *found_score, int *end_score,
 		  List_T *sense_paths, List_T *antisense_paths,
 		  Univcoord_T univdiagonal, Auxinfo_T auxinfo, int querylength,
+		  int max_nmismatches,
 		  bool plusp, bool first_read_p, int genestrand,
 		  Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		  Shortread_T queryseq, char *queryuc_ptr, char *queryrc,
@@ -4241,6 +6160,10 @@ Path_solve_exact (int *found_score,
 						      plusp,genestrand);
   /* debug13(printf("Counting mismatches from %d to %d => %d (%d ref)\n",
      pos5,pos3,nmismatches,ref_nmismatches)); */
+
+  if (max_nmismatches >= 0 && nmismatches > max_nmismatches) {
+    return false;
+  }
       
 #if 0
   if (nmismatches > nmismatches_allowed) {
@@ -4258,9 +6181,10 @@ Path_solve_exact (int *found_score,
     if (/*found_score*/nmismatches < *found_score) {
       *found_score = nmismatches;
     }
+    *end_score = 0;
 
 #ifdef CHECK_ASSERTIONS
-    Path_eval_nmatches(&(*found_score),sense_path,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),sense_path,query_compress_fwd,query_compress_rev);
 #endif
     perfect_ends_p = Path_eval_perfect_ends_p(sense_path,query_compress_fwd,queryuc_ptr,
 					      query_compress_rev,queryrc,
@@ -4287,7 +6211,7 @@ Path_solve_exact (int *found_score,
 					hitlistpool_trace(__FILE__,__LINE__));
 
       } else {
-	if ((repaired_paths = try_repairs(&(*found_score),
+	if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
 					  sense_path,query_compress_fwd,query_compress_rev,queryseq,
 					  intlistpool,uintlistpool,univcoordlistpool,listpool,
 					  transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
@@ -4301,7 +6225,7 @@ Path_solve_exact (int *found_score,
 				      hitlistpool_trace(__FILE__,__LINE__));
 	}
 
-	if ((repaired_paths = try_repairs(&(*found_score),
+	if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
 					  antisense_path,query_compress_fwd,query_compress_rev,queryseq,
 					  intlistpool,uintlistpool,univcoordlistpool,listpool,
 					  transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
@@ -4333,10 +6257,21 @@ Path_solve_exact (int *found_score,
 }
 
 
+int
+Path_solve_count_mismatches_substring (int *ref_nmismatches, Compress_T query_compress,
+				       Univcoord_T univdiagonal, int querylength,
+				       int pos5, int pos3, bool plusp, int genestrand) {
+  return Genomebits_count_mismatches_substring(&(*ref_nmismatches),genomebits,genomebits_alt,
+					       query_compress,univdiagonal,querylength,
+					       pos5,pos3,plusp,genestrand);
+}
+
+
+#if 0
 /* kmer_size should generally be index1part, but should be 4 for localdb matches */
 /* Calls either Path_solve_exact or Path_solve_from_diagonals, which both set nmismatches correctly */
 void
-Path_solve_from_univdiagonal (int *found_score,
+Path_solve_from_univdiagonal (int *found_score, int *end_score,
 
 			      List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
 			      List_T *sense_paths, List_T *antisense_paths,
@@ -4346,8 +6281,8 @@ Path_solve_from_univdiagonal (int *found_score,
 			      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			      bool plusp, int querylength, int *mismatch_positions_alloc,
 			      
-			      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 			      int localdb_nmismatches_allowed,
 
 			      Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
@@ -4381,6 +6316,7 @@ Path_solve_from_univdiagonal (int *found_score,
   chrnum = EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,univdiagonal - querylength,univdiagonal);
 #endif
 
+#if 0
   if (0 && qstart <= 8 && querylength - qend <= 8) {
     /* This prevents us from extending ends of the local mate */
     nmismatches = Genomebits_count_mismatches_substring(&ref_nmismatches,genomebits,genomebits_alt,query_compress,
@@ -4411,7 +6347,6 @@ Path_solve_from_univdiagonal (int *found_score,
 				      hitlistpool_trace(__FILE__,__LINE__));
     }
 
-#if 0
   } else if (find_splices_p == false) {
     /* This also prevents us from extending ends of the local mate */
     sense_path = Path_new_exact(univdiagonal,qstart,qend,/*nmismatches*/-1,/*ref_nmismatches*/-1,
@@ -4430,24 +6365,25 @@ Path_solve_from_univdiagonal (int *found_score,
       *unextended_antisense_paths = Hitlist_push(*unextended_antisense_paths,hitlistpool,(void *) antisense_path
 						 hitlistpool_trace(__FILE__,__LINE__));
     }
-#endif
 
   } else {
+#endif
+
     /* Original auxinfo for KMER_PREVALENT used 0,querylength */
     auxinfo->qstart = qstart;
     auxinfo->qend = qend;
     auxinfo->nmismatches = -1;
 
-    Path_solve_from_diagonals(&(*found_score),
+    Path_solve_from_diagonals(&(*found_score),&(*end_score),
 
 			      &(*unextended_sense_paths),&(*unextended_antisense_paths),
 			      &(*sense_paths),&(*antisense_paths),
 
 			      /*middle_univdiagonal*/univdiagonal,auxinfo,
 			      
-			      queryseq,queryptr,querylength,
-			      mismatch_positions_alloc,streamspace_max_alloc,streamspace_alloc,
+			      queryseq,queryptr,querylength,mismatch_positions_alloc,
 			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,
 			      localdb_nmismatches_allowed,
 
 			      stage1,knownsplicing,knownindels,
@@ -4458,8 +6394,1617 @@ Path_solve_from_univdiagonal (int *found_score,
 			      listpool,pathpool,transcriptpool,
 			      univdiagpool,vectorpool,hitlistpool,spliceendsgen,method,
 			      /*find_splices_p*/false);
+#if 0
+  }
+#endif
+
+  return;
+}
+#endif
+
+
+
+/* Used for EXT (extension search) and SEGMENT1 (Kmer_segment) */
+static void
+solve_chain_qstart (List_T *qstart_sense_paths, List_T *qstart_antisense_paths,
+
+		    List_T left_chain, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		    int localdb_nmismatches_allowed,
+
+		    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+		    Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+		    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		    bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+		    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+		    Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+		    Path_segment_cache_T segment_cache, bool segment_prefix_skip_p,
+		    bool skip_initial_local_p) {
+
+  T path_sense, path_antisense, newpath;
+
+  Univdiag_T middle_univdiag, univdiag;
+  Univcoord_T middle_univdiagonal;
+
+  List_T p;
+  bool qstart_innerp, qend_innerp, first_univdiag_p;
+
+
+  debug12(printf("Entered solve_chain_qstart from method %s, find_splices_p %d, first_read_p %d\n",
+		 Method_string(method),find_splices_p,first_read_p));
+
+#ifdef DEBUG12
+  for (p = left_chain; p != NULL; p = List_next(p)) {
+    printf("qstart diagonal %u %d %d..%d\n",
+	   ((Univdiag_T) List_head(p))->univdiagonal,
+	   middle_univdiagonal - ((Univdiag_T) List_head(p))->univdiagonal,
+	   ((Univdiag_T) List_head(p))->qstart,
+	   ((Univdiag_T) List_head(p))->qend);
+  }
+#endif
+
+  if (paired_end_p == false) {
+    qstart_innerp = qend_innerp = false;
+  } else if (first_read_p == plusp) {
+    qstart_innerp = false;
+    qend_innerp = true;
+  } else {
+    qstart_innerp = true;
+    qend_innerp = false;
   }
 
+  assert(left_chain != NULL);
+  middle_univdiag = (Univdiag_T) List_head(left_chain);
+  middle_univdiagonal = middle_univdiag->univdiagonal;
+
+  debug12(printf("Qstart: Starting with univdiag %u %d..%d\n",
+		 middle_univdiag->univdiagonal,middle_univdiag->qstart,middle_univdiag->qend));
+
+  /* Skip the first element of the chain, which is the middle univdiagonal */
+  p = List_next(left_chain);
+  if (segment_prefix_skip_p == true && p != NULL && method == SEGMENT1 && paired_end_p == false) {
+    univdiag = (Univdiag_T) List_head(p);
+    if (univdiag->univdiagonal >= chroffset + querylength &&
+	segment_qstart_cache_contains(segment_cache,middle_univdiag,univdiag,
+				      querylength,localdb_nmismatches_allowed,
+				      chrnum,chroffset,chrhigh,plusp,genestrand,
+				      first_read_p,find_splices_p) == true) {
+      return;
+    }
+  }
+
+  path_sense =
+    Path_new_for_qstart_extension(middle_univdiagonal,middle_univdiag->qstart,middle_univdiag->qend,
+				  /*nmismatches*/-1,plusp,first_read_p,genestrand,
+				  /*sensedir*/SENSE_FORWARD,querylength,
+				  method,chrnum,chroffset,chrhigh,
+				  /*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
+				  query_compress_fwd,query_compress_rev,
+				  intlistpool,univcoordlistpool,pathpool);
+
+  if (splicingp == false) {
+    path_antisense = (Path_T) NULL;
+  } else {
+    path_antisense =
+      Path_new_for_qstart_extension(middle_univdiagonal,middle_univdiag->qstart,middle_univdiag->qend,
+				    /*nmismatches*/-1,plusp,first_read_p,genestrand,
+				    /*sensedir*/SENSE_ANTI,querylength,
+				    method,chrnum,chroffset,chrhigh,
+				    /*splice5p*/false,/*splicetype5*/NO_SPLICE,/*ambig_prob_5*/0.0,
+				    query_compress_fwd,query_compress_rev,
+				    intlistpool,univcoordlistpool,pathpool);
+  }
+
+  first_univdiag_p = true;
+  while (p != NULL && (path_sense != (Path_T) NULL || path_antisense != (Path_T) NULL)) {
+    /* First, ignore the univdiag */
+    if (skip_initial_local_p == false && path_sense != (Path_T) NULL) {
+      compute_qstart_local(&(*qstart_sense_paths),/*depth*/0,path_sense,queryptr,querylength,
+			   mismatch_positions_alloc,novel_univdiags_alloc,
+			   novel_diagonals_alloc,localdb_alloc,
+			   localdb_tally,localdb_overflowp,max_nblocks,
+			   stage1,knownsplicing,knownindels,
+			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			   univcoordlistpool,listpool,pathpool,transcriptpool,
+			   univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			   localdb_nmismatches_allowed,plusp,genestrand,
+			   /*try_sensedir*/SENSE_FORWARD,qstart_innerp,find_splices_p,/*salvagep*/false);
+    }
+
+    if (skip_initial_local_p == false && path_antisense != (Path_T) NULL) {
+      compute_qstart_local(&(*qstart_antisense_paths),/*depth*/0,path_antisense,queryptr,querylength,
+			   mismatch_positions_alloc,novel_univdiags_alloc,
+			   novel_diagonals_alloc,localdb_alloc,
+			   localdb_tally,localdb_overflowp,max_nblocks,
+			   stage1,knownsplicing,knownindels,
+			   query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			   univcoordlistpool,listpool,pathpool,transcriptpool,
+			   univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			   localdb_nmismatches_allowed,plusp,genestrand,
+			   /*try_sensedir*/SENSE_ANTI,qstart_innerp,find_splices_p,/*salvagep*/false);
+    }
+
+
+    /* Second, process the univdiag */
+    univdiag = (Univdiag_T) List_head(p);
+    debug12(printf("Processing univdiag %u %d..%d\n",univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
+    
+    if (univdiag->univdiagonal < chroffset + querylength) {
+      /* Skip, because univdiagonal is in an earlier chromosome */
+
+    } else {
+      if (path_sense != (Path_T) NULL) {
+	newpath = attach_unknown_qstart(path_sense,/*low_univdiagonal*/univdiag->univdiagonal,
+					/*low_qstart*/univdiag->qstart,chroffset,chrhigh,querylength,
+					stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					stage1,query_compress,queryptr,
+					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					localdb_tally,localdb_overflowp,max_nblocks,
+					localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
+					intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD,/*middle_rank*/0);
+	Path_free(&path_sense,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+	path_sense = newpath;
+      }
+	
+      if (path_antisense != (Path_T) NULL) {
+	newpath = attach_unknown_qstart(path_antisense,/*low_univdiagonal*/univdiag->univdiagonal,
+					/*low_qstart*/univdiag->qstart,chroffset,chrhigh,querylength,
+					stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+					stage1,query_compress,queryptr,
+					novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+					localdb_tally,localdb_overflowp,max_nblocks,
+					localdb,localdb_nmismatches_allowed,plusp,genestrand,qstart_innerp,
+					intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+					vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI,/*middle_rank*/0);
+	Path_free(&path_antisense,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+	path_antisense = newpath;
+      }
+    }
+
+    if (segment_prefix_skip_p == true &&
+	first_univdiag_p == true && method == SEGMENT1 && paired_end_p == false &&
+	path_sense == (Path_T) NULL && path_antisense == (Path_T) NULL &&
+	univdiag->univdiagonal >= chroffset + querylength) {
+      segment_qstart_cache_insert(segment_cache,middle_univdiag,univdiag,
+				  querylength,localdb_nmismatches_allowed,
+				  chrnum,chroffset,chrhigh,plusp,genestrand,
+				  first_read_p,find_splices_p);
+    }
+
+    first_univdiag_p = false;
+    skip_initial_local_p = false;
+    p = List_next(p);
+  }
+
+  /* Finish the chains */
+  if (skip_initial_local_p == false && path_sense != (Path_T) NULL) {
+    compute_qstart_local(&(*qstart_sense_paths),/*depth*/0,path_sense,queryptr,querylength,
+			 mismatch_positions_alloc,novel_univdiags_alloc,
+			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
+			 stage1,knownsplicing,knownindels,
+			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			 univcoordlistpool,listpool,pathpool,transcriptpool,
+			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			 localdb_nmismatches_allowed,plusp,genestrand,
+			 /*try_sensedir*/SENSE_FORWARD,qstart_innerp,find_splices_p,/*salvagep*/false);
+    Path_free(&path_sense,intlistpool,univcoordlistpool,
+	      listpool,pathpool,transcriptpool,hitlistpool);
+  }
+
+  if (skip_initial_local_p == false && path_antisense != (Path_T) NULL) {
+    compute_qstart_local(&(*qstart_antisense_paths),/*depth*/0,path_antisense,queryptr,querylength,
+			 mismatch_positions_alloc,novel_univdiags_alloc,
+			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
+			 stage1,knownsplicing,knownindels,
+			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			 univcoordlistpool,listpool,pathpool,transcriptpool,
+			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			 localdb_nmismatches_allowed,plusp,genestrand,
+			 /*try_sensedir*/SENSE_ANTI,qstart_innerp,find_splices_p,/*salvagep*/false);
+    Path_free(&path_antisense,intlistpool,univcoordlistpool,
+	      listpool,pathpool,transcriptpool,hitlistpool);
+  }
+
+  return;
+}
+
+
+static void
+solve_chain_qend (List_T *qend_sense_paths, List_T *qend_antisense_paths,
+
+		  List_T right_chain, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		  int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		  int localdb_nmismatches_allowed,
+
+		  Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+		  Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+		  Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+		  bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+		  Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		  Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		  Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+		  Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+		  Path_segment_cache_T segment_cache, bool segment_prefix_skip_p,
+		  bool path_qend_local_cache_p, bool skip_initial_local_p) {
+
+  T path_sense, path_antisense, newpath;
+
+  Univdiag_T middle_univdiag, univdiag;
+  Univcoord_T middle_univdiagonal;
+
+  List_T p;
+  bool qstart_innerp, qend_innerp, first_univdiag_p;
+
+
+
+  debug12(printf("Entered solve_chain_qend from method %s, find_splices_p %d, first_read_p %d\n",
+		 Method_string(method),find_splices_p,first_read_p));
+
+#ifdef DEBUG12
+  for (p = right_chain; p != NULL; p = List_next(p)) {
+    printf("qend diagonal %u %d %d..%d\n",
+	   ((Univdiag_T) List_head(p))->univdiagonal,
+	   ((Univdiag_T) List_head(p))->univdiagonal - middle_univdiagonal,
+	   ((Univdiag_T) List_head(p))->qstart,
+	   ((Univdiag_T) List_head(p))->qend);
+  }
+#endif
+
+  if (paired_end_p == false) {
+    qstart_innerp = qend_innerp = false;
+  } else if (first_read_p == plusp) {
+    qstart_innerp = false;
+    qend_innerp = true;
+  } else {
+    qstart_innerp = true;
+    qend_innerp = false;
+  }
+
+  assert(right_chain != NULL);
+  middle_univdiag = (Univdiag_T) List_head(right_chain);
+  middle_univdiagonal = middle_univdiag->univdiagonal;
+  debug12(printf("Qend: Starting with univdiag %u %d..%d\n",
+		 middle_univdiag->univdiagonal,middle_univdiag->qstart,middle_univdiag->qend));
+
+  /* Skip the first element of the chain, which is the middle univdiagonal */
+  p = List_next(right_chain);
+  if (segment_prefix_skip_p == true && p != NULL && method == SEGMENT1 && paired_end_p == false) {
+    univdiag = (Univdiag_T) List_head(p);
+    if (univdiag->univdiagonal < chrhigh &&
+	segment_qend_cache_contains(segment_cache,middle_univdiag,univdiag,
+				    querylength,localdb_nmismatches_allowed,
+				    chrnum,chroffset,chrhigh,plusp,genestrand,
+				    first_read_p,find_splices_p) == true) {
+      return;
+    }
+  }
+
+  path_sense =
+    Path_new_for_qend_extension(middle_univdiagonal,middle_univdiag->qstart,middle_univdiag->qend,
+				/*nmismatches*/-1,plusp,first_read_p,genestrand,
+				/*sensedir*/SENSE_FORWARD,querylength,
+				method,chrnum,chroffset,chrhigh,
+				/*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
+				query_compress_fwd,query_compress_rev,
+				intlistpool,univcoordlistpool,pathpool);
+
+  if (splicingp == false) {
+    path_antisense = (Path_T) NULL;
+  } else {
+    path_antisense =
+      Path_new_for_qend_extension(middle_univdiagonal,middle_univdiag->qstart,middle_univdiag->qend,
+				  /*nmismatches*/-1,plusp,first_read_p,genestrand,
+				  /*sensedir*/SENSE_ANTI,querylength,
+				  method,chrnum,chroffset,chrhigh,
+				  /*splice3p*/false,/*splicetype3*/NO_SPLICE,/*ambig_prob_3*/0.0,
+				  query_compress_fwd,query_compress_rev,
+				  intlistpool,univcoordlistpool,pathpool);
+  }
+
+
+  first_univdiag_p = true;
+  while (p != NULL && (path_sense != (Path_T) NULL || path_antisense != (Path_T) NULL)) {
+    /* First, ignore the univdiag */
+    if (skip_initial_local_p == false && path_sense != (Path_T) NULL) {
+      compute_qend_local(&(*qend_sense_paths),/*depth*/0,path_sense,queryptr,querylength,
+			 mismatch_positions_alloc,novel_univdiags_alloc,
+			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
+			 stage1,knownsplicing,knownindels,
+			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			 univcoordlistpool,listpool,pathpool,transcriptpool,
+			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			 localdb_nmismatches_allowed,plusp,genestrand,
+			 /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false,
+			 segment_cache,path_qend_local_cache_p);
+    }
+
+    if (skip_initial_local_p == false && path_antisense != (Path_T) NULL) {
+      compute_qend_local(&(*qend_antisense_paths),/*depth*/0,path_antisense,queryptr,querylength,
+			 mismatch_positions_alloc,novel_univdiags_alloc,
+			 novel_diagonals_alloc,localdb_alloc,
+			 localdb_tally,localdb_overflowp,max_nblocks,
+			 stage1,knownsplicing,knownindels,
+			 query_compress,chrnum,chroffset,chrhigh,intlistpool,
+			 univcoordlistpool,listpool,pathpool,transcriptpool,
+			 univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+			 localdb_nmismatches_allowed,plusp,genestrand,
+			 /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false,
+			 segment_cache,path_qend_local_cache_p);
+    }
+
+    /* Second, process the univdiag */
+    univdiag = (Univdiag_T) List_head(p);
+    debug12(printf("Processing univdiag %u %d..%d\n",univdiag->univdiagonal,univdiag->qstart,univdiag->qend));
+
+    if (univdiag->univdiagonal >= chrhigh) {
+      /* Skip, because univdiagonal is in a later chromosome */
+    
+    } else {
+      if (path_sense != (Path_T) NULL) {
+	newpath = attach_unknown_qend(path_sense,/*high_univdiagonal*/univdiag->univdiagonal,
+				      /*high_qend*/univdiag->qend,chroffset,chrhigh,querylength,
+				      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+				      stage1,query_compress,queryptr,
+				      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				      localdb_tally,localdb_overflowp,max_nblocks,
+				      localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
+				      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+				      vectorpool,hitlistpool,/*try_sensedir*/SENSE_FORWARD,/*middle_rank*/0);
+	Path_free(&path_sense,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+	path_sense = newpath;
+      }
+
+      if (path_antisense != (Path_T) NULL) {
+	newpath = attach_unknown_qend(path_antisense,/*high_univdiagonal*/univdiag->univdiagonal,
+				      /*high_qend*/univdiag->qend,chroffset,chrhigh,querylength,
+				      stage1->indelinfo,stage1->spliceinfo,knownsplicing,
+				      stage1,query_compress,queryptr,
+				      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				      localdb_tally,localdb_overflowp,max_nblocks,
+				      localdb,localdb_nmismatches_allowed,plusp,genestrand,qend_innerp,
+				      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+				      vectorpool,hitlistpool,/*try_sensedir*/SENSE_ANTI,/*middle_rank*/0);
+	Path_free(&path_antisense,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+	path_antisense = newpath;
+      }
+    }
+
+    if (segment_prefix_skip_p == true &&
+	first_univdiag_p == true && method == SEGMENT1 && paired_end_p == false &&
+	path_sense == (Path_T) NULL && path_antisense == (Path_T) NULL &&
+	univdiag->univdiagonal < chrhigh) {
+      segment_qend_cache_insert(segment_cache,middle_univdiag,univdiag,
+				querylength,localdb_nmismatches_allowed,
+				chrnum,chroffset,chrhigh,plusp,genestrand,
+				first_read_p,find_splices_p);
+    }
+
+    first_univdiag_p = false;
+    skip_initial_local_p = false;
+    p = List_next(p);
+  }
+
+  /* Finish the chains */
+  if (skip_initial_local_p == false && path_sense != (Path_T) NULL) {
+    compute_qend_local(&(*qend_sense_paths),/*depth*/0,path_sense,queryptr,querylength,
+		       mismatch_positions_alloc,novel_univdiags_alloc,
+		       novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
+		       stage1,knownsplicing,knownindels,
+		       query_compress,chrnum,chroffset,chrhigh,intlistpool,
+		       univcoordlistpool,listpool,pathpool,transcriptpool,
+		       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		       localdb_nmismatches_allowed,plusp,genestrand,
+		       /*try_sensedir*/SENSE_FORWARD,qend_innerp,find_splices_p,/*salvagep*/false,
+		       segment_cache,path_qend_local_cache_p);
+    Path_free(&path_sense,intlistpool,univcoordlistpool,
+	      listpool,pathpool,transcriptpool,hitlistpool);
+  }
+
+  if (skip_initial_local_p == false && path_antisense != (Path_T) NULL) {
+    compute_qend_local(&(*qend_antisense_paths),/*depth*/0,path_antisense,queryptr,querylength,
+		       mismatch_positions_alloc,novel_univdiags_alloc,
+		       novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
+		       stage1,knownsplicing,knownindels,
+		       query_compress,chrnum,chroffset,chrhigh,intlistpool,
+		       univcoordlistpool,listpool,pathpool,transcriptpool,
+		       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		       localdb_nmismatches_allowed,plusp,genestrand,
+		       /*try_sensedir*/SENSE_ANTI,qend_innerp,find_splices_p,/*salvagep*/false,
+		       segment_cache,path_qend_local_cache_p);
+    Path_free(&path_antisense,intlistpool,univcoordlistpool,
+	      listpool,pathpool,transcriptpool,hitlistpool);
+  }
+
+  return;
+}
+
+static void
+solve_combine (int *found_score, int *end_score,
+
+	       List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+	       List_T *sense_paths, List_T *antisense_paths,
+
+	       List_T qstart_sense_paths, List_T qstart_antisense_paths,
+	       List_T qend_sense_paths, List_T qend_antisense_paths,
+	       bool qstart_borrowed_p, bool qend_borrowed_p,
+
+	       Univcoord_T middle_univdiagonal,
+	       Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+	       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	       int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+
+	       Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+	       Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+	       Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+	       bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+	       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+	       Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+	       Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+	       Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+	       Path_segment_cache_T segment_cache, bool emitted_path_dedup_p) {
+  
+  Path_T path;
+
+#ifdef TRY_REPAIRS
+  List_T repaired_paths;
+#endif
+
+  List_T combined_sense_paths, combined_antisense_paths, p;
+  bool sense_completep, antisense_completep;
+
+
+#ifdef DEBUG12
+  printf("Start: paired_end_p %d, first_read_p %d, plusp %d\n",paired_end_p,first_read_p,plusp);
+  printf("Start: %d complete sense paths\n",List_length(*sense_paths));
+  printf("Start: %d complete antisense paths\n",List_length(*antisense_paths));
+  printf("Start: %d unextended sense paths\n",List_length(*unextended_sense_paths));
+  printf("Start: %d unextended antisense paths\n",List_length(*unextended_antisense_paths));
+#endif
+
+
+  /* Code below is taken from Path_solve_from_diagonals */
+  if (qstart_sense_paths != NULL && qend_sense_paths != NULL) {
+    combined_sense_paths = combine_leftright_paths(&(*found_score),&(*end_score),/*main_univdiagonal*/middle_univdiagonal,
+						   qstart_sense_paths,qend_sense_paths,
+						   query_compress,query_compress_fwd,query_compress_rev,
+						   queryptr,querylength,plusp,first_read_p,genestrand,
+						   /*sensedir*/SENSE_FORWARD,chrnum,chroffset,chrhigh,
+						   mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
+						   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						   localdb_tally,localdb_overflowp,max_nblocks,
+						   intlistpool,univcoordlistpool,listpool,pathpool,
+						   univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
+
+    if (qstart_borrowed_p == false) {
+      Path_gc(&qstart_sense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+    }
+    if (qend_borrowed_p == false) {
+      Path_gc(&qend_sense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+    }
+
+  } else if (qstart_sense_paths != NULL) {
+    /* Preserve legacy duplicate multiplicity.  Equal paths participate in a
+       tied qsort before maxpaths reporting, so silently dropping a duplicate
+       can change which genomic records survive the reporting cap. */
+    combined_sense_paths = qstart_borrowed_p == true ?
+      segment_cache_copy_paths(qstart_sense_paths,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) :
+      qstart_sense_paths;
+
+  } else if (qend_sense_paths != NULL) {
+    combined_sense_paths = qend_borrowed_p == true ?
+      segment_cache_copy_paths(qend_sense_paths,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) :
+      qend_sense_paths;
+    for (p = combined_sense_paths; p != NULL; p = List_next(p)) {
+      Path_reverse((Path_T) List_head(p),/*expect_fwd_p*/true);
+    }
+
+  } else {
+    combined_sense_paths = (List_T) NULL;
+  }
+
+
+  if (qstart_antisense_paths != NULL && qend_antisense_paths != NULL) {
+    combined_antisense_paths = combine_leftright_paths(&(*found_score),&(*end_score),/*main_univdiagonal*/middle_univdiagonal,
+						       qstart_antisense_paths,qend_antisense_paths,
+						       query_compress,query_compress_fwd,query_compress_rev,
+						       queryptr,querylength,plusp,first_read_p,genestrand,
+						       /*sensedir*/SENSE_ANTI,chrnum,chroffset,chrhigh,
+						       mismatch_positions_alloc,stage1,knownsplicing,spliceendsgen,
+						       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+						       localdb_tally,localdb_overflowp,max_nblocks,
+						       intlistpool,univcoordlistpool,listpool,pathpool,
+						       univdiagpool,vectorpool,hitlistpool,method,find_splices_p);
+    if (qstart_borrowed_p == false) {
+      Path_gc(&qstart_antisense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+    }
+    if (qend_borrowed_p == false) {
+      Path_gc(&qend_antisense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+    }
+    
+  } else if (qstart_antisense_paths != NULL) {
+    combined_antisense_paths = qstart_borrowed_p == true ?
+      segment_cache_copy_paths(qstart_antisense_paths,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) :
+      qstart_antisense_paths;
+
+  } else if (qend_antisense_paths != NULL) {
+    combined_antisense_paths = qend_borrowed_p == true ?
+      segment_cache_copy_paths(qend_antisense_paths,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) :
+      qend_antisense_paths;
+    for (p = combined_antisense_paths; p != NULL; p = List_next(p)) {
+      Path_reverse((Path_T) List_head(p),/*expect_fwd_p*/true);
+    }
+    
+  } else {
+    combined_antisense_paths = (List_T) NULL;
+  }
+
+  if (emitted_path_dedup_p == true) {
+    combined_sense_paths =
+      filter_emitted_paths(combined_sense_paths,segment_cache,
+			   intlistpool,univcoordlistpool,listpool,pathpool,
+			   vectorpool,hitlistpool,transcriptpool);
+    combined_antisense_paths =
+      filter_emitted_paths(combined_antisense_paths,segment_cache,
+			   intlistpool,univcoordlistpool,listpool,pathpool,
+			   vectorpool,hitlistpool,transcriptpool);
+  }
+
+  debug12(printf("After combining qstart and qend, combined_sense_paths: %d, combined_antisense_paths %d\n",
+		 List_length(combined_sense_paths),List_length(combined_antisense_paths)));
+
+
+  /* Want to treat sense and antisense equally in terms of complete
+     versus unextended paths.  So we set endtrim_allowed to be 0 and
+     set allow_ambig_p to be true.  We perform the same action on all
+     paths found */
+  /* Previously had allow_ambig_p to be true, but this falsely puts
+     paths into complete, and prevents us from finding fusions from the
+     unextended paths */
+  
+  sense_completep = false;
+  for (p = combined_sense_paths; p != NULL; p = List_next(p)) {
+    path = (T) List_head(p);
+    /* Cannot trust ambig */
+    if (Path_unextendedp(path,/*endtrim_allowed*/0,/*allow_ambig_p*/false) == false) {
+      debug12(printf("Sense path is complete: ")); debug12(Path_print(path));
+      sense_completep = true;
+    }
+  }
+
+  antisense_completep = false;
+  for (p = combined_antisense_paths; p != NULL; p = List_next(p)) {
+    path = (T) List_head(p);
+    /* Cannot trust ambig */
+    if (Path_unextendedp(path,/*endtrim_allowed*/0,/*allow_ambig_p*/false) == false) {
+      debug12(printf("Antisense path is complete: ")); debug12(Path_print(path));
+      antisense_completep = true;
+    }
+  }
+  debug12(printf("sense_completep %d, antisense_completep %d\n",sense_completep,antisense_completep));
+
+    
+  if (sense_completep == false) {
+    /* Put into unextended in case the complete antisense path over-reaches the other end of a paired-end read */
+    *unextended_sense_paths = List_append(combined_sense_paths,*unextended_sense_paths);
+  } else {
+#ifdef REMAP_PATHS
+    for (p = combined_sense_paths; p != NULL; p = List_next(p)) {
+      path = (T) List_head(p);
+      if (transcriptome == NULL) {
+	path->completep = true;
+	*sense_paths = Hitlist_push(*sense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+				    hitlistpool_trace(__FILE__,__LINE__));
+#if 0
+      } else if (path->transcriptome_method_p == true) {
+	/* Not possible */
+	path->completep = true;
+	*sense_paths = Hitlist_push(*sense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+				    hitlistpool_trace(__FILE__,__LINE__));
+#endif
+
+      } else if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
+					       path,query_compress_fwd,query_compress_rev,queryseq,
+					       intlistpool,uintlistpool,univcoordlistpool,listpool,
+					       transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
+	*sense_paths = List_append(repaired_paths,*sense_paths);
+	Path_free(&path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+
+      } else {
+	path->completep = true;
+	*sense_paths = Hitlist_push(*sense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+				    hitlistpool_trace(__FILE__,__LINE__));
+      }
+    }
+
+    Hitlistpool_free_list(&combined_sense_paths,hitlistpool
+			  hitlistpool_trace(__FILE__,__LINE__)); /* Allocated by Hitlist_push */
+#else
+    *sense_paths = List_append(combined_sense_paths,*sense_paths);
+#endif
+  }
+
+
+  if (antisense_completep == false) {
+    /* Put into unextended in case the complete sense path over-reaches the other end of a paired-end read */
+    *unextended_antisense_paths = List_append(combined_antisense_paths,*unextended_antisense_paths);
+
+  } else {
+#ifdef REMAP_PATHS
+    for (p = combined_antisense_paths; p != NULL; p = List_next(p)) {
+      path = (T) List_head(p);
+      if (transcriptome == NULL) {
+	path->completep = true;
+	*antisense_paths = Hitlist_push(*antisense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+					hitlistpool_trace(__FILE__,__LINE__));
+
+#if 0
+      } else if (path->transcriptome_method_p(path) == true) {
+	path->completep = true;
+	*antisense_paths = Hitlist_push(*antisense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+					hitlistpool_trace(__FILE__,__LINE__));
+#endif
+
+      } else if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
+					       path,query_compress_fwd,query_compress_rev,queryseq,
+					       intlistpool,uintlistpool,univcoordlistpool,listpool,
+					       transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
+	*antisense_paths = List_append(repaired_paths,*antisense_paths);
+	Path_free(&path,intlistpool,univcoordlistpool,
+		  listpool,pathpool,transcriptpool,hitlistpool);
+
+      } else {
+	path->completep = true;
+	*antisense_paths = Hitlist_push(*antisense_paths,hitlistpool,(void *) Path_expect_fwd(path)
+					hitlistpool_trace(__FILE__,__LINE__));
+      }
+    }
+
+    Hitlistpool_free_list(&combined_antisense_paths,hitlistpool
+			  hitlistpool_trace(__FILE__,__LINE__)); /* Allocated by Hitlist_push */
+#else
+    *antisense_paths = List_append(combined_antisense_paths,*antisense_paths);
+#endif
+  }
+
+
+#ifdef DEBUG12
+  printf("Result: first_read_p %d, plusp %d\n",first_read_p,plusp);
+  printf("Result: %d complete sense paths\n",List_length(*sense_paths));
+  printf("Result: %d complete antisense paths\n",List_length(*antisense_paths));
+  printf("Result: %d unextended sense paths\n",List_length(*unextended_sense_paths));
+  printf("Result: %d unextended antisense paths\n",List_length(*unextended_antisense_paths));
+#endif
+
+#if 0  
+  /* Already freed or used above */
+  Path_gc(&qstart_sense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+  Path_gc(&qend_sense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+  Path_gc(&qstart_antisense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+  Path_gc(&qend_antisense_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
+#endif
+
+  return;
+}
+
+
+/* A chain is a list of Univdiag_T objects */
+/* This procedure converts a chain to paths */
+/* For single-end, computing as left chains.  For paired-end, compute low end as left chain and high end as right chain */
+
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+static bool
+profile_ext_anchor_shadow (struct Accel_profile_ext_anchor_key_T *key_out,
+			   Univdiag_T head, unsigned char solve_side,
+			   char *queryptr, int querylength, int max_nblocks,
+			   int localdb_nmismatches_allowed,
+			   Stage1_T stage1, Knownsplicing_T knownsplicing,
+			   Knownindels_T knownindels,
+			   Compress_T query_compress, Compress_T query_compress_fwd,
+			   Compress_T query_compress_rev,
+			   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			   bool plusp, int genestrand, bool paired_end_p,
+			   bool first_read_p, Spliceendsgen_T spliceendsgen,
+			   Method_T method, bool find_splices_p) {
+  struct Accel_profile_ext_anchor_key_T key;
+
+  if (paired_end_p == false || (method != EXT && method != SEGMENT1)) {
+    return false;
+  }
+  memset(&key,0,sizeof(key));
+  key.queryptr_identity = (uintptr_t) queryptr;
+  key.query_compress_identity = (uintptr_t) query_compress;
+  key.query_compress_fwd_identity = (uintptr_t) query_compress_fwd;
+  key.query_compress_rev_identity = (uintptr_t) query_compress_rev;
+  key.stage1_identity = (uintptr_t) stage1;
+  key.knownsplicing_identity = (uintptr_t) knownsplicing;
+  key.knownindels_identity = (uintptr_t) knownindels;
+  key.spliceendsgen_identity = (uintptr_t) spliceendsgen;
+  key.head_univdiagonal = (uint64_t) head->univdiagonal;
+  key.chroffset = (uint64_t) chroffset;
+  key.chrhigh = (uint64_t) chrhigh;
+  key.chrnum = (int) chrnum;
+  key.head_qstart = head->qstart;
+  key.head_qend = head->qend;
+  key.querylength = querylength;
+  key.max_nblocks = max_nblocks;
+  key.localdb_nmismatches_allowed = localdb_nmismatches_allowed;
+  key.genestrand = genestrand;
+  key.method = (int) method;
+  key.solve_side = solve_side;
+  key.plusp = plusp ? 1U : 0U;
+  key.paired_end_p = paired_end_p ? 1U : 0U;
+  key.first_read_p = first_read_p ? 1U : 0U;
+  key.find_splices_p = find_splices_p ? 1U : 0U;
+  *key_out = key;
+  return Accel_profile_ext_anchor_shadow(&key);
+}
+
+/* First ownership-proof subset: paths whose complete owned graph consists of
+   the base Path_T plus endpoint/diagonal/mismatch/junction lists.  Complex
+   graphs are refused and counted until their equality contracts are audited. */
+static unsigned int
+ext_anchor_path_complex_mask (Path_T path) {
+  unsigned int mask = 0U;
+  if (path->genomic_diff != NULL) mask |= 1U;
+  if (path->qstart_alts != NULL || path->qend_alts != NULL) mask |= 2U;
+  if (path->circular_endpoints != NULL) mask |= 4U;
+  if (path->fusion_querystart_junction != NULL || path->fusion_queryend_junction != NULL) {
+    mask |= 8U;
+    if (path->fusion_alts != NULL) mask |= 32U;
+  }
+  if (path->transcripts != NULL || path->invalid_transcripts != NULL ||
+      path->fusion_transcripts != NULL || path->fusion_invalid_transcripts != NULL) mask |= 16U;
+  return mask;
+}
+
+static const char *ext_anchor_path_mismatch_reason = NULL;
+static Path_T ext_anchor_mismatch_x = NULL, ext_anchor_mismatch_y = NULL;
+
+static bool
+ext_anchor_simple_path_equal_p (Path_T x, Path_T y) {
+  if (x->nmatches != y->nmatches || x->ref_nmatches != y->ref_nmatches ||
+      x->junction_splice_prob != y->junction_splice_prob ||
+      x->total_splice_prob != y->total_splice_prob ||
+      x->found_score != y->found_score || x->end_score != y->end_score ||
+      x->score_within_trims != y->score_within_trims) {
+    ext_anchor_path_mismatch_reason = "scores"; return false;
+  } else if (x->plusp != y->plusp || x->genestrand != y->genestrand ||
+             x->sensedir != y->sensedir || x->querylength != y->querylength ||
+             x->chrnum != y->chrnum || x->chroffset != y->chroffset ||
+             x->chrhigh != y->chrhigh || x->main_univdiagonal != y->main_univdiagonal) {
+    ext_anchor_path_mismatch_reason = "coordinates"; return false;
+  } else if (Intlist_equal(x->endpoints,y->endpoints) == false) {
+    ext_anchor_path_mismatch_reason = "endpoints"; return false;
+  } else if (Univcoordlist_equal(x->univdiagonals,y->univdiagonals) == false) {
+    ext_anchor_path_mismatch_reason = "univdiagonals"; return false;
+  } else if (Intlist_equal(x->nmismatches,y->nmismatches) == false) {
+    ext_anchor_path_mismatch_reason = "nmismatches"; return false;
+  } else if (Intlist_equal(x->ref_nmismatches,y->ref_nmismatches) == false) {
+    ext_anchor_path_mismatch_reason = "ref_nmismatches"; return false;
+  } else if (qend_local_junction_list_equal_p(x->junctions,y->junctions) == false) {
+    ext_anchor_path_mismatch_reason = "junctions";
+    ext_anchor_mismatch_x = x; ext_anchor_mismatch_y = y; return false;
+  } else if (x->splice5p != y->splice5p || x->splice3p != y->splice3p ||
+             x->splicetype5 != y->splicetype5 || x->splicetype3 != y->splicetype3 ||
+             x->ambig_prob_5 != y->ambig_prob_5 || x->ambig_prob_3 != y->ambig_prob_3) {
+    ext_anchor_path_mismatch_reason = "splice_ends"; return false;
+  } else if (x->completep != y->completep || x->childp != y->childp ||
+             x->extendedp != y->extendedp || x->method != y->method ||
+             x->transcriptome_method_p != y->transcriptome_method_p ||
+             x->query_compress_fwd != y->query_compress_fwd ||
+             x->query_compress_rev != y->query_compress_rev) {
+    ext_anchor_path_mismatch_reason = "flags_or_compress"; return false;
+  } else if (x->fusion_querystart_junction == NULL && x->fusion_queryend_junction == NULL &&
+	     y->fusion_querystart_junction == NULL && y->fusion_queryend_junction == NULL) {
+    return true;
+  }
+
+  if (qend_local_junction_equal_p(x->fusion_querystart_junction,
+				y->fusion_querystart_junction) == true &&
+    qend_local_junction_equal_p(x->fusion_queryend_junction,
+				y->fusion_queryend_junction) == true &&
+    x->fusion_chrnum == y->fusion_chrnum && x->fusion_chroffset == y->fusion_chroffset &&
+    x->fusion_chrhigh == y->fusion_chrhigh && x->fusion_plusp == y->fusion_plusp &&
+    Intlist_equal(x->fusion_endpoints,y->fusion_endpoints) == true &&
+    Univcoordlist_equal(x->fusion_univdiagonals,y->fusion_univdiagonals) == true &&
+    Intlist_equal(x->fusion_nmismatches,y->fusion_nmismatches) == true &&
+    Intlist_equal(x->fusion_ref_nmismatches,y->fusion_ref_nmismatches) == true &&
+    qend_local_junction_list_equal_p(x->fusion_junctions,y->fusion_junctions) == true &&
+    x->fusion_splicep == y->fusion_splicep &&
+    x->fusion_splicetype == y->fusion_splicetype &&
+      x->fusion_ambig_prob == y->fusion_ambig_prob) {
+    return true;
+  } else {
+    ext_anchor_path_mismatch_reason = "fusion"; return false;
+  }
+}
+
+static bool
+ext_anchor_simple_list_equal_p (List_T x, List_T y, int *npaths, int *nnodes,
+				bool *supportedp, unsigned int *complex_mask) {
+  Path_T xpath, ypath;
+
+  while (x != NULL && y != NULL) {
+    xpath = (Path_T) List_head(x);
+    ypath = (Path_T) List_head(y);
+    (*npaths)++;
+    *nnodes += 1 + Intlist_length(xpath->endpoints) +
+      Univcoordlist_length(xpath->univdiagonals) +
+      Intlist_length(xpath->nmismatches) + Intlist_length(xpath->ref_nmismatches) +
+      List_length(xpath->junctions);
+    if (xpath->fusion_querystart_junction != NULL || xpath->fusion_queryend_junction != NULL) {
+      *nnodes += Intlist_length(xpath->fusion_endpoints) +
+	Univcoordlist_length(xpath->fusion_univdiagonals) +
+	Intlist_length(xpath->fusion_nmismatches) +
+	Intlist_length(xpath->fusion_ref_nmismatches) + List_length(xpath->fusion_junctions);
+    }
+    *complex_mask |= ext_anchor_path_complex_mask(xpath);
+    *complex_mask |= ext_anchor_path_complex_mask(ypath);
+    if ((*complex_mask & ~8U) != 0U) {
+      *supportedp = false;
+    } else if (ext_anchor_simple_path_equal_p(xpath,ypath) == false) {
+      return false;
+    }
+    x = List_next(x);
+    y = List_next(y);
+  }
+  if (x == NULL && y == NULL) {
+    return true;
+  } else {
+    ext_anchor_path_mismatch_reason = "list_length";
+    return false;
+  }
+}
+
+static bool
+ext_anchor_copy_check (List_T fresh_sense_paths, List_T fresh_antisense_paths,
+		       List_T canonical_sense_paths, List_T canonical_antisense_paths,
+		       List_T *sense_copy_out, List_T *antisense_copy_out,
+		       unsigned long long position_gap,
+		       Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+		       Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+		       Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  List_T sense_copy, antisense_copy;
+  bool supportedp = true, equalp;
+  unsigned int complex_mask = 0U;
+  int npaths = 0, nnodes = 0;
+
+  ext_anchor_path_mismatch_reason = NULL;
+  ext_anchor_mismatch_x = ext_anchor_mismatch_y = NULL;
+
+  sense_copy = NULL;
+  for (List_T p = canonical_sense_paths; p != NULL; p = List_next(p)) {
+    sense_copy = Hitlist_push(sense_copy,hitlistpool,
+			      (void *) Path_copy_solver_result((Path_T) List_head(p),intlistpool,
+					      univcoordlistpool,listpool,pathpool,vectorpool,
+					      transcriptpool,hitlistpool)
+			      hitlistpool_trace(__FILE__,__LINE__));
+  }
+  sense_copy = List_reverse(sense_copy);
+  antisense_copy = NULL;
+  for (List_T p = canonical_antisense_paths; p != NULL; p = List_next(p)) {
+    antisense_copy = Hitlist_push(antisense_copy,hitlistpool,
+				  (void *) Path_copy_solver_result((Path_T) List_head(p),intlistpool,
+						  univcoordlistpool,listpool,pathpool,vectorpool,
+						  transcriptpool,hitlistpool)
+				  hitlistpool_trace(__FILE__,__LINE__));
+  }
+  antisense_copy = List_reverse(antisense_copy);
+  equalp = ext_anchor_simple_list_equal_p(fresh_sense_paths,sense_copy,&npaths,&nnodes,
+					 &supportedp,&complex_mask) &&
+    ext_anchor_simple_list_equal_p(fresh_antisense_paths,antisense_copy,&npaths,&nnodes,
+					  &supportedp,&complex_mask);
+  Accel_profile_ext_anchor_copy_check(npaths,nnodes,supportedp,equalp,complex_mask,position_gap);
+  *sense_copy_out = sense_copy;
+  *antisense_copy_out = antisense_copy;
+  return supportedp == true && equalp == true;
+}
+
+static bool
+ext_anchor_result_store (Path_ext_anchor_cache_T cache,
+			 const struct Accel_profile_ext_anchor_key_T *key,
+			 List_T fresh_sense_paths, List_T fresh_antisense_paths,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			 Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_ext_anchor_result_entry_T *entry;
+  unsigned int side;
+
+  if (cache == NULL || key == NULL) return false;
+  side = (unsigned int) key->solve_side;
+  assert(side < EXT_ANCHOR_RESULT_CACHE_SIZE);
+  entry = &cache->entries[side];
+  if (entry->occupiedp == true) {
+    /* The cache is scoped to one exact EXT head and one immutable solver
+       context.  A second distinct key in the same side is a programming
+       error, never a reason to recompute silently. */
+    assert(memcmp(&entry->key,key,sizeof(*key)) == 0);
+    return false;
+  }
+
+  entry->occupiedp = true;
+  entry->key = *key;
+  entry->sense_paths =
+    solver_result_copy_paths(fresh_sense_paths,intlistpool,univcoordlistpool,
+			     listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+  entry->antisense_paths =
+    solver_result_copy_paths(fresh_antisense_paths,intlistpool,univcoordlistpool,
+			     listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+  EXT_ANCHOR_COUNT(ext_anchor_first_seen_count);
+  return true;
+}
+
+static bool
+ext_anchor_result_lookup (List_T *sense_paths, List_T *antisense_paths,
+			  Path_ext_anchor_cache_T cache,
+			  const struct Accel_profile_ext_anchor_key_T *key,
+			  Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			  Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			  Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  struct Path_ext_anchor_result_entry_T *entry;
+  unsigned int side;
+
+  if (cache == NULL || key == NULL) return false;
+  EXT_ANCHOR_COUNT(ext_anchor_lookup_count);
+  side = (unsigned int) key->solve_side;
+  assert(side < EXT_ANCHOR_RESULT_CACHE_SIZE);
+  entry = &cache->entries[side];
+  if (entry->occupiedp == false) return false;
+  assert(memcmp(&entry->key,key,sizeof(*key)) == 0);
+
+  /* The combiner has explicit borrowed-input handling and never mutates or
+     frees these canonical graphs.  Tail solvers use ext_anchor_result_replay,
+     which returns owned copies. */
+  *sense_paths = entry->sense_paths;
+  *antisense_paths = entry->antisense_paths;
+  EXT_ANCHOR_COUNT(ext_anchor_hit_count);
+  return true;
+}
+
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+static bool
+ext_anchor_result_replay (List_T *sense_paths, List_T *antisense_paths,
+			  Path_ext_anchor_cache_T cache,
+			  const struct Accel_profile_ext_anchor_key_T *key,
+			  Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			  Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			  Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  List_T canonical_sense, canonical_antisense;
+  if (ext_anchor_result_lookup(&canonical_sense,&canonical_antisense,cache,key,
+			       intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			       hitlistpool,transcriptpool) == false) return false;
+  *sense_paths =
+    solver_result_copy_paths(canonical_sense,intlistpool,univcoordlistpool,
+			     listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+  *antisense_paths =
+    solver_result_copy_paths(canonical_antisense,intlistpool,univcoordlistpool,
+			     listpool,pathpool,vectorpool,hitlistpool,transcriptpool);
+  return true;
+}
+
+static void
+ext_anchor_result_admit (Path_ext_anchor_cache_T cache,
+			 const struct Accel_profile_ext_anchor_key_T *key,
+			 List_T sense_paths, List_T antisense_paths,
+			 Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			 Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool) {
+  (void) ext_anchor_result_store(cache,key,sense_paths,antisense_paths,
+				 intlistpool,univcoordlistpool,listpool,pathpool,
+				 vectorpool,hitlistpool,transcriptpool);
+}
+#endif
+
+#endif
+
+/* A left chain has higher univdiagonal at head */
+static void
+path_solve_from_left_chain (int *found_score, int *end_score,
+
+			    List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+			    List_T *sense_paths, List_T *antisense_paths,
+
+			    List_T left_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			    int localdb_nmismatches_allowed,
+
+			    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+			    Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			    bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+			    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			    Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+			    Path_ext_anchor_cache_T ext_anchor_cache,
+			    Path_segment_cache_T segment_cache,
+			    bool segment_prefix_skip_p,
+			    bool segment_qstart_anchor_cache_p,
+			    bool path_qend_local_cache_p,
+			    bool emitted_path_dedup_p) {
+  
+  List_T qstart_sense_paths = NULL, qstart_antisense_paths = NULL,
+    qend_sense_paths = NULL, qend_antisense_paths = NULL, p;
+  List_T right_chain;
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  List_T root_chain;
+#endif
+  Univdiag_T right_univdiag;
+  Univcoord_T middle_univdiagonal;
+  T path;
+
+  bool qstart_innerp, qend_innerp;
+  bool ext_anchor_reused_p = false;
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  bool chain_root_materialized_p = false;
+#endif
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+  struct Accel_profile_ext_anchor_key_T ext_shadow_key;
+#endif
+  int found_sensedir;
+  int trimpos, exon_origin, qstart, qend, pos5, pos3;
+  int nmatches, nmismatches_to_trimpos;
+  bool splice5p, splice3p;
+  Splicetype_T splicetype5, splicetype3;
+  double ambig_prob_5, ambig_prob_3;
+
+  /* Create right chain and solve => qend paths */
+  right_univdiag = (Univdiag_T) List_head(left_chain);
+  middle_univdiagonal = right_univdiag->univdiagonal;
+
+  p = List_next(left_chain);
+  if (segment_prefix_skip_p == true && p != NULL && method == SEGMENT1 && paired_end_p == false) {
+    Univdiag_T next_univdiag = (Univdiag_T) List_head(p);
+
+    if (next_univdiag->univdiagonal >= chroffset + querylength &&
+	segment_qstart_cache_contains(segment_cache,right_univdiag,next_univdiag,
+				      querylength,localdb_nmismatches_allowed,
+				      chrnum,chroffset,chrhigh,plusp,genestrand,
+				      first_read_p,find_splices_p) == true) {
+      /* A previous chain with the same head+next proved that next cannot
+	 attach, so the remaining tail cannot affect qstart or the combined path. */
+      return;
+    }
+  }
+
+  right_chain = Univdiagpool_push(NULL,univdiagpool,right_univdiag->qstart,right_univdiag->qend,
+				  right_univdiag->nmismatches,middle_univdiagonal
+			  univdiagpool_trace(__FILE__,__LINE__));
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+
+  (void) profile_ext_anchor_shadow(&ext_shadow_key,
+				   right_univdiag,/*solve_side:qend*/1U,
+			    queryptr,querylength,max_nblocks,localdb_nmismatches_allowed,
+			    stage1,knownsplicing,knownindels,
+			    query_compress,query_compress_fwd,query_compress_rev,
+			    chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,
+			    first_read_p,spliceendsgen,method,find_splices_p);
+  ext_anchor_reused_p = ext_anchor_result_lookup(&qend_sense_paths,&qend_antisense_paths,
+					   ext_anchor_cache,&ext_shadow_key,
+					   intlistpool,univcoordlistpool,listpool,pathpool,
+					   vectorpool,hitlistpool,transcriptpool);
+#endif
+  if (ext_anchor_reused_p == false) {
+    solve_chain_qend(&qend_sense_paths,&qend_antisense_paths,right_chain,
+		   queryptr,querylength,mismatch_positions_alloc,
+		   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		   localdb_tally,localdb_overflowp,max_nblocks,
+		   localdb_nmismatches_allowed,
+
+		   stage1,knownsplicing,knownindels,
+		   query_compress,query_compress_fwd,query_compress_rev,
+		   chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		   intlistpool,univcoordlistpool,listpool,
+		   pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		   method,find_splices_p,segment_cache,segment_prefix_skip_p,
+		   path_qend_local_cache_p,/*skip_initial_local_p*/false);
+  }
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+  Accel_profile_ext_anchor_shadow_end();
+  if (ext_anchor_reused_p == false) {
+    (void) ext_anchor_result_store(ext_anchor_cache,&ext_shadow_key,
+				   qend_sense_paths,qend_antisense_paths,
+				   intlistpool,univcoordlistpool,listpool,pathpool,
+				   vectorpool,hitlistpool,transcriptpool);
+  }
+#endif
+  Univdiagpool_gc(&right_chain,univdiagpool
+		  univdiagpool_trace(__FILE__,__LINE__));
+
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  root_chain = Univdiagpool_push(NULL,univdiagpool,right_univdiag->qstart,
+				right_univdiag->qend,right_univdiag->nmismatches,
+				middle_univdiagonal
+				univdiagpool_trace(__FILE__,__LINE__));
+  (void) profile_ext_anchor_shadow(&ext_shadow_key,right_univdiag,
+				   /*solve_side:qstart*/0U,queryptr,querylength,max_nblocks,
+				   localdb_nmismatches_allowed,stage1,knownsplicing,knownindels,
+				   query_compress,query_compress_fwd,query_compress_rev,
+				   chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,
+				   first_read_p,spliceendsgen,method,find_splices_p);
+  if (ext_anchor_result_replay(&qstart_sense_paths,&qstart_antisense_paths,
+			       ext_anchor_cache,&ext_shadow_key,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) == false) {
+    solve_chain_qstart(&qstart_sense_paths,&qstart_antisense_paths,root_chain,
+		       queryptr,querylength,mismatch_positions_alloc,
+		       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
+		       stage1,knownsplicing,knownindels,
+		       query_compress,query_compress_fwd,query_compress_rev,
+		       chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		       intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+		       univdiagpool,vectorpool,hitlistpool,spliceendsgen,method,find_splices_p,
+		       segment_cache,segment_prefix_skip_p,/*skip_initial_local_p*/false);
+    ext_anchor_result_admit(ext_anchor_cache,&ext_shadow_key,
+			    qstart_sense_paths,qstart_antisense_paths,
+			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			    hitlistpool,transcriptpool);
+  }
+  Univdiagpool_gc(&root_chain,univdiagpool univdiagpool_trace(__FILE__,__LINE__));
+  chain_root_materialized_p = true;
+#endif
+
+  /* Solve given left chain => qstart paths */
+  solve_chain_qstart(&qstart_sense_paths,&qstart_antisense_paths,left_chain,
+		     queryptr,querylength,mismatch_positions_alloc,
+		     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		     localdb_tally,localdb_overflowp,max_nblocks,
+		     localdb_nmismatches_allowed,
+
+		     stage1,knownsplicing,knownindels,
+		     query_compress,query_compress_fwd,query_compress_rev,
+		     chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		     intlistpool,univcoordlistpool,listpool,
+		     pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		     method,find_splices_p,segment_cache,segment_prefix_skip_p,
+		     /*skip_initial_local_p*/
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+		     chain_root_materialized_p
+#else
+		     false
+#endif
+		     );
+
+  /* Combine qstart and qend paths */
+  solve_combine(&(*found_score),&(*end_score),
+
+		&(*unextended_sense_paths),&(*unextended_antisense_paths),
+		&(*sense_paths),&(*antisense_paths),
+
+		qstart_sense_paths,qstart_antisense_paths,
+		qend_sense_paths,qend_antisense_paths,
+		/*qstart_borrowed_p*/false,/*qend_borrowed_p*/ext_anchor_reused_p,
+
+		middle_univdiagonal,queryseq,queryptr,querylength,mismatch_positions_alloc,
+		novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		localdb_tally,localdb_overflowp,max_nblocks,
+
+		stage1,knownsplicing,knownindels,
+		query_compress,query_compress_fwd,query_compress_rev,
+		chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		intlistpool,uintlistpool,univcoordlistpool,listpool,
+		pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		method,find_splices_p,segment_cache,emitted_path_dedup_p);
+  return;
+}
+
+void
+Path_solve_from_left_chain (int *found_score, int *end_score,
+
+			    List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+			    List_T *sense_paths, List_T *antisense_paths,
+
+			    List_T left_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			    int localdb_nmismatches_allowed,
+
+			    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+			    Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			    bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+			    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			    Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p) {
+
+  path_solve_from_left_chain(&(*found_score),&(*end_score),
+			     &(*unextended_sense_paths),&(*unextended_antisense_paths),
+			     &(*sense_paths),&(*antisense_paths),
+			     left_chain,queryseq,queryptr,querylength,mismatch_positions_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_tally,localdb_overflowp,max_nblocks,
+			     localdb_nmismatches_allowed,
+			     stage1,knownsplicing,knownindels,
+			     query_compress,query_compress_fwd,query_compress_rev,
+			     chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+				     intlistpool,uintlistpool,univcoordlistpool,listpool,
+				     pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+				     spliceendsgen,method,find_splices_p,
+				     /*ext_anchor_cache*/(Path_ext_anchor_cache_T) NULL,
+				     /*segment_cache*/(Path_segment_cache_T) NULL,
+				     /*segment_prefix_skip_p*/false,
+				     /*segment_qstart_anchor_cache_p*/false,
+				     /*path_qend_local_cache_p*/false,
+				     /*emitted_path_dedup_p*/false);
+  return;
+}
+
+void
+Path_solve_from_left_chain_cached (int *found_score, int *end_score,
+
+				   List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+				   List_T *sense_paths, List_T *antisense_paths,
+
+				   List_T left_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+				   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+				   int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+				   int localdb_nmismatches_allowed,
+
+				   Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+				   Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+				   Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				   bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+				   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+					   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+					   Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+				   Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+				   Path_ext_anchor_cache_T ext_anchor_cache,
+				   Path_segment_cache_T segment_cache,
+					   bool segment_prefix_skip_p,
+					   bool segment_qstart_anchor_cache_p,
+					   bool path_qend_local_cache_p,
+					   bool emitted_path_dedup_p) {
+
+  path_solve_from_left_chain(&(*found_score),&(*end_score),
+			     &(*unextended_sense_paths),&(*unextended_antisense_paths),
+			     &(*sense_paths),&(*antisense_paths),
+			     left_chain,queryseq,queryptr,querylength,mismatch_positions_alloc,
+			     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			     localdb_tally,localdb_overflowp,max_nblocks,
+			     localdb_nmismatches_allowed,
+			     stage1,knownsplicing,knownindels,
+			     query_compress,query_compress_fwd,query_compress_rev,
+			     chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+				     intlistpool,uintlistpool,univcoordlistpool,listpool,
+				     pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+				     spliceendsgen,method,find_splices_p,ext_anchor_cache,segment_cache,
+				     segment_prefix_skip_p,segment_qstart_anchor_cache_p,
+				     path_qend_local_cache_p,emitted_path_dedup_p);
+  return;
+}
+
+
+/* A right chain has lower univdiagonal at head */
+static void
+path_solve_from_right_chain (int *found_score, int *end_score,
+
+			     List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+			     List_T *sense_paths, List_T *antisense_paths,
+
+			     List_T right_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			     int localdb_nmismatches_allowed,
+
+			     Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+			     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+			     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			     bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+			     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+				     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			     Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+			     Path_ext_anchor_cache_T ext_anchor_cache,
+			     Path_segment_cache_T segment_cache,
+				     bool segment_prefix_skip_p,
+				     bool segment_qstart_anchor_cache_p,
+				     bool path_qend_local_cache_p,
+				     bool emitted_path_dedup_p) {
+  
+  List_T qstart_sense_paths = NULL, qstart_antisense_paths = NULL,
+    qend_sense_paths = NULL, qend_antisense_paths = NULL, p;
+  List_T left_chain;
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  List_T root_chain;
+#endif
+  Univdiag_T left_univdiag;
+  Univcoord_T middle_univdiagonal;
+  T path;
+
+  bool qstart_innerp, qend_innerp;
+  bool ext_anchor_reused_p = false;
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  bool chain_root_materialized_p = false;
+#endif
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+  struct Accel_profile_ext_anchor_key_T ext_shadow_key;
+#endif
+  int found_sensedir;
+  int trimpos, exon_origin, qstart, qend, pos5, pos3;
+  int nmatches, nmismatches_to_trimpos;
+  bool splice5p, splice3p;
+  Splicetype_T splicetype5, splicetype3;
+  double ambig_prob_5, ambig_prob_3;
+
+  /* Create left chain and solve => qstart paths */
+  left_univdiag = (Univdiag_T) List_head(right_chain);
+  middle_univdiagonal = left_univdiag->univdiagonal;
+
+  p = List_next(right_chain);
+  if (segment_prefix_skip_p == true && p != NULL && method == SEGMENT1 && paired_end_p == false) {
+    Univdiag_T next_univdiag = (Univdiag_T) List_head(p);
+
+    if (next_univdiag->univdiagonal < chrhigh &&
+	segment_qend_cache_contains(segment_cache,left_univdiag,next_univdiag,
+				    querylength,localdb_nmismatches_allowed,
+				    chrnum,chroffset,chrhigh,plusp,genestrand,
+				    first_read_p,find_splices_p) == true) {
+      /* A previous chain with the same head+next proved that next cannot
+	 attach, so the remaining tail cannot affect qend or the combined path. */
+      return;
+    }
+  }
+
+  if (segment_qstart_anchor_cache_p == true &&
+      method == SEGMENT1 && paired_end_p == false &&
+      segment_cache_lookup(&qstart_sense_paths,&qstart_antisense_paths,segment_cache,left_univdiag,
+			  querylength,localdb_nmismatches_allowed,chrnum,chroffset,chrhigh,
+			  plusp,genestrand,first_read_p,find_splices_p,
+			  intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			  hitlistpool,transcriptpool) == true) {
+    /* Reused an exact single-anchor qstart solve. */
+    Accel_profile_pathsolve_cache("qstart_anchor",/*hitp*/true);
+
+  } else {
+    if (segment_qstart_anchor_cache_p == true && method == SEGMENT1 && paired_end_p == false) {
+      Accel_profile_pathsolve_cache("qstart_anchor",/*hitp*/false);
+    }
+    left_chain = Univdiagpool_push(NULL,univdiagpool,left_univdiag->qstart,left_univdiag->qend,
+				   left_univdiag->nmismatches,middle_univdiagonal
+				   univdiagpool_trace(__FILE__,__LINE__));
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+    (void) profile_ext_anchor_shadow(&ext_shadow_key,
+				     left_univdiag,/*solve_side:qstart*/0U,
+			      queryptr,querylength,max_nblocks,localdb_nmismatches_allowed,
+			      stage1,knownsplicing,knownindels,
+			      query_compress,query_compress_fwd,query_compress_rev,
+			      chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,
+			      first_read_p,spliceendsgen,method,find_splices_p);
+    ext_anchor_reused_p = ext_anchor_result_lookup(&qstart_sense_paths,&qstart_antisense_paths,
+					     ext_anchor_cache,&ext_shadow_key,
+					     intlistpool,univcoordlistpool,listpool,pathpool,
+					     vectorpool,hitlistpool,transcriptpool);
+#endif
+    if (ext_anchor_reused_p == false) {
+      solve_chain_qstart(&qstart_sense_paths,&qstart_antisense_paths,left_chain,
+		       queryptr,querylength,mismatch_positions_alloc,
+		       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
+		       localdb_nmismatches_allowed,
+
+		       stage1,knownsplicing,knownindels,
+		       query_compress,query_compress_fwd,query_compress_rev,
+		       chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		       intlistpool,univcoordlistpool,listpool,
+		       pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		       method,find_splices_p,/*segment_cache*/(Path_segment_cache_T) NULL,
+		       /*segment_prefix_skip_p*/false,/*skip_initial_local_p*/false);
+    }
+#ifdef GSNAP_EXT_ANCHOR_PROOF
+    Accel_profile_ext_anchor_shadow_end();
+    if (ext_anchor_reused_p == false) {
+      (void) ext_anchor_result_store(ext_anchor_cache,&ext_shadow_key,
+				     qstart_sense_paths,qstart_antisense_paths,
+				     intlistpool,univcoordlistpool,listpool,pathpool,
+				     vectorpool,hitlistpool,transcriptpool);
+    }
+#endif
+    Univdiagpool_gc(&left_chain,univdiagpool
+		    univdiagpool_trace(__FILE__,__LINE__));
+
+    if (segment_qstart_anchor_cache_p == true &&
+	method == SEGMENT1 && paired_end_p == false) {
+      segment_cache_insert(segment_cache,left_univdiag,qstart_sense_paths,qstart_antisense_paths,
+			  querylength,localdb_nmismatches_allowed,chrnum,chroffset,chrhigh,
+			  plusp,genestrand,first_read_p,find_splices_p,
+			  intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			  hitlistpool,transcriptpool);
+    }
+  }
+
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+  root_chain = Univdiagpool_push(NULL,univdiagpool,left_univdiag->qstart,
+				left_univdiag->qend,left_univdiag->nmismatches,
+				middle_univdiagonal
+				univdiagpool_trace(__FILE__,__LINE__));
+  (void) profile_ext_anchor_shadow(&ext_shadow_key,left_univdiag,
+				   /*solve_side:qend*/1U,queryptr,querylength,max_nblocks,
+				   localdb_nmismatches_allowed,stage1,knownsplicing,knownindels,
+				   query_compress,query_compress_fwd,query_compress_rev,
+				   chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,
+				   first_read_p,spliceendsgen,method,find_splices_p);
+  if (ext_anchor_result_replay(&qend_sense_paths,&qend_antisense_paths,
+			       ext_anchor_cache,&ext_shadow_key,intlistpool,univcoordlistpool,
+			       listpool,pathpool,vectorpool,hitlistpool,transcriptpool) == false) {
+    solve_chain_qend(&qend_sense_paths,&qend_antisense_paths,root_chain,
+		     queryptr,querylength,mismatch_positions_alloc,
+		     novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		     localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
+		     stage1,knownsplicing,knownindels,
+		     query_compress,query_compress_fwd,query_compress_rev,
+		     chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		     intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
+		     univdiagpool,vectorpool,hitlistpool,spliceendsgen,method,find_splices_p,
+		     segment_cache,segment_prefix_skip_p,path_qend_local_cache_p,
+		     /*skip_initial_local_p*/false);
+    ext_anchor_result_admit(ext_anchor_cache,&ext_shadow_key,
+			    qend_sense_paths,qend_antisense_paths,
+			    intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+			    hitlistpool,transcriptpool);
+  }
+  Univdiagpool_gc(&root_chain,univdiagpool univdiagpool_trace(__FILE__,__LINE__));
+  chain_root_materialized_p = true;
+#endif
+
+  /* Solve given right chain => qend paths */
+  solve_chain_qend(&qend_sense_paths,&qend_antisense_paths,right_chain,
+		   queryptr,querylength,mismatch_positions_alloc,
+		   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		   localdb_tally,localdb_overflowp,max_nblocks,
+		   localdb_nmismatches_allowed,
+
+		   stage1,knownsplicing,knownindels,
+		   query_compress,query_compress_fwd,query_compress_rev,
+		   chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		   intlistpool,univcoordlistpool,listpool,
+		   pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		   method,find_splices_p,segment_cache,segment_prefix_skip_p,
+		   path_qend_local_cache_p,/*skip_initial_local_p*/
+#ifdef GSNAP_CHAIN_ROOT_REPLAY
+		   chain_root_materialized_p
+#else
+		   false
+#endif
+		   );
+
+  /* Combine qstart and qend paths */
+  solve_combine(&(*found_score),&(*end_score),
+
+		&(*unextended_sense_paths),&(*unextended_antisense_paths),
+		&(*sense_paths),&(*antisense_paths),
+
+		qstart_sense_paths,qstart_antisense_paths,
+		qend_sense_paths,qend_antisense_paths,
+		/*qstart_borrowed_p*/ext_anchor_reused_p,/*qend_borrowed_p*/false,
+
+		middle_univdiagonal,queryseq,queryptr,querylength,mismatch_positions_alloc,
+		novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+		localdb_tally,localdb_overflowp,max_nblocks,
+
+		stage1,knownsplicing,knownindels,
+		query_compress,query_compress_fwd,query_compress_rev,
+		chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+		intlistpool,uintlistpool,univcoordlistpool,listpool,
+		pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,spliceendsgen,
+		method,find_splices_p,segment_cache,emitted_path_dedup_p);
+  return;
+}
+
+
+void
+Path_solve_from_right_chain (int *found_score, int *end_score,
+
+			     List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+			     List_T *sense_paths, List_T *antisense_paths,
+
+			     List_T right_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+			     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			     int localdb_nmismatches_allowed,
+
+			     Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+			     Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+			     Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+			     bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+			     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+			     Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+			     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			     Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p) {
+
+  path_solve_from_right_chain(&(*found_score),&(*end_score),
+			      &(*unextended_sense_paths),&(*unextended_antisense_paths),
+			      &(*sense_paths),&(*antisense_paths),
+			      right_chain,queryseq,queryptr,querylength,mismatch_positions_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,
+			      localdb_nmismatches_allowed,
+			      stage1,knownsplicing,knownindels,
+			      query_compress,query_compress_fwd,query_compress_rev,
+			      chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+				      intlistpool,uintlistpool,univcoordlistpool,listpool,
+				      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+				      spliceendsgen,method,find_splices_p,
+				      /*ext_anchor_cache*/(Path_ext_anchor_cache_T) NULL,
+				      /*segment_cache*/(Path_segment_cache_T) NULL,
+				      /*segment_prefix_skip_p*/false,
+				      /*segment_qstart_anchor_cache_p*/false,
+				      /*path_qend_local_cache_p*/false,
+				      /*emitted_path_dedup_p*/false);
+  return;
+}
+
+
+void
+Path_solve_from_right_chain_cached (int *found_score, int *end_score,
+
+				    List_T *unextended_sense_paths, List_T *unextended_antisense_paths,
+				    List_T *sense_paths, List_T *antisense_paths,
+
+				    List_T right_chain, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc,
+
+				    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+				    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+				    int localdb_nmismatches_allowed,
+
+				    Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
+				    Compress_T query_compress, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+				    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
+				    bool plusp, int genestrand, bool paired_end_p, bool first_read_p,
+				    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
+					    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+				    Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+				    Spliceendsgen_T spliceendsgen, Method_T method, bool find_splices_p,
+				    Path_ext_anchor_cache_T ext_anchor_cache,
+				    Path_segment_cache_T segment_cache,
+					    bool segment_prefix_skip_p,
+					    bool segment_qstart_anchor_cache_p,
+					    bool path_qend_local_cache_p,
+					    bool emitted_path_dedup_p) {
+
+  path_solve_from_right_chain(&(*found_score),&(*end_score),
+			      &(*unextended_sense_paths),&(*unextended_antisense_paths),
+			      &(*sense_paths),&(*antisense_paths),
+			      right_chain,queryseq,queryptr,querylength,mismatch_positions_alloc,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,
+			      localdb_nmismatches_allowed,
+			      stage1,knownsplicing,knownindels,
+			      query_compress,query_compress_fwd,query_compress_rev,
+			      chrnum,chroffset,chrhigh,plusp,genestrand,paired_end_p,first_read_p,
+				      intlistpool,uintlistpool,univcoordlistpool,listpool,
+				      pathpool,transcriptpool,univdiagpool,vectorpool,hitlistpool,
+				      spliceendsgen,method,find_splices_p,ext_anchor_cache,segment_cache,
+				      segment_prefix_skip_p,segment_qstart_anchor_cache_p,
+				      path_qend_local_cache_p,emitted_path_dedup_p);
   return;
 }
 
@@ -4468,7 +8013,7 @@ Path_solve_from_univdiagonal (int *found_score,
 #ifdef REMAP_PATHS
 /* Called only by Path_extend, so can set childp to be true here */
 static List_T
-remap_paths (int *found_score, List_T paths,
+remap_paths (int *found_score, int *end_score, List_T paths,
 	     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 	     Shortread_T queryseq, Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 	     Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -4481,13 +8026,13 @@ remap_paths (int *found_score, List_T paths,
   for (p = paths; p != NULL; p = List_next(p)) {
     path = (T) List_head(p);
     path->nmatches = -1;
-    Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
 
     if (transcriptome == NULL) {
       path->childp = true;
       result_paths = Hitlist_push(result_paths,hitlistpool,(void *) path
 				  hitlistpool_trace(__FILE__,__LINE__));
-    } else if ((repaired_paths = try_repairs(&(*found_score),
+    } else if ((repaired_paths = try_repairs(&(*found_score),&(*end_score),
 					     path,query_compress_fwd,query_compress_rev,queryseq,
 					     intlistpool,uintlistpool,univcoordlistpool,listpool,
 					     transcriptpool,pathpool,vectorpool,hitlistpool)) != NULL) {
@@ -4516,10 +8061,10 @@ remap_paths (int *found_score, List_T paths,
 /* Sets completep field for parent, but not for children, which are carried with parent */
 /* Returns complete paths.  Calls Path_eval_nmatches */
 List_T
-Path_extend (int *found_score, List_T *global_unextended_paths,
-	     T original_path, Shortread_T queryseq, char *queryptr, int querylength,
-	     int *mismatch_positions_alloc, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+Path_extend (int *found_score, int *end_score, List_T *global_unextended_paths,
+	     T original_path, Shortread_T queryseq, char *queryptr, int querylength, int *mismatch_positions_alloc, 
 	     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+	     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 	     int localdb_nmismatches_allowed, 
 
 	     Stage1_T stage1, Knownsplicing_T knownsplicing, Knownindels_T knownindels,
@@ -4537,6 +8082,40 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
   bool qstart_innerp, qend_innerp;
   Chrnum_T chrnum = original_path->chrnum;
   Univcoord_T chroffset = original_path->chroffset, chrhigh = original_path->chrhigh;
+
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long profile_path_hash = 1469598103934665603ULL;
+  Univcoordlist_T profile_u;
+  Intlist_T profile_i;
+  List_T profile_j;
+  unsigned long long profile_value;
+  int profile_k;
+
+#define PROFILE_PATH_HASH_VALUE(value) do { \
+    profile_value = (unsigned long long) (value); \
+    for (profile_k = 0; profile_k < 8; profile_k++) { \
+      profile_path_hash ^= profile_value & 0xffU; \
+      profile_path_hash *= 1099511628211ULL; \
+      profile_value >>= 8; \
+    } \
+  } while (0)
+  PROFILE_PATH_HASH_VALUE(Path_effective_sensedir(original_path));
+  for (profile_u = original_path->univdiagonals; profile_u != NULL;
+	 profile_u = Univcoordlist_next(profile_u)) {
+    PROFILE_PATH_HASH_VALUE(Univcoordlist_head(profile_u));
+  }
+  for (profile_i = original_path->endpoints; profile_i != NULL; profile_i = Intlist_next(profile_i)) {
+    PROFILE_PATH_HASH_VALUE(Intlist_head(profile_i));
+  }
+  for (profile_j = original_path->junctions; profile_j != NULL; profile_j = List_next(profile_j)) {
+    PROFILE_PATH_HASH_VALUE(Junction_nindels((Junction_T) List_head(profile_j)));
+  }
+  Accel_profile_path_extend_begin(profile_path_hash,(int) original_path->chrnum,
+				  Intlist_head(original_path->endpoints),
+				  Intlist_last_value(original_path->endpoints),
+				  original_path->plusp,Path_effective_sensedir(original_path));
+#undef PROFILE_PATH_HASH_VALUE
+#endif
 
 
   debug13(printf("Entered Path_extend, sensedir %s, with path\n",
@@ -4566,9 +8145,9 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
   /* Extend qstart with salvagep being true */
   /* qstart_paths should be fwd */
   compute_qstart_local(&qstart_paths,/*depth*/0,original_path,queryptr,querylength,
-		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
 		       stage1,knownsplicing,knownindels,
 		       query_compress,chrnum,chroffset,chrhigh,intlistpool,
 		       univcoordlistpool,listpool,pathpool,transcriptpool,
@@ -4580,15 +8159,17 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
   for (p = qstart_paths; p != NULL; p = List_next(p)) {
     path = Path_reverse((Path_T) List_head(p),/*expect_fwd_p*/false);
     compute_qend_local(&qend_paths,/*depth*/0,path,queryptr,querylength,
-		       streamspace_max_alloc,streamspace_alloc,
 		       mismatch_positions_alloc,novel_univdiags_alloc,
 		       novel_diagonals_alloc,localdb_alloc,
+		       localdb_tally,localdb_overflowp,max_nblocks,
 		       stage1,knownsplicing,knownindels,
 		       query_compress,chrnum,chroffset,chrhigh,intlistpool,
 		       univcoordlistpool,listpool,pathpool,transcriptpool,
 		       univdiagpool,vectorpool,hitlistpool,spliceendsgen,
 		       localdb_nmismatches_allowed,original_path->plusp,genestrand,
-		       original_path->sensedir,qend_innerp,/*find_splices_p*/true,/*salvagep*/true);
+		       original_path->sensedir,qend_innerp,/*find_splices_p*/true,/*salvagep*/true,
+			       /*segment_cache*/(Path_segment_cache_T) NULL,
+			       /*path_qend_local_cache_p*/false);
   }
   Path_gc(&qstart_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
   /* Hitlistpool_free_list(&qstart_paths,hitlistpool 
@@ -4599,7 +8180,7 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
     path = (Path_T) List_head(p);
     path = Path_reverse(path,/*expect_fwd_p*/true);
     path->nmatches = -1;
-    Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
     if (Intlist_head(path->endpoints) <= 8 && querylength - Intlist_last_value(path->endpoints) <= 8) {
       complete_paths = Hitlist_push(complete_paths,hitlistpool,(void *) path
 				    hitlistpool_trace(__FILE__,__LINE__));
@@ -4615,7 +8196,7 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
     Path_gc(&unextended_paths,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
 
 #ifdef REMAP_PATHS
-    complete_paths = remap_paths(&(*found_score),complete_paths,
+    complete_paths = remap_paths(&(*found_score),&(*end_score),complete_paths,
 				 query_compress_fwd,query_compress_rev,queryseq,
 				 intlistpool,uintlistpool,univcoordlistpool,
 				 listpool,transcriptpool,vectorpool,pathpool,hitlistpool);
@@ -4625,12 +8206,15 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
 		   List_length(complete_paths)));
 
     *global_unextended_paths = (List_T) NULL;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_path_extend_end();
+#endif
     return complete_paths;
 
   } else {
     debug11(printf("complete paths is NULL\n"));
 #ifdef REMAP_PATHS
-    unextended_paths = remap_paths(&(*found_score),unextended_paths,
+    unextended_paths = remap_paths(&(*found_score),&(*end_score),unextended_paths,
 				   query_compress_fwd,query_compress_rev,queryseq,
 				   intlistpool,uintlistpool,univcoordlistpool,
 				   listpool,transcriptpool,vectorpool,pathpool,hitlistpool);
@@ -4640,6 +8224,9 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
 		   List_length(unextended_paths)));
 
     *global_unextended_paths = unextended_paths;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_path_extend_end();
+#endif
     return (List_T) NULL;
   }
 }
@@ -4648,10 +8235,10 @@ Path_extend (int *found_score, List_T *global_unextended_paths,
 /* Modifies path and does not create a copy */
 /* innerp is true by definition (resolve means to determine inner splices) */
 void
-Path_qstart_resolve (int *found_score, T path,
+Path_qstart_resolve (int *found_score, int *end_score, T path,
 		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal, char *queryptr, int querylength,
-		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		     int localdb_nmismatches_allowed,
 		     
 		     Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
@@ -4662,7 +8249,7 @@ Path_qstart_resolve (int *found_score, T path,
 		     Univdiagpool_T univdiagpool, Vectorpool_T vectorpool) {
 
   Univcoord_T new_univdiagonal, indel_univdiagonal;
-  int nosplice_trimpos, qend;
+  int nosplice_trimpos, low_qstart, qend;
   int supporti, supportj;
 
   Univcoordlist_T univdiagonals;
@@ -4741,11 +8328,11 @@ Path_qstart_resolve (int *found_score, T path,
 #endif
 
     new_univdiagonals =
-      Spliceends_qstart_resolve(&ndiagonals,&resolve_nmismatches,/*pos3*/qstart,querylength,
+      Spliceends_qstart_resolve(&ndiagonals,/*pos3*/qstart,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress,queryptr,path->plusp,genestrand,
 				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				stage1,streamspace_max_alloc,streamspace_alloc,
+				localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				localdb_nmismatches_allowed);
     
     if (ndiagonals == 0) {
@@ -5039,13 +8626,13 @@ Path_qstart_resolve (int *found_score, T path,
 				/*univdiagonal_i*/nearest_univdiagonal,/*univdiagonal_j*/univdiagonal,
 				stage1,query_compress,queryptr,
 				path->plusp,Path_chroffset(path),Path_chrhigh(path),
-				streamspace_max_alloc,streamspace_alloc,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				localdb_tally,localdb_overflowp,max_nblocks,localdb,
 				localdb_nmismatches_allowed,
 				/*pos5*/0,pos3,querylength,cont_trimpos,cont_nmismatches,
 				indelinfo,stage1->spliceinfo,knownsplicing,univcoordlistpool,intlistpool,listpool,pathpool,
 				path->sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
-				/*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+				/*allow_indels_p*/true,/*find_middle_p*/false,/*middle_rank*/0) == 0) {
 
 
 	debug3(printf("Single splice finds no solution\n"));
@@ -5191,15 +8778,15 @@ Path_qstart_resolve (int *found_score, T path,
 				  stage1,query_compress,queryptr,
 				  path->plusp,Path_chroffset(path),Path_chrhigh(path),
 				  
-				  streamspace_max_alloc,streamspace_alloc,
-				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				  localdb_tally,localdb_overflowp,max_nblocks,localdb,
 				  localdb_nmismatches_allowed,
 
 				  /*pos5*/0,pos3,querylength,cont_trimpos,cont_nmismatches,
 				  stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 				  univcoordlistpool,intlistpool,listpool,pathpool,
 				  path->sensedir,genestrand,/*trim5p*/true,/*trim3p*/false,/*innerp*/true,
-				  /*allow_indels_p*/false,/*find_middle_p*/false) == 0) {
+				  /*allow_indels_p*/false,/*find_middle_p*/false,/*middle_rank*/0) == 0) {
 	  /* Skip */
 
 	} else {
@@ -5478,9 +9065,16 @@ Path_qstart_resolve (int *found_score, T path,
 	      Spliceends_indel_qstart(nosplice_trimpos,/*univdiagonal*/new_univdiagonal,
 				      querylength,path->chroffset,path->chrhigh,path->plusp,genestrand,
 				      localdb_nmismatches_allowed,novel_univdiags_alloc,novel_diagonals_alloc,
-				      localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+				      localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				      univdiagpool,query_compress,queryptr)) == 0) {
     /* Skip */
+
+  } else if ((low_qstart = Genomebits_trim_qstart(&nmismatches_i,query_compress,
+						  genomebits,indel_univdiagonal,querylength,
+						  /*pos5*/0,/*pos3*/nosplice_trimpos,
+						  path->plusp,genestrand)) >= nosplice_trimpos) {
+    debug3(printf("No distal segment before qstart indel: low_qstart %d >= nosplice_trimpos %d\n",
+		  low_qstart,nosplice_trimpos));
 
   } else if (indel_univdiagonal > new_univdiagonal) {
     /* Insertion */
@@ -5492,25 +9086,25 @@ Path_qstart_resolve (int *found_score, T path,
 						    /*mismatch_positions_left*/NULL,/*nmismatches_left*/0,
 						    /*mismatch_positions_right*/NULL,/*nmismatches_right*/0,
 						    /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
-						    /*pos5*/0,/*pos3*/qend,querylength,
+						    /*pos5*/low_qstart,/*pos3*/qend,querylength,
 						    indelinfo,path->plusp,genestrand,
 						    /*want_lowest_coordinate_p*/true)) <= 0) {
       debug3(printf("Insertion fails\n"));
       
     } else {
-      supporti = indel_pos /* - low_qstart (0) */;
+      supporti = indel_pos - low_qstart;
       supportj = qend - (indel_pos + nindels);
       debug3(printf("(1) supporti %d - %d, supportj %d - (%d + %d)\n",
-		    indel_pos,/*low_qstart*/0,qend,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+		    indel_pos,low_qstart,qend,indel_pos,nindels));
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug3(printf("(1) Not enough support for indel: supporti %d and mismatches %d\n",
 		       supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug3(printf("(1) Not enough support for indel: supportj %d and mismatches %d\n",
 		       supportj,nmismatches_j));
       } else {
 	Intlist_head_set(path->endpoints,indel_pos);
-	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,/*low_qstart*/0
+	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,low_qstart
 					   intlistpool_trace(__FILE__,__LINE__));
 	path->junctions = Listpool_push(path->junctions,listpool,
 					(void *) Junction_new_insertion(nindels,pathpool)
@@ -5526,8 +9120,8 @@ Path_qstart_resolve (int *found_score, T path,
 	
 	path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,indel_univdiagonal
 						     univcoordlistpool_trace(__FILE__,__LINE__));
-	debug3(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
-		       /*low_qstart*/0,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
+	debug3(printf("(5) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+		       low_qstart,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
 
@@ -5541,19 +9135,19 @@ Path_qstart_resolve (int *found_score, T path,
 						   /*mismatch_positions_left*/NULL,/*nmismatches_left*/0,
 						   /*mismatch_positions_right*/NULL,/*nmismatches_right*/0,
 						   /*ome*/genomebits,/*ome_alt*/genomebits_alt,query_compress,
-						   /*pos5*/0,/*pos3*/qend,querylength,
+						   /*pos5*/low_qstart,/*pos3*/qend,querylength,
 						   indelinfo,path->plusp,genestrand,
 						   /*want_lowest_coordinate_p*/true)) <= 0) {
       debug3(printf("Deletion or short intron fails\n"));
 	  
     } else {
-      supporti = indel_pos /*- low_qstart (0)*/;
+      supporti = indel_pos - low_qstart;
       supportj = qend - indel_pos;
       debug3(printf("(2) supporti %d - %d, supportj %d - %d\n",
-		    indel_pos,/*low_qstart*/0,qend,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+		    indel_pos,low_qstart,qend,indel_pos));
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug3(printf("(2) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug3(printf("(2) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	assert(nindels >= 0);
@@ -5563,7 +9157,7 @@ Path_qstart_resolve (int *found_score, T path,
 					listpool_trace(__FILE__,__LINE__));
 	
 	Intlist_head_set(path->endpoints,indel_pos);
-	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,/*low_qstart*/0
+	path->endpoints = Intlistpool_push(path->endpoints,intlistpool,low_qstart
 					   intlistpool_trace(__FILE__,__LINE__));
 	
 	/* For qstart, push j first, then push i */
@@ -5577,7 +9171,7 @@ Path_qstart_resolve (int *found_score, T path,
 	path->univdiagonals = Univcoordlistpool_push(path->univdiagonals,univcoordlistpool,indel_univdiagonal
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	debug3(printf("(3) Deletion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
-		      /*low_qstart*/0,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
+		      low_qstart,qend,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
   }
@@ -5585,10 +9179,10 @@ Path_qstart_resolve (int *found_score, T path,
 
 #if 0
   path->nmatches = -1;
-  Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
 #else
   path->nmatches = -1;		/* Calls Path_eval_nmatches */
-  Path_trim_chrbounds(&(*found_score),path,query_compress_fwd,query_compress_rev,
+Path_trim_chrbounds(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev,
   		      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 		    
 #endif
@@ -5602,11 +9196,11 @@ Path_qstart_resolve (int *found_score, T path,
 /* Modifies path and does not create a copy */
 /* innerp is true by definition (resolve means to determine inner splices) */
 void
-Path_qend_resolve (int *found_score, T path,
+Path_qend_resolve (int *found_score, int *end_score, T path,
 		   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		   char *queryptr, int querylength,
-		   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		   int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		   int localdb_nmismatches_allowed,
 		   
 		   Stage1_T stage1, Knownsplicing_T knownsplicing, Indelinfo_T indelinfo,
@@ -5700,11 +9294,11 @@ Path_qend_resolve (int *found_score, T path,
 #endif
 
     new_univdiagonals =
-      Spliceends_qend_resolve(&ndiagonals,&resolve_nmismatches,/*pos5*/qend,querylength,
+      Spliceends_qend_resolve(&ndiagonals,/*pos5*/qend,querylength,
 			      low_univdiagonal,high_univdiagonal,
 			      query_compress,queryptr,path->plusp,genestrand,
 			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-			      stage1,streamspace_max_alloc,streamspace_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,stage1,
 			      localdb_nmismatches_allowed);
 
     if (ndiagonals == 0) {
@@ -6017,14 +9611,14 @@ Path_qend_resolve (int *found_score, T path,
 			      /*univdiagonal_i*/univdiagonal,/*univdiagonal_j*/nearest_univdiagonal,
 			      stage1,query_compress,queryptr,
 			      path->plusp,Path_chroffset(path),Path_chrhigh(path),
-			      streamspace_max_alloc,streamspace_alloc,
-			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+			      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			      localdb_tally,localdb_overflowp,max_nblocks,localdb,
 			      localdb_nmismatches_allowed,
 			      pos5,/*pos3*/querylength,querylength,cont_trimpos,cont_nmismatches,
 			      indelinfo,stage1->spliceinfo,knownsplicing,univcoordlistpool,
 			      intlistpool,listpool,pathpool,
 			      path->sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,/*innerp*/true,
-			      /*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+			      /*allow_indels_p*/true,/*find_middle_p*/false,/*middle_rank*/0) == 0) {
 
 	debug3(printf("Single splice finds no solution\n"));
 	local_trimpos = Genomebits_trim_qend(&local_nmismatches,query_compress,
@@ -6170,15 +9764,15 @@ Path_qend_resolve (int *found_score, T path,
 				stage1,query_compress,queryptr,
 				path->plusp,Path_chroffset(path),Path_chrhigh(path),
 
-				streamspace_max_alloc,streamspace_alloc,
-				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				localdb_tally,localdb_overflowp,max_nblocks,localdb,
 				localdb_nmismatches_allowed,
 
 				pos5,/*pos3*/querylength,querylength,cont_trimpos,cont_nmismatches,
 				stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 				univcoordlistpool,intlistpool,listpool,pathpool,
 				path->sensedir,genestrand,/*trim5p*/false,/*trim3p*/true,/*innerp*/true,
-				/*allow_indels_p*/false,/*find_middle_p*/false) == 0) {
+				/*allow_indels_p*/false,/*find_middle_p*/false,/*middle_rank*/0) == 0) {
 	  /* Skip */
 
 	} else {
@@ -6468,7 +10062,7 @@ Path_qend_resolve (int *found_score, T path,
 	      Spliceends_indel_qend(nosplice_trimpos,/*univdiagonal*/new_univdiagonal,
 				    querylength,path->chroffset,path->chrhigh,path->plusp,genestrand,
 				    localdb_nmismatches_allowed,novel_univdiags_alloc,novel_diagonals_alloc,
-				    localdb_alloc,stage1,streamspace_max_alloc,streamspace_alloc,
+				    localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				    univdiagpool,query_compress,queryptr)) == 0) {
     /* Skip */
 
@@ -6498,9 +10092,9 @@ Path_qend_resolve (int *found_score, T path,
       supportj = /*high_qend*/querylength - (indel_pos + nindels);
       debug3(printf("(5) supporti %d - %d, supportj %d - (%d + %d)\n",
 		    indel_pos,qstart,/*high_qend*/querylength,indel_pos,nindels));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug3(printf("(5) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug3(printf("(5) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	Path_reverse(path,/*expect_fwd_p*/false);
@@ -6523,7 +10117,7 @@ Path_qend_resolve (int *found_score, T path,
 						     univcoordlistpool_trace(__FILE__,__LINE__));
 	Path_reverse(path,/*expect_fwd_p*/true);
 
-	debug3(printf("Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
+	debug3(printf("(6) Insertion in range %d..%d is at %d with %d indels and nmismatches %d+%d\n",
 		      qstart,/*high_qend*/querylength,indel_pos,nindels,nmismatches_i,nmismatches_j));
       }
     }
@@ -6554,9 +10148,9 @@ Path_qend_resolve (int *found_score, T path,
       supportj = /*high_qend*/querylength - indel_pos;
       debug3(printf("(6) supporti %d - %d, supportj %d - %d\n",
 		    indel_pos,qstart,/*high_qend*/querylength,indel_pos));
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug3(printf("(6) Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug3(printf("(6) Not enough support for indel: supportj %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	assert(nindels >= 0);
@@ -6591,10 +10185,10 @@ Path_qend_resolve (int *found_score, T path,
 
 #if 0
   path->nmatches = -1;
-  Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+  Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
 #else
   path->nmatches = -1;		/* Calls Path_eval_nmatches */
-  Path_trim_chrbounds(&(*found_score),path,query_compress_fwd,query_compress_rev,
+  Path_trim_chrbounds(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev,
 		      intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
 
@@ -6611,14 +10205,14 @@ Path_qend_resolve (int *found_score, T path,
 #if 0
 /* Uses Splice_nomiddle */
 T
-Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
+Path_solve_junctions (int *found_score, int *end_score, T this, int sensedir, int genestrand,
 		      Compress_T query_compress,
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		      Shortread_T queryseq, char *queryptr, int querylength,
 
-		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		      unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		      Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		      Stage1_T stage1, Knownsplicing_T knownsplicing,
 		      Uintlistpool_T uintlistpool, Intlistpool_T intlistpool,
@@ -6670,7 +10264,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
   s = this->nmismatches;
 
   while (j != NULL) {
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
     printf("Endpoints: %s\n",Intlist_to_string(q));
     printf("Univdiagonals: %s\n",Univcoordlist_to_string(p));
     printf("Mismatches: %s\n",Intlist_to_string(s));
@@ -6729,6 +10323,8 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 							/*want_lowest_coordinate_p*/true)) <= 0) {
 	  debug14(printf("Insertion fails\n"));
 
+	  /* Should advance pointers, if this code were used */
+
 	} else {
 	  /* No need to change univdiagonals */
 	  p = Univcoordlist_next(p);
@@ -6766,6 +10362,8 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 							stage1->indelinfo,this->plusp,genestrand,
 							/*want_lowest_coordinate_p*/true)) <= 0) {
 	  debug14(printf("Deletion or short intron fails\n"));
+
+	  /* Should advance pointers, if this code were used */
 
 	} else {
 	  /* No need to change univdiagonals */
@@ -7021,7 +10619,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
     }
   }
 
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
   printf("Endpoints: %s\n",Intlist_to_string(q));
   printf("Univdiagonals: %s\n",Univcoordlist_to_string(p));
   printf("Mismatches: %s\n",Intlist_to_string(s));
@@ -7051,7 +10649,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
       ref_nmismatches = Intlistpool_copy(this->ref_nmismatches,intlistpool);
       univdiagonals = Univcoordlistpool_copy(this->univdiagonals,univcoordlistpool);
   
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
       printf("\nCombined ");
       Path_print(this);
 #endif
@@ -7090,7 +10688,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
     debug14(printf("\n"));
 
     this->nmatches = -1;
-    Path_eval_nmatches(&(*found_score),this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),this,query_compress_fwd,query_compress_rev);
 
     debug14(printf("Exiting Path_solve_junctions with path\n"));
     debug14(Path_print(this));
@@ -7109,14 +10707,14 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 
 /* Uses Splice_resolve_qstart */
 T
-Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
+Path_solve_junctions (int *found_score, int *end_score, T this, int sensedir, int genestrand,
 		      Compress_T query_compress,
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		      Shortread_T queryseq, char *queryptr, int querylength,
 
-		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		      unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		      Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		      Stage1_T stage1, Knownsplicing_T knownsplicing,
 		      Uintlistpool_T uintlistpool, Intlistpool_T intlistpool,
@@ -7170,7 +10768,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
   sprev = &this->nmismatches;
 
   while (*jprev != NULL) {
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
     printf("Endpoints: %s\n",Intlist_to_string(q));
     printf("Univdiagonals: %s\n",Univcoordlist_to_string(*pprev));
     printf("Mismatches: %s\n",Intlist_to_string(*sprev));
@@ -7213,10 +10811,21 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
       qstart = Intlist_head(q) + prev_ninserts;	/* The endpoint before the junction */
       qend = Intlist_head(Intlist_next(Intlist_next(q))); /* The endpoint after the junction */
 
+#if 0
       if (univdiagonal_i > univdiagonal_j + max_insertionlen) {
-	/* Impossible */
+	/* Possible with segment search */
+	all_solved_p = false;
 
-      } else if (univdiagonal_i > univdiagonal_j) {
+	prev_ninserts = 0;
+	jprev = &(*jprev)->rest; /* j = List_next(j); */
+	pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+	q = Intlist_next(q);
+	rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+      }
+#endif
+
+      if (univdiagonal_i > univdiagonal_j) {
 	nindels = univdiagonal_i - univdiagonal_j;
 	if ((indel_qpos = Indel_resolve_middle_insertion(&nmismatches_i,&nmismatches_j,
 							&ref_nmismatches_i,&ref_nmismatches_j,
@@ -7228,6 +10837,16 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 							 stage1->indelinfo,this->plusp,genestrand,
 							/*want_lowest_coordinate_p*/true)) <= 0) {
 	  debug14(printf("Insertion fails\n"));
+
+	  /* Advance pointers */
+	  all_solved_p = false;
+	  prev_ninserts = 0;
+
+	  jprev = &(*jprev)->rest; /* j = List_next(j); */
+	  pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+	  q = Intlist_next(q);
+	  rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	  sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
 
 	} else {
 	  /* No need to change univdiagonals */
@@ -7267,6 +10886,16 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 							/*want_lowest_coordinate_p*/true)) <= 0) {
 	  debug14(printf("Deletion or short intron fails\n"));
 
+	  /* Advance pointers */
+	  all_solved_p = false;
+	  prev_ninserts = 0;
+
+	  jprev = &(*jprev)->rest; /* j = List_next(j); */
+	  pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
+	  q = Intlist_next(q);
+	  rprev = &(*rprev)->rest; /* r = Intlist_next(r); */
+	  sprev = &(*sprev)->rest; /* s = Intlist_next(s); */
+
 	} else {
 	  /* No need to change univdiagonals */
 	  pprev = &(*pprev)->rest; /* p = Univcoordlist_next(p); */
@@ -7297,8 +10926,8 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 				       stage1,query_compress,queryptr,
 				       this->plusp,Path_chroffset(this),Path_chrhigh(this),
 
-				       streamspace_max_alloc,streamspace_alloc,
-				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,localdb,
+				       novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+				       localdb_tally,localdb_overflowp,max_nblocks,localdb,
 				       localdb_nmismatches_allowed,
 
 				       /*pos5*/qstart,/*pos3*/qend,querylength,
@@ -7306,7 +10935,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 				       stage1->indelinfo,stage1->spliceinfo,knownsplicing,
 				       univcoordlistpool,intlistpool,listpool,pathpool,
 				       this->sensedir,genestrand,/*trim5p*/false,/*trim3p*/false,
-				       /*innerp*/true,/*allow_indels_p*/true,/*find_middle_p*/false) == 0) {
+				       /*innerp*/true,/*allow_indels_p*/true,/*find_middle_p*/false,/*middle_rank*/0) == 0) {
 	all_solved_p = false;
 
 	/* prev_ninserts = 0; -- Doesn't matter */
@@ -7321,7 +10950,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
 	debug14(Path_print(this));
 	debug14(printf("\n"));
 
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
 	printf("Splice_resolve_qstart returns\n");
 	printf("Univdiagonals: %s\n",Univcoordlist_to_string(univdiagonals));
 	printf("Endpoints: %s\n",Intlist_to_string(endpoints));
@@ -7425,7 +11054,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
     }
   }
 
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
   printf("Endpoints: %s\n",Intlist_to_string(q));
   printf("Univdiagonals: %s\n",Univcoordlist_to_string(*pprev));
   printf("Mismatches: %s\n",Intlist_to_string(*sprev));
@@ -7455,7 +11084,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
       ref_nmismatches = Intlistpool_copy(this->ref_nmismatches,intlistpool);
       univdiagonals = Univcoordlistpool_copy(this->univdiagonals,univcoordlistpool);
   
-#ifdef DEBUG14
+#if defined(DEBUG14) || defined(DEBUG_PATH_CORE)
       printf("\nCombined ");
       Path_print(this);
 #endif
@@ -7495,7 +11124,7 @@ Path_solve_junctions (int *found_score, T this, int sensedir, int genestrand,
     debug14(printf("\n"));
 
     this->nmatches = -1;
-    Path_eval_nmatches(&(*found_score),this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),this,query_compress_fwd,query_compress_rev);
 
     debug14(printf("Exiting Path_solve_junctions with path\n"));
     debug14(Path_print(this));
@@ -7511,8 +11140,11 @@ void
 Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T chromosome_ef64_in,
 		  Genomebits_T genomebits_in, Genomebits_T genomebits_alt_in, Univcoord_T genomelength_in,
 		  int index1part_in, int min_intronlength_in,
-		  int max_insertionlen_in, int max_deletionlen_in,
-		  bool novelsplicingp, bool knownsplicingp) {
+		  int max_insertionlen_in, int max_deletionlen_in, int shortsplicedist_in,
+		  bool novelsplicingp, bool knownsplicingp, int n_splice_paths_in,
+		  int max_recursive_ends_in, int min_support_indel_in,
+		  int indel_support_mismatch_penalty_in,
+		  bool materialize_equiv_splice_alts_p_in) {
 
   circularp = circularp_in;
 
@@ -7531,6 +11163,12 @@ Path_solve_setup (bool *circularp_in, Transcriptome_T transcriptome_in, EF64_T c
 
   max_insertionlen = max_insertionlen_in;
   max_deletionlen = max_deletionlen_in;
+  shortsplicedist = shortsplicedist_in;
+  n_splice_paths = n_splice_paths_in > 0 ? n_splice_paths_in : 1;
+  max_recursive_ends = max_recursive_ends_in;
+  min_support_indel = min_support_indel_in;
+  indel_support_mismatch_penalty = indel_support_mismatch_penalty_in;
+  materialize_equiv_splice_alts_p = materialize_equiv_splice_alts_p_in;
 
   if (novelsplicingp == true || knownsplicingp == true) {
     splicingp = true;

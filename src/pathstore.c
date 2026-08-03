@@ -274,10 +274,10 @@ Pathstore_merge (T old, T *new, Pathstorepool_T pathstorepool, Intlistpool_T int
   if ((*new)->solvedp == true) {
     old->solvedp = true;
   }
-  if ((*new)->complete_sense_p == true) {
+  if ((*new)->complete_sense_p == true || (*new)->complete_sense_paths != NULL) {
     old->complete_sense_p = true;
   }
-  if ((*new)->complete_antisense_p == true) {
+  if ((*new)->complete_antisense_p == true || (*new)->complete_antisense_paths != NULL) {
     old->complete_antisense_p = true;
   }
 
@@ -383,7 +383,7 @@ Pathstore_new_sense_path (Path_T path, Hitlistpool_T hitlistpool, Pathstorepool_
   debug0(printf("%d: Created pathstore %p using Pathstore_new_sense_path\n",++call_i,new));
 
   new->solvedp = false;
-  new->complete_sense_p = false;
+  new->complete_sense_p = true;
   new->complete_antisense_p = false;
 
   new->best_sense_partners = (Intlist_T) NULL;
@@ -395,9 +395,9 @@ Pathstore_new_sense_path (Path_T path, Hitlistpool_T hitlistpool, Pathstorepool_
 
   new->unextended_sense_paths = (List_T) NULL;
   new->unextended_antisense_paths = (List_T) NULL;
-  new->complete_sense_paths = (List_T) NULL;
-  new->complete_antisense_paths = Hitlist_push(NULL,hitlistpool,(void *) path
-					       hitlistpool_trace(__FILE__,__LINE__));
+  new->complete_sense_paths = Hitlist_push(NULL,hitlistpool,(void *) path
+					   hitlistpool_trace(__FILE__,__LINE__));
+  new->complete_antisense_paths = (List_T) NULL;
 
   return new;
 }
@@ -416,7 +416,7 @@ Pathstore_new_antisense_path (Path_T path, Hitlistpool_T hitlistpool, Pathstorep
 
   new->solvedp = false;
   new->complete_sense_p = false;
-  new->complete_antisense_p = false;
+  new->complete_antisense_p = true;
 
   new->best_sense_partners = (Intlist_T) NULL;
   new->best_antisense_partners = (Intlist_T) NULL;

@@ -10,6 +10,7 @@
 #include "assert.h"
 #include "mem.h"
 #include "comp.h"
+#include "cascade-stage-probe.h"
 
 
 #define CHUNKSIZE 20000
@@ -39,6 +40,12 @@ struct T {
   int list_cellctr;
 #endif
 };
+
+#if defined(GSNAP_UNIVDIAGPOOL_STAGE_PROBE)
+GSNAP_STAGE_PROBE_TLS const char *GSNAP_univdiagpool_stage_probe_stage = NULL;
+GSNAP_STAGE_PROBE_TLS const char *GSNAP_univdiagpool_stage_probe_qname = NULL;
+GSNAP_STAGE_PROBE_TLS const char *GSNAP_univdiagpool_stage_probe_role = NULL;
+#endif
 
 
 #if defined(UNIVDIAGPOOL_REUSE) && defined(CHECK_ASSERTIONS)
@@ -241,6 +248,13 @@ Univdiagpool_new (void) {
   return new;
 }
 
+void
+Univdiagpool_nchunks (int *univdiag_chunks, int *list_chunks, T this) {
+  *univdiag_chunks = List_length(this->univdiag_chunks);
+  *list_chunks = List_length(this->list_chunks);
+  return;
+}
+
 
 #if 0
 /* Now using Univdiag_new_array and Univdiag_free_array */
@@ -284,6 +298,28 @@ Univdiagpool_free_list (List_T *list, T this
   return;
 }
 #endif
+#endif
+
+
+#ifdef UNIVDIAGPOOL_REUSE
+void
+Univdiagpool_free_list (List_T *list, T this
+#ifdef UNIVDIAGPOOL_TRACE
+			, const char *file, int line
+#endif
+			) {
+  List_T prev;
+
+  while ((prev = *list) != NULL) {
+    *list = prev->rest;
+    this->list_free_cells = List_push_keep(this->list_free_cells,(void *) prev);
+#ifdef UNIVDIAGPOOL_TRACE
+    printf("Univdiagpool/list: Freed %p -- Univdiagpool_free_list called by %s:%d\n",prev,file,line);
+#endif
+  }
+
+  return;
+}
 #endif
 
 
@@ -343,6 +379,15 @@ Univdiagpool_pop (List_T list, T this, Univdiag_T *x
 static struct Univdiag_T *
 add_new_univdiag_chunk (T this) {
   struct Univdiag_T *chunk;
+
+#if defined(GSNAP_UNIVDIAGPOOL_STAGE_PROBE)
+  fprintf(stderr,
+	  "pool_stage_probe\tpool=univdiag\talloc_attempt\tstage=%s\trole=%s\tqname=%s\tbytes=%zu\tpoolptr=%p\n",
+	  GSNAP_univdiagpool_stage_probe_stage == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_stage,
+	  GSNAP_univdiagpool_stage_probe_role == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_role,
+	  GSNAP_univdiagpool_stage_probe_qname == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_qname,
+	  CHUNKSIZE*sizeof(struct Univdiag_T),(void *) this);
+#endif
 
   chunk = (struct Univdiag_T *) MALLOC_KEEP(CHUNKSIZE*sizeof(struct Univdiag_T));
   this->univdiag_chunks = List_push_keep(this->univdiag_chunks,(void *) chunk);

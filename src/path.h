@@ -38,6 +38,8 @@ typedef struct Path_T *Path_T;
 
 #define T Path_T
 struct T {
+  bool pathpool_free_p;
+
   /* MAPQ scores */
   float mapq_loglik;
   int mapq_score;
@@ -50,7 +52,11 @@ struct T {
   double total_splice_prob;	/* Includes ambig splice ends.  Comes into play when there are no splice junctions */
 
   int found_score;		/* Trims count toward score */
+  int end_score;		/* Trimmed ends (excluding good splices that are close to the ends) */
   int score_within_trims;	/* Ignore trims when scoring */
+  bool final_score_p;
+  int final_read_score;
+  int final_pair_score;
   char *genomic_diff;
 
   bool plusp;
@@ -251,7 +257,6 @@ Path_structure_cmp (const void *x, const void *y);
 extern int
 Path_structure_ignore_sense_cmp (const void *x, const void *y);
 
-
 extern bool
 Path_overlap_p (T x, T y);
 
@@ -271,7 +276,8 @@ Path_filter (List_T paths, Intlistpool_T intlistpool, Univcoordlistpool_T univco
 	     Hitlistpool_T hitlistpool);
 
 extern int
-Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *old_auxinfo,
+Path_setdiff_univdiagonals_auxinfo (int **duplicate_old_indices, int *nduplicates,
+				    Univcoord_T *old_univdiagonals, Auxinfo_T *old_auxinfo,
 				    Pathstore_T *old_pathstores, int nold,
 				    Univcoord_T *new_univdiagonals, Auxinfo_T *new_auxinfo,
 				    Pathstore_T *new_pathstores, int nnew,
@@ -443,6 +449,12 @@ Path_copy (T old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpo
 	   Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 	   Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 extern T
+Path_copy_solver_result (T old, Intlistpool_T intlistpool,
+			 Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool,
+			 Vectorpool_T vectorpool, Transcriptpool_T transcriptpool,
+			 Hitlistpool_T hitlistpool);
+extern T
 Path_copy_5 (T old, bool splice5p, Splicetype_T splicetype5, double ambig_prob_5,
 	     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool);
@@ -525,4 +537,3 @@ Path_setup (bool *circularp_in, bool *altlocp_in);
 
 #undef T
 #endif
-

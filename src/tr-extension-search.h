@@ -1,4 +1,3 @@
-/* $Id: ae61fd53884f684712b842bef819e2f5e0c8d9ee $ */
 #ifndef TR_EXTENSION_SEARCH_INCLUDED
 #define TR_EXTENSION_SEARCH_INCLUDED
 
@@ -59,7 +58,7 @@ extern void
 Tr_elt_gc (List_T *set, Listpool_T listpool, Trdiagpool_T trdiagpool);
 
 extern void
-Tr_extension_search (int *found_score, int sufficient_score,
+Tr_extension_search (int *found_score, int *end_score, int sufficient_score,
 		     List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 		     List_T *sense_trpaths, List_T *antisense_trpaths,
 

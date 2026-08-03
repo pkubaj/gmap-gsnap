@@ -4,6 +4,7 @@ static char rcsid[] = "$Id: d972939fbd31b0fca1498ac9afee370274e28c7c $";
 #endif
 
 #include "transcript.h"
+#include "debug_groups.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,7 @@ static char rcsid[] = "$Id: d972939fbd31b0fca1498ac9afee370274e28c7c $";
 #endif
 
 /* Concordance */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_TRANSCRIPTOME)
 #define debug2(x) x
 #else
 #define debug2(x)
@@ -46,7 +47,7 @@ static char rcsid[] = "$Id: d972939fbd31b0fca1498ac9afee370274e28c7c $";
 #endif
 
 /* Transcript intersectp */
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_TRANSCRIPTOME)
 #define debug11(x) x
 #else
 #define debug11(x)
@@ -503,7 +504,7 @@ Transcript_intersectp (List_T transcripts5, List_T transcripts3) {
   List_T p, q;
   T transcript5, transcript3;
 
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_TRANSCRIPTOME)
   printf("Looking for intersection between ");
   Transcript_print_nums(transcripts5);
   printf(" and ");
@@ -889,7 +890,7 @@ Transcript_intersection (Path_T path5, Path_T path3,
   List_T new_transcripts5, new_transcripts3,
     new_invalid_transcripts5, new_invalid_transcripts3;
 
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_TRANSCRIPTOME)
   printf("Before intersection:\n");
   printf("Valid 5: "); Transcript_print_nums(path5->transcripts); printf("\n");
   printf("Invalid 5: "); Transcript_print_nums(path5->invalid_transcripts); printf("\n");

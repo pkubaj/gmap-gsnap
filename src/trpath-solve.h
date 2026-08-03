@@ -1,4 +1,3 @@
-/* $Id: eb5a54b8042b3153b2478aea49d5221019771315 $ */
 #ifndef TRPATH_SOLVE_INCLUDED
 #define TRPATH_SOLVE_INCLUDED
 
@@ -32,7 +31,7 @@
 #define T Trpath_T
 
 extern T
-Trpath_solve_from_trdiagonal (int *found_score, bool *partialp, int sufficient_score,
+Trpath_solve_from_trdiagonal (int *found_score, int *end_score, bool *partialp, int sufficient_score,
 			      Trcoord_T trdiagonal, int tstart, int tend,
 			      
 			      Trnum_T trnum, Trcoord_T troffset, Trcoord_T trhigh,
@@ -45,7 +44,8 @@ Trpath_solve_from_trdiagonal (int *found_score, bool *partialp, int sufficient_s
 			      Method_T method);
 
 extern T
-Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_score, Trcoord_T middle_trdiagonal,
+Trpath_solve_from_diagonals (int *found_score, int *end_score, bool *partialp,
+			     int sufficient_score, Trcoord_T middle_trdiagonal,
 			     int middle_trdiagonal_qstart, int middle_trdiagonal_qend,
 			     int middle_nmismatches,
 			     Trdiag_T qstart_trdiag, Trdiag_T qend_trdiag,
@@ -59,6 +59,13 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
 			     Method_T method);
 
 extern T
+Trpath_solve_tstart_adjacent_indels (T base_path, int querylength,
+				     Compress_T query_compress_tr, Indelinfo_T indelinfo,
+				     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+				     Listpool_T listpool, Trpathpool_T trpathpool,
+				     Pathpool_T pathpool);
+
+extern T
 Trpath_solve_from_trstart (Trcoord_T trdiagonal,
 			   bool tplusp, int querylength, Compress_T query_compress_tr,
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
@@ -70,7 +77,7 @@ Trpath_solve_from_trend (Trcoord_T trdiagonal,
 			 Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			 Trpathpool_T trpathpool, Method_T method);
 extern T
-Trpath_solve_from_ends (int *found_score,
+Trpath_solve_from_ends (int *found_score, int *end_score,
 			Trcoord_T trdiagonal_i, int pos5_0, int pos3_0,
 			Trcoord_T trdiagonal_j, int pos5_1, int pos3_1,
 			bool tplusp, int querylength, Compress_T query_compress_tr,
@@ -83,11 +90,17 @@ Trpath_solve_from_ends (int *found_score,
 
 extern void
 Trpath_solve_setup (Transcriptome_T transcriptome_in,
-		    Genomebits_T transcriptomebits_in, EF64_T transcript_ef64_in,
-		    int max_insertionlen_in, int max_deletionlen_in,
-		    int index1part_tr);
+			    Genomebits_T transcriptomebits_in, EF64_T transcript_ef64_in,
+			    int max_insertionlen_in, int max_deletionlen_in,
+			    int index1part_tr, int min_support_indel_in,
+			    int indel_support_mismatch_penalty_in,
+			    bool paired_transcript_completion_p_in,
+			    bool tr_score_ranker_p_in, double tr_score_match_reward_in,
+			    double tr_score_mismatch_penalty_in,
+			    double tr_score_indel_open_penalty_in,
+			    double tr_score_indel_extend_penalty_in,
+			    double tr_score_softclip_penalty_in,
+			    double tr_score_transcript_discordance_penalty_in);
 
 #undef T
 #endif
-
-

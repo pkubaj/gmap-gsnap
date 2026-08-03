@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "mem.h"
 #include "assert.h"
 
@@ -137,6 +138,7 @@ Univdiag_transfer_list_to_array (T *array, List_T p) {
 }
 
 
+/* Note: Cannot sort the array, or else we will lose the pointer to space */
 void
 Univdiag_free_array (Univdiag_T **array) {
 
@@ -157,6 +159,10 @@ Univdiag_new_array (int n) {
 
   array = (T *) MALLOC(n*sizeof(T));
   space = (struct T *) MALLOC(n*sizeof(struct T));
+
+  if (n > 0) {
+    memset(space,0,n*sizeof(struct T));
+  }
 
   array[0] = space;
   for (i = 1; i < n; i++) {
@@ -187,6 +193,10 @@ Univdiag_new_array_keep (int n) {
 
   array = (T *) MALLOC_KEEP(n*sizeof(T));
   space = (struct T *) MALLOC_KEEP(n*sizeof(struct T));
+
+  if (n > 0) {
+    memset(space,0,n*sizeof(struct T));
+  }
 
   array[0] = space;
   for (i = 1; i < n; i++) {
@@ -411,3 +421,48 @@ Univdiag_struct_cmp (const void *a, const void *b) {
     return 0;
   }
 }
+
+
+void
+Univdiag_chain_print_left (List_T chain) {
+  T univdiag;
+  Univcoord_T prev_univdiagonal;
+  List_T p;
+
+  univdiag = (T) List_head(chain);
+  prev_univdiagonal = univdiag->univdiagonal;
+
+  for (p = chain; p != NULL; p = List_next(p)) {
+    univdiag = (T) List_head(p);
+    printf("left %d..%d %u dist:%d\n",
+	   univdiag->qstart,univdiag->qend,univdiag->univdiagonal,
+	   prev_univdiagonal - univdiag->univdiagonal);
+    prev_univdiagonal = univdiag->univdiagonal;
+  }
+  printf("End of path\n\n");
+
+  return;
+}
+
+
+void
+Univdiag_chain_print_right (List_T chain) {
+  T univdiag;
+  Univcoord_T prev_univdiagonal;
+  List_T p;
+
+  univdiag = (T) List_head(chain);
+  prev_univdiagonal = univdiag->univdiagonal;
+
+  for (p = chain; p != NULL; p = List_next(p)) {
+    univdiag = (T) List_head(p);
+    printf("right %d..%d %u dist:%d\n",
+	   univdiag->qstart,univdiag->qend,univdiag->univdiagonal,
+	   univdiag->univdiagonal - prev_univdiagonal);
+    prev_univdiagonal = univdiag->univdiagonal;
+  }
+  printf("End of path\n\n");
+
+  return;
+}
+

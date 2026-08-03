@@ -63,8 +63,8 @@ Spliceends_setup (bool *circularp_in,
 		  Univcoord_T genomelength_in, Indexdb_T indexdb_in,
 		  int index1part_in, int index1interval_in,
 		  int max_insertionlen_in, int max_deletionlen_in,
-		  Chrpos_T shortsplicedist_in, bool allow_soft_clips_p_in,
-		  bool novelsplicingp, bool knownsplicingp);
+		  Chrpos_T shortsplicedist_in, bool novelsplicingp, bool knownsplicingp,
+		  int n_splice_paths_in);
 
 extern void
 Spliceends_localdb_setup (Localdb_T localdb_in);
@@ -76,21 +76,21 @@ extern T
 Spliceends_new (int id, int querylength, Vectorpool_T vectorpool);
 
 extern int
-Spliceends_middle_plus (Univcoord_T **diagonals,
-			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+Spliceends_middle_plus (Univcoord_T **diagonals, Stage1_T stage1,
 			int qstart, int qend, int querylength,
 			Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			Compress_T query_compress, char *queryptr,
 			Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
+			int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 			Localdb_T localdb, int localdb_nmismatches_allowed);
 
 extern int
-Spliceends_middle_minus (Univcoord_T **diagonals,
-			 Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+Spliceends_middle_minus (Univcoord_T **diagonals, Stage1_T stage1, 
 			 int qstart, int qend, int querylength,
 			 Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			 Compress_T query_compress, char *queryptr,
 			 Univdiag_T *univdiags_alloc, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
+			 int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 			 Localdb_T localdb, int localdb_nmismatches_allowed);
 
 extern int
@@ -103,8 +103,8 @@ Spliceends_indel_qstart (int nosplice_trimpos,
 			 Univcoord_T chroffset, Univcoord_T chrhigh,
 			 bool plusp, int genestrand, int localdb_nmismatches_allowed,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			 unsigned short *localdb_alloc, Stage1_T stage1,
-			 int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			 unsigned short *localdb_alloc,
+			 int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 			 Univdiagpool_T univdiagpool, Compress_T query_compress, char *queryptr);
 
 extern int
@@ -116,8 +116,8 @@ Spliceends_trimmed_qstarts (T *new, int *nosplice_trimpos, int *farsplice_trimpo
 			    Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			    bool plusp, int genestrand, int localdb_nmismatches_allowed, bool innerp, bool salvagep,
 			    int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
-			    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_all,
-			    Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			    Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+			    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 			    Knownsplicing_T knownsplicing, Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
 			    Spliceendsgen_T spliceendsgen, Compress_T query_compress, char *queryptr,
 			    Genomebits_T genomebits, Genomebits_T genomebits_alt,
@@ -126,14 +126,14 @@ Spliceends_trimmed_qstarts (T *new, int *nosplice_trimpos, int *farsplice_trimpo
 extern bool
 Spliceends_qstart_trim (int *trimpos, int *nmismatches_to_trimpos,
 			int *found_sensedir, Splicetype_T *splicetype, double *ambig_prob_qstart,
-			Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
-			Knownsplicing_T knownsplicing, int try_sensedir,
+			Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
 			Univcoord_T univdiagonal, int querylength, int pos3, int exon_origin,
 			Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			bool plusp, int genestrand, int *mismatch_positions_alloc,
 
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 			unsigned short *localdb_alloc, 
+			int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 
 			Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Spliceendsgen_T spliceendsgen,
 			Compress_T query_compress, char *queryptr,
@@ -149,8 +149,8 @@ Spliceends_indel_qend (int nosplice_trimpos,
 		       Univcoord_T chroffset, Univcoord_T chrhigh,
 		       bool plusp, int genestrand, int localdb_nmismatches_allowed,
 		       Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		       unsigned short *localdb_alloc, Stage1_T stage1,
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		       unsigned short *localdb_alloc,
+		       int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 		       Univdiagpool_T univdiagpool, Compress_T query_compress, char *queryptr);
 
 extern int
@@ -162,7 +162,7 @@ Spliceends_trimmed_qends (T *new, int *nosplice_trimpos, int *farsplice_trimpos,
 			  bool plusp, int genestrand, int localdb_nmismatches_allowed, bool innerp, bool salvagep,
 			  int *mismatch_positions_alloc, Univdiag_T *novel_univdiags_alloc,
 			  Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			  Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			  int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 			  Knownsplicing_T knownsplicing, Univdiagpool_T univdiagpool, Vectorpool_T vectorpool,
 			  Spliceendsgen_T spliceendsgen, Compress_T query_compress, char *queryptr,
 			  Genomebits_T genomebits, Genomebits_T genomebits_alt,
@@ -171,14 +171,14 @@ Spliceends_trimmed_qends (T *new, int *nosplice_trimpos, int *farsplice_trimpos,
 extern bool
 Spliceends_qend_trim (int *trimpos, int *nmismatches_to_trimpos,
 		      int *found_sensedir, Splicetype_T *splicetype, double *ambig_prob_qend,
-		      Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
-		      Knownsplicing_T knownsplicing, int try_sensedir,
+		      Stage1_T stage1, Knownsplicing_T knownsplicing, int try_sensedir,
 		      Univcoord_T univdiagonal, int querylength,
 		      int pos5, int exon_origin, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 		      bool plusp, int genestrand, int *mismatch_positions_alloc, 
 
 		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
 		      unsigned short *localdb_alloc, 
+		      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 
 		      Univdiagpool_T univdiagpool, Vectorpool_T vectorpool, Spliceendsgen_T spliceendsgen,
 		      Compress_T query_compress, char *queryptr,
@@ -186,19 +186,19 @@ Spliceends_qend_trim (int *trimpos, int *nmismatches_to_trimpos,
 		      bool find_splices_p);
 
 extern Univcoord_T *
-Spliceends_qstart_resolve (int *ndiagonals, int *local_nmismatches, int pos3, int querylength,
+Spliceends_qstart_resolve (int *ndiagonals, int pos3, int querylength,
 			   Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			   Compress_T query_compress, char *queryptr, bool plusp, int genestrand,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			   Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			   int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 			   int localdb_nmismatches_allowed);
 
 extern Univcoord_T *
-Spliceends_qend_resolve (int *ndiagonals, int *local_nmismatches, int pos5, int querylength,
+Spliceends_qend_resolve (int *ndiagonals, int pos5, int querylength,
 			 Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 			 Compress_T query_compress, char *queryptr, bool plusp, int genestrand,
 			 Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
-			 Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+			 int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks, Stage1_T stage1, 
 			 int localdb_nmismatches_allowed);
 
 #undef T

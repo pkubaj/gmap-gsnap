@@ -65,7 +65,9 @@
 #include "genome.h"
 #include "genome-write.h"
 #include "compress-write.h"
+#include "signature.h"		/* For Signature_setup */
 #include "stage1.h"
+
 #include "gregion.h"
 #ifdef PMAP
 #include "oligoindex_pmap.h"
@@ -220,6 +222,9 @@ static Indexdb_T indexdb_rev = NULL;
 static Width_T required_index1part = 0;
 static Width_T index1interval;
 static Width_T required_index1interval = 0;
+
+static Width_T msize = 0;
+static Width_T required_msize = 0;
 
 /* static Width_T local1part = 8; */
 /* static Width_T required_local1part = 0; */
@@ -520,7 +525,8 @@ static struct option long_options[] = {
   {"alphabet", required_argument, 0, 'a'}, /* required_alphabet */
 #endif
   {"kmer", required_argument, 0, 'k'}, /* required_index1part, index1part */
-  {"sampling", required_argument, 0, 0}, /* required_nterval, index1interval */
+  {"sampling", required_argument, 0, 0}, /* required_interval, index1interval */
+  {"minimizer", required_argument, 0, 'j'}, /* required_msize, msize */
   {"gseg", required_argument, 0, 'g'}, /* user_genomicsegs */
   {"selfalign", no_argument, 0, '1'}, /* user_selfalign_p */
   {"pairalign", no_argument, 0, '2'}, /* user_pairalign_p */
@@ -613,7 +619,7 @@ static struct option long_options[] = {
 
 #ifndef PMAP
   {"quality-protocol", required_argument, 0, 0}, /* quality_shift */
-  {"quality-print-shift", required_argument, 0, 'j'}, /* quality_shift */
+  {"quality-print-shift", required_argument, 0, 0}, /* quality_shift */
   {"no-sam-headers", no_argument, 0, 0},	/* sam_headers_p */
   {"sam-use-0M", no_argument, 0, 0},		/* sam_insert_0M_p */
   {"sam-extended-cigar", no_argument, 0, 0},	/* sam_cigar_extended_p */
@@ -5286,9 +5292,9 @@ parse_command_line (int argc, char *argv[], int optind) {
 
   while ((opt = getopt_long(argc,argv,
 #ifdef PMAP
-			    "q:D:a:d:k:g:2B:K:w:L:x:1t:s:c:SA03468:9n:f:ZO5o:V:v:M:m:ebu:E:PQYI:i:l:",
+			    "q:D:a:d:k:j:g:2B:K:w:L:x:1t:s:c:SA03468:9n:f:ZO5o:V:v:M:m:ebu:E:PQYI:i:l:",
 #else
-			    "q:D:d:k:g:2B:K:w:L:x:1t:s:c:p:SA03468:9n:f:ZO5o:V:v:M:m:ebu:E:PQFa:Tz:j:YI:i:l:",
+			    "q:D:d:k:j:g:2B:K:w:L:x:1t:s:c:p:SA03468:9n:f:ZO5o:V:v:M:m:ebu:E:PQFa:Tz:YI:i:l:",
 #endif
 			    long_options, &long_option_index)) != -1) {
     switch (opt) {
@@ -5592,9 +5598,10 @@ parse_command_line (int argc, char *argv[], int optind) {
 	sam_cigar_extended_p = true;
       } else if (!strcmp(long_name,"sam-flipped")) {
 	sam_flippedp = true;
+
       } else if (!strcmp(long_name,"quality-protocol")) {
 	if (user_quality_shift == true) {
-	  fprintf(stderr,"Cannot specify both -j (--quality-print-shift) and --quality-protocol\n");
+	  fprintf(stderr,"Cannot specify both --quality-print-shift and --quality-protocol\n");
 	  return 9;
 	} else if (!strcmp(optarg,"illumina")) {
 	  quality_shift = -31;
@@ -5605,6 +5612,15 @@ parse_command_line (int argc, char *argv[], int optind) {
 	} else {
 	  fprintf(stderr,"The only values allowed for --quality-protocol are illumina or sanger\n");
 	  return 9;
+	}
+
+      } else if (!strcmp(long_name,"quality-print-shift")) {
+	if (user_quality_shift == true) {
+	  fprintf(stderr,"Cannot specify both --quality-print-shift and --quality-protocol\n");
+	  return 9;
+	} else {
+	  quality_shift = atoi(check_valid_int(optarg));
+	  user_quality_shift = true;
 	}
 
       } else if (!strcmp(long_name,"force-xs-dir")) {
@@ -5665,6 +5681,9 @@ parse_command_line (int argc, char *argv[], int optind) {
       }
       break;
 #endif
+
+    case 'j': required_msize = atoi(check_valid_int(optarg)); break;
+
 #if 0
     case 'G': uncompressedp = true; break;
 #endif
@@ -5954,16 +5973,6 @@ parse_command_line (int argc, char *argv[], int optind) {
       } else {
 	fprintf(stderr,"direction %s not recognized.  Must be sense_force, antisense_force, sense_filter, antisense_filter, or auto\n",optarg);
 	return 9;
-      }
-      break;
-
-    case 'j':
-      if (user_quality_shift == true) {
-	fprintf(stderr,"Cannot specify both -j (--quality-print-shift) and --quality-protocol\n");
-	return 9;
-      } else {
-	quality_shift = atoi(check_valid_int(optarg));
-	user_quality_shift = true;
       }
       break;
 
@@ -6407,10 +6416,10 @@ main (int argc, char *argv[]) {
       idx_filesuffix2 = (char *) NULL;
     }
 
-    if ((indexdb_fwd = Indexdb_new_genome(&index1part,&index1interval,
+    if ((indexdb_fwd = Indexdb_new_genome(&index1part,&index1interval,&msize,
 					  /*genomesubdir*/modedir,snpsdir,
 					  fileroot,idx_filesuffix1,snps_root,
-					  required_index1part,required_index1interval,
+					  required_index1part,required_index1interval,required_msize,
 					  offsetsstrm_access,positions_access,
 					  sharedp,multiple_sequences_p,/*preload_shared_memory_p*/false,
 					  /*unload_shared_memory_p*/false)) == NULL) {
@@ -6428,10 +6437,10 @@ main (int argc, char *argv[]) {
 
     if (idx_filesuffix2 == NULL) {
       indexdb_rev = indexdb_fwd;
-    } else if ((indexdb_rev = Indexdb_new_genome(&index1part,&index1interval,
+    } else if ((indexdb_rev = Indexdb_new_genome(&index1part,&index1interval,&msize,
 						 /*genomesubdir*/modedir,snpsdir,
 						 fileroot,idx_filesuffix2,snps_root,
-						 required_index1part,required_index1interval,
+						 required_index1part,required_index1interval,required_msize,
 						 offsetsstrm_access,positions_access,
 						 sharedp,multiple_sequences_p,/*preload_shared_memory_p*/false,
 						 /*unload_shared_memory_p*/false)) == NULL) {
@@ -6534,6 +6543,7 @@ main (int argc, char *argv[]) {
 
   Translation_setup(translation_code,alt_initiation_codons_p);
 
+  Signature_setup(/*ksize*/index1part,msize);
 #ifdef PMAP
   Alphabet_setup(alphabet,alphabet_size,index1part_aa);
   Oligoindex_pmap_setup(genomecomp);
@@ -6829,6 +6839,9 @@ Usage: gmap [OPTIONS...] <FASTA files...>, or\n\
   --sampling=INT                 Sampling to use in genome database.  If not specified, the program\n\
                                    will find the smallest available sampling value in the genome database\n\
                                    within selected k-mer size\n\
+  -j, --minimizer=INT            Minimizer length to use in genome database\n\
+                                   If not specified, the program will find the highest available\n\
+                                   minimizer length in the genome database, if any exist\n\
   -g, --gseg=filename            User-supplied genomic segments.  If multiple segments are provided, then\n\
                                    every query sequence is aligned against every genomic segment\n\
   -1, --selfalign                Align one sequence against itself in FASTA format via stdin\n\
@@ -7197,13 +7210,13 @@ Output options\n\
   fprintf(stdout,"Options for quality scores\n");
   fprintf(stdout,"\
   --quality-protocol=STRING      Protocol for input quality scores.  Allowed values:\n\
-                                   illumina (ASCII 64-126) (equivalent to -J 64 -j -31)\n\
-                                   sanger   (ASCII 33-126) (equivalent to -J 33 -j 0)\n\
+                                   illumina (ASCII 64-126) (equivalent to --quality-zero-score 64 --quality-print-shift -31)\n\
+                                   sanger   (ASCII 33-126) (equivalent to --quality-zero-score 33 --quality-print-shift 0)\n\
                                  Default is sanger (no quality print shift)\n\
                                  SAM output files should have quality scores in sanger protocol\n\
 \n\
                                  Or you can specify the print shift with this flag:\n\
-  -j, --quality-print-shift=INT  Shift FASTQ quality scores by this amount in output\n\
+  --quality-print-shift=INT      Shift FASTQ quality scores by this amount in output\n\
                                    (default is 0 for sanger protocol; to change Illumina input\n\
                                    to Sanger output, select -31)\n\
 ");

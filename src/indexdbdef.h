@@ -18,6 +18,7 @@
 /* Compression types */
 #define NO_COMPRESSION 0
 #define BITPACK64_COMPRESSION 1
+#define SIGNATURE_COMPRESSION 2
 
 
 #define T Indexdb_T
@@ -30,6 +31,7 @@ struct T {
   int compression_type;
   Width_T index1part;
   Width_T index1interval;
+  Width_T msize;		/* minimizer size, for signature compression */
   Blocksize_T blocksize;	/* e.g., 64 = 4^(15-12) */
 
 #if defined(LARGE_GENOMES) || defined(UTILITYP)

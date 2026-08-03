@@ -33,7 +33,7 @@
 #define T Path_T
 
 extern List_T
-Path_fusion_outer_querystart_plus (int *found_score, T mainpath, Stage1_T stage1, 
+Path_fusion_outer_querystart_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1, 
 
 				   Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				   Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -43,7 +43,7 @@ Path_fusion_outer_querystart_plus (int *found_score, T mainpath, Stage1_T stage1
 				   Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern List_T
-Path_fusion_outer_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_queryend_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				 Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				 Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -53,7 +53,7 @@ Path_fusion_outer_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 				 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern List_T
-Path_fusion_outer_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_querystart_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				    Shortread_T queryseq,  int querylength, Knownsplicing_T knownsplicing,
@@ -64,7 +64,7 @@ Path_fusion_outer_querystart_minus (int *found_score, T mainpath, Stage1_T stage
 
 
 extern List_T
-Path_fusion_outer_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_queryend_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				  Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -74,13 +74,12 @@ Path_fusion_outer_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 				  Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern T
-Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
+Path_fusion_inner_qend (int *found_score, int *end_score, T fusion5, T anchor3,
 			char *queryptr_main, bool main_plusp, int querylength,
 			Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
-			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			unsigned short *localdb_alloc, Stage1_T stage1,
-			Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+			unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			Stage1_T stage1, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 			Compress_T query_compress_main, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			Shortread_T queryseq, int genestrand, int nmismatches_allowed,
 			Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -88,13 +87,12 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 			Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern T
-Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
+Path_fusion_inner_qstart (int *found_score, int *end_score, T fusion3, T anchor5,
 			  char *queryptr_main, bool main_plusp, int querylength,
 			  Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, Stage1_T stage1,
-			  Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			  Stage1_T stage1, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 			  Compress_T query_compress_main, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			  Shortread_T queryseq, int genestrand, int nmismatches_allowed,
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -103,7 +101,7 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 
 
 extern List_T
-Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_querystart_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			     Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -112,7 +110,7 @@ Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
 			     Listpool_T listpool, Univdiagpool_T univdiagpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 			     Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 extern List_T
-Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_querystart_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			      Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -122,7 +120,7 @@ Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
 			      Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern List_T
-Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_queryend_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			   Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			   Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -132,7 +130,7 @@ Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 			   Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool);
 
 extern List_T
-Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_queryend_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			    Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,

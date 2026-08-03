@@ -8369,7 +8369,8 @@ static Subtractor_T subtractor_table[272] =
 
 /* Vertical */
 UINT4
-Bitpack64_incr (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
+Bitpack64_incr (Signature_T signature, UINT4 *ptrs, UINT4 *comp) {
+  Oligospace_T bmer;
   UINT4 *info, start4;
   UINT8 start8;
   int nwritten, remainder;
@@ -8380,7 +8381,8 @@ Bitpack64_incr (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   int packsize, i;
 #endif
 
-  info = &(ptrs[oligo/BLOCKSIZE * DIRECT_METAINFO_SIZE]);
+  bmer = signature/BLOCKSIZE;
+  info = &(ptrs[bmer * DIRECT_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
   start4 = Bigendian_convert_uint(info[0]);	/* In 128-bit registers */
@@ -8394,17 +8396,17 @@ Bitpack64_incr (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   nwritten = info[1] - start4;
 #endif
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nwritten*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef CHECK
-  prev = Bitpack64_access(oligo,ptrs,comp);
+  prev = Bitpack64_access(signature,ptrs,comp);
   value = (incrementor_table[index])(&(bitpack[column]));
-  if (value != prev || Bitpack64_access(oligo,ptrs,comp) != prev + 1) {
+  if (value != prev || Bitpack64_access(signature,ptrs,comp) != prev + 1) {
     packsize = nwritten*2;
-    printf("Error at Bitpack64_incr with oligo %llu, packsize %d, remainder %d, column %d, index %d\n",
-	   (unsigned long long) oligo,packsize,remainder,column,index);
+    printf("Error at Bitpack64_incr with signature %llu, packsize %d, remainder %d, column %d, index %d\n",
+	   signature,packsize,remainder,column,index);
     printf("bitpack:\n");
     for (i = 0; i < nwritten*4; i += 4) {
       printf("%08X %08X %08X %08X\n",bitpack[i],bitpack[i+1],bitpack[i+2],bitpack[i+3]);
@@ -8421,7 +8423,7 @@ Bitpack64_incr (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
 
 
 UINT4
-Bitpack64_incr_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
+Bitpack64_incr_bitpack (Signature_T signature, int packsize, UINT4 *bitpack) {
   int nregisters, remainder;
   int index, column;
 #ifdef CHECK
@@ -8429,16 +8431,16 @@ Bitpack64_incr_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
 #endif
 
   nregisters = packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef CHECK
-  prev = Bitpack64_access_bitpack(oligo,packsize,bitpack);
+  prev = Bitpack64_access_bitpack(signature,packsize,bitpack);
   value = (incrementor_table[index])(&(bitpack[column]));
-  if (value != prev || Bitpack64_access_bitpack(oligo,packsize,bitpack) != prev + 1) {
-    printf("Error at Bitpack64_incr_bitpack with oligo %llu, packsize %d, remainder %d, column %d, index %d\n",
-	   (unsigned long long) oligo,packsize,remainder,column,index);
+  if (value != prev || Bitpack64_access_bitpack(signature,packsize,bitpack) != prev + 1) {
+    printf("Error at Bitpack64_incr_bitpack with signature %llu, packsize %d, remainder %d, column %d, index %d\n",
+	   signature,packsize,remainder,column,index);
     abort();
   }
   return value;
@@ -8449,7 +8451,8 @@ Bitpack64_incr_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
 
 
 void
-Bitpack64_add (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp, UINT4 increment) {
+Bitpack64_add (Signature_T signature, UINT4 *ptrs, UINT4 *comp, UINT4 increment) {
+  Oligospace_T bmer;
   UINT4 *info, start4;
   UINT8 start8;
   int nwritten, remainder;
@@ -8460,7 +8463,8 @@ Bitpack64_add (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp, UINT4 increment) {
   int packsize, i;
 #endif
 
-  info = &(ptrs[oligo/BLOCKSIZE * DIRECT_METAINFO_SIZE]);
+  bmer = signature/BLOCKSIZE;
+  info = &(ptrs[bmer * DIRECT_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
   start4 = Bigendian_convert_uint(info[0]);	/* In 128-bit registers */
@@ -8474,17 +8478,17 @@ Bitpack64_add (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp, UINT4 increment) {
   nwritten = info[1] - start4;
 #endif
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nwritten*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef CHECK
-  prev = Bitpack64_access(oligo,ptrs,comp);
+  prev = Bitpack64_access(signature,ptrs,comp);
   (adder_table[index])(&(bitpack[column]),increment);
-  if (Bitpack64_access(oligo,ptrs,comp) != prev + increment) {
+  if (Bitpack64_access(signature,ptrs,comp) != prev + increment) {
     packsize = nwritten*2;
-    printf("Error at Bitpack64_add with oligo %llu, packsize %d, remainder %d, column %d, index %d\n",
-	   (unsigned long long) oligo,packsize,remainder,column,index);
+    printf("Error at Bitpack64_add with signature %llu, packsize %d, remainder %d, column %d, index %d\n",
+	   oligo,signature,packsize,remainder,column,index);
     printf("bitpack:\n");
     for (i = 0; i < nwritten*4; i += 4) {
       printf("%08X %08X %08X %08X\n",bitpack[i],bitpack[i+1],bitpack[i+2],bitpack[i+3]);
@@ -8503,7 +8507,7 @@ Bitpack64_add (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp, UINT4 increment) {
 
 /* Assumes that increment > 0 */
 void
-Bitpack64_add_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack, UINT4 increment) {
+Bitpack64_add_bitpack (Signature_T signature, int packsize, UINT4 *bitpack, UINT4 increment) {
   int nregisters, remainder;
   int index, column;
 #ifdef CHECK
@@ -8511,16 +8515,16 @@ Bitpack64_add_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack, UINT4 i
 #endif
 
   nregisters = packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef CHECK
-  prev = Bitpack64_access_bitpack(oligo,packsize,bitpack);
+  prev = Bitpack64_access_bitpack(signature,packsize,bitpack);
   (adder_table[index])(&(bitpack[column]),increment);
-  if (Bitpack64_access_bitpack(oligo,packsize,bitpack) != prev + increment) {
-    printf("Error at Bitpack64_add_bitpack with oligo %llu, packsize %d, remainder %d, column %d, index %d\n",
-	   (unsigned long long) oligo,packsize,remainder,column,index);
+  if (Bitpack64_access_bitpack(signature,packsize,bitpack) != prev + increment) {
+    printf("Error at Bitpack64_add_bitpack with signature %llu, packsize %d, remainder %d, column %d, index %d\n",
+	   signature,packsize,remainder,column,index);
     abort();
   }
 #else
@@ -8537,7 +8541,7 @@ Bitpack64_add_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack, UINT4 i
 /* No need currently for a subtraction routine */
 
 void
-Bitpack64_sub_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack, UINT4 decrement) {
+Bitpack64_sub_bitpack (Signature_T signature, int packsize, UINT4 *bitpack, UINT4 decrement) {
   int nregisters, remainder;
   int index, column;
 #ifdef CHECK
@@ -8545,16 +8549,16 @@ Bitpack64_sub_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack, UINT4 d
 #endif
 
   nregisters = packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef CHECK
-  prev = Bitpack64_access_bitpack(oligo,packsize,bitpack);
+  prev = Bitpack64_access_bitpack(signature,packsize,bitpack);
   (subtractor_table[index])(&(bitpack[column]),decrement);
-  if (Bitpack64_access_bitpack(oligo,packsize,bitpack) != prev - decrement) {
-    printf("Error at Bitpack64_sub_bitpack with oligo %llu, packsize %d, remainder %d, column %d, index %d\n",
-	   oligo,packsize,remainder,column,index);
+  if (Bitpack64_access_bitpack(signature,packsize,bitpack) != prev - decrement) {
+    printf("Error at Bitpack64_sub_bitpack with signature %llu, packsize %d, remainder %d, column %d, index %d\n",
+	   signature,packsize,remainder,column,index);
     abort();
   }
 #else

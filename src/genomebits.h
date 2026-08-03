@@ -6,6 +6,7 @@
 #endif
 
 #include <stdio.h>
+#include <string.h>
 #include "simd.h"
 
 #if 0
@@ -59,6 +60,39 @@ struct Genomebits_T {
   Genomecomp_T *low_blocks;
   Genomecomp_T *flags_blocks;
 };
+
+static inline Univcoord_T
+Genomebits_clip_query_bounds (int *pos5, int *pos3, Genomebits_T ref,
+			      Univcoord_T univdiagonal, int querylength) {
+  Univcoord_T left, genomeend;
+
+  if (univdiagonal + *pos5 < (Univcoord_T) querylength) {
+    *pos5 = querylength - univdiagonal;
+  }
+
+  genomeend = (ref->high_len / sizeof(Genomecomp_T)) * 32U;
+
+  if (univdiagonal < (Univcoord_T) querylength) {
+    Univcoord_T maxpos3 = genomeend + ((Univcoord_T) querylength - univdiagonal);
+    left = univdiagonal - (Univcoord_T) querylength;
+    if ((Univcoord_T) *pos3 > maxpos3) {
+      *pos3 = (int) maxpos3;
+    }
+  } else {
+    left = univdiagonal - (Univcoord_T) querylength;
+    if (left >= genomeend) {
+      *pos3 = *pos5;
+    } else if (left + (Univcoord_T) *pos3 > genomeend) {
+      *pos3 = (int) (genomeend - left);
+    }
+  }
+
+  if (*pos3 < *pos5) {
+    *pos3 = *pos5;
+  }
+
+  return left;
+}
 
 
 /* Need a separate macro that is not in any other *.c file */
@@ -125,8 +159,8 @@ typedef __m128i (*Diffproc_snp_128_T) (Genomecomp_T *, Genomecomp_T *, Genomecom
 
 #define clear_start_32(diff,startdiscard) (diff & (~0U << (startdiscard)))
 #define clear_start_64(diff,startdiscard) (diff & (~0ULL << (startdiscard)))
-#define clear_end_32(diff,enddiscard) (diff & ~(~0U << (enddiscard)))
-#define clear_end_64(diff,enddiscard) (diff & ~(~0ULL << (enddiscard)))
+#define clear_end_32(diff,enddiscard) ((enddiscard) >= 32 ? (diff) : (diff & ~(~0U << (enddiscard))))
+#define clear_end_64(diff,enddiscard) ((enddiscard) >= 64 ? (diff) : (diff & ~(~0ULL << (enddiscard))))
 
 /* For trimming */
 #define set_start_32(diff,startdiscard) (diff | ~(~0U << startdiscard))
@@ -407,7 +441,22 @@ count_trailing_zeroes_128 (__m128i _diff) {
 
 
 #define UNUSED(x) (void)(x)
-#define cast64(x) (* (UINT8 *) x)
+
+static inline UINT4
+load_unaligned_uint4 (const void *ptr) {
+  UINT4 v;
+  memcpy(&v,ptr,sizeof(v));
+  return v;
+}
+
+static inline UINT8
+load_unaligned_uint8 (const void *ptr) {
+  UINT8 v;
+  memcpy(&v,ptr,sizeof(v));
+  return v;
+}
+
+#define cast64(x) load_unaligned_uint8((const void *) (x))
 
 static inline UINT4
 block_diff_standard_32 (Genomecomp_T *query_high_shifted, Genomecomp_T *query_low_shifted,

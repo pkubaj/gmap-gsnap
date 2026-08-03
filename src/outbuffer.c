@@ -4,6 +4,7 @@ static char rcsid[] = "$Id: 3529459b95fcdd128017e80db0e0ff6b525111b9 $";
 #endif
 
 #include "outbuffer.h"
+#include "debug_groups.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,14 +23,14 @@ static char rcsid[] = "$Id: 3529459b95fcdd128017e80db0e0ff6b525111b9 $";
 #include "printbuffer.h"
 
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_OUTPUT)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
 /* RRlist_dump */
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_OUTPUT)
 #define debug1(x) x
 #else
 #define debug1(x)
@@ -342,7 +343,7 @@ struct RRlist_T {
 };
 
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_OUTPUT)
 static void
 RRlist_dump (RRlist_T head, RRlist_T tail) {
   RRlist_T this;
@@ -503,6 +504,7 @@ RRlist_pop (RRlist_T head, unsigned int *id, SAM_split_output_type *split_output
 #else /* GEXACT or GMAP */
 
 /* Returns new tail, which must be reassigned to tail */
+/* Allows fp to be NULL, which result in NULL strings stored */
 static RRlist_T
 RRlist_unshift (RRlist_T *head, RRlist_T tail, int request_id,
 		Filestring_T fp, Filestring_T fp_failedinput) {
@@ -510,8 +512,13 @@ RRlist_unshift (RRlist_T *head, RRlist_T tail, int request_id,
 
   new = (RRlist_T) MALLOC_OUT(sizeof(*new)); /* Called by worker thread */
   new->id = request_id;
-  new->split_output = Filestring_split_output(fp);
-  new->string = Filestring_string(fp);
+  if (fp == NULL) {
+    new->split_output = OUTPUT_NONE;
+    new->string = (char *) NULL;
+  } else {
+    new->split_output = Filestring_split_output(fp);
+    new->string = Filestring_string(fp);
+  }
   if (fp_failedinput == NULL) {
     new->string_failedinput = (char *) NULL;
   } else {
@@ -1020,6 +1027,8 @@ Outbuffer_put_filestrings (T this, int request_id, Filestring_T fp, Filestring_T
 #endif
 
   this->tail = RRlist_unshift(&this->head,this->tail,request_id,fp,fp_failedinput);
+
+  /* Filestring_free can handle the case where fp == NULL */
   Filestring_free(&fp,/*free_string_p*/false);
   Filestring_free(&fp_failedinput,/*free_string_p*/false);
   debug1(RRlist_dump(this->head,this->tail));

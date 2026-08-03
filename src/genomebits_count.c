@@ -61,11 +61,7 @@ count_mismatches_substring (T ref, Compress_T query_compress,
   UINT4 diff_32;
   UINT8 diff_64;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
-  }
+  left = univdiagonal - (Univcoord_T) querylength;
 
   debug(
 	printf("\n\n");
@@ -95,6 +91,11 @@ count_mismatches_substring (T ref, Compress_T query_compress,
 
   startdiscard = (left+pos5) % 32;
   enddiscard = (left+pos3) % 32;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
   debug(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
 
@@ -197,11 +198,7 @@ count_mismatches_substring_snps (T ref, T alt, Compress_T query_compress,
   UINT4 diff_32;
   UINT8 diff_64;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
-  }
+  left = univdiagonal - (Univcoord_T) querylength;
 
   debug(
 	printf("\n\n");
@@ -233,6 +230,11 @@ count_mismatches_substring_snps (T ref, T alt, Compress_T query_compress,
 
   startdiscard = (left+pos5) % 32U;
   enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
   debug(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
 
@@ -328,6 +330,11 @@ Genomebits_count_mismatches_substring (int *ref_mismatches, T ref, T alt, Compre
 				       Univcoord_T univdiagonal, int querylength,
 				       int pos5, int pos3, bool plusp, int genestrand) {
   assert(pos5 <= pos3);
+  (void) Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    *ref_mismatches = 0;
+    return 0;
+  }
 
   if (alt == NULL) {
     *ref_mismatches = count_mismatches_substring(ref,query_compress,univdiagonal,querylength,
@@ -381,11 +388,7 @@ mark_mismatches (char *genomic, T ref, Compress_T query_compress,
   int idx;
 
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
-  }
+  left = univdiagonal - (Univcoord_T) querylength;
 
   debug1(
 	 printf("\n\n");
@@ -415,6 +418,11 @@ mark_mismatches (char *genomic, T ref, Compress_T query_compress,
 
   startdiscard = (left+pos5) % 32U;
   enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
   offset = -startdiscard + pos5; /* for mismatch_position from qpos 0 */
   debug1(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
@@ -609,11 +617,7 @@ mark_mismatches_snps (char *genomic, T ref, T alt, Compress_T query_compress,
   UINT8 diff_64;
   int idx;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
-  }
+  left = univdiagonal - (Univcoord_T) querylength;
 
   debug1(
 	printf("\n\n");
@@ -646,6 +650,11 @@ mark_mismatches_snps (char *genomic, T ref, T alt, Compress_T query_compress,
 
   startdiscard = (left+pos5) % 32U;
   enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
   offset = -startdiscard + pos5; /* For mismatch_position from qpos 0 */
   debug1(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
@@ -819,6 +828,11 @@ Genomebits_mark_mismatches (int *nmatches_exonic, char *genomic,
 			    int pos5, int pos3, bool segment_plusp, bool query_plusp,
 			    int genestrand) {
   assert(pos5 < pos3);
+  (void) Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    *nmatches_exonic = 0;
+    return 0;
+  }
 
   if (alt == NULL) {
     *nmatches_exonic = 0;
@@ -976,6 +990,5 @@ Genomebits_count_setup (T ref_in, T alt_in,
 
   return;
 }
-
 
 

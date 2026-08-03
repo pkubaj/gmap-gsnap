@@ -161,6 +161,22 @@ Uintlist_to_array (T list, unsigned int end) {
   return array;
 }
 
+unsigned int *
+Uintlist_to_array_aligned (T list, unsigned int end) {
+  unsigned int *array;
+  int n, i;
+
+  n = Uintlist_length(list);
+  array = (unsigned int *) MALLOC_ALIGN((n+1)*sizeof(unsigned int));
+  for (i = 0; i < n; i++) {
+    array[i] = list->first;
+    list = list->rest;
+  }
+  array[i] = end;
+  return array;
+}
+
+
 #ifdef HAVE_64_BIT
 UINT8 *
 Uintlist_to_uint8_array (T list, UINT8 end) {

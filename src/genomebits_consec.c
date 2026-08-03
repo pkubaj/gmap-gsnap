@@ -59,10 +59,9 @@ Genomebits_consecutive_matches_wmm (char *mismatch_char, T ref, Compress_T query
   UINT4 diff_32;
   UINT8 diff_64;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
+  left = Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    return 0;
   }
 
   debug(
@@ -86,12 +85,18 @@ Genomebits_consecutive_matches_wmm (char *mismatch_char, T ref, Compress_T query
   debug(printf("Query (%s) shifted %d:\n",Compress_fwdp(query_compress) == true ? "fwd" : "rev",nshift));
   debug(Compress_print(query_compress,nshift,pos5,pos3));
 
+  startdiscard = (left+pos5) % 32U;
+  enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
+
   ref_high_ptr = &(ref->high_blocks[startblocki]);
   ref_low_ptr = &(ref->low_blocks[startblocki]);
   ref_flags_ptr = &(ref->flags_blocks[startblocki]);
 
-  startdiscard = (left+pos5) % 32U;
-  enddiscard = (left+pos3) % 32U;
   offset = -startdiscard;	/* For mismatch_positions_from_pos5, we do not need to add pos5 */
   debug(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d, offset %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32,offset));
@@ -318,10 +323,9 @@ Genomebits_consecutive_matches_rightward (T ref, Compress_T query_compress,
   UINT4 diff_32;
   UINT8 diff_64;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
+  left = Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    return 0;
   }
 
   debug(
@@ -345,12 +349,18 @@ Genomebits_consecutive_matches_rightward (T ref, Compress_T query_compress,
   debug(printf("Query (%s) shifted %d:\n",Compress_fwdp(query_compress) == true ? "fwd" : "rev",nshift));
   debug(Compress_print(query_compress,nshift,pos5,pos3));
 
+  startdiscard = (left+pos5) % 32U;
+  enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
+
   ref_high_ptr = &(ref->high_blocks[startblocki]);
   ref_low_ptr = &(ref->low_blocks[startblocki]);
   ref_flags_ptr = &(ref->flags_blocks[startblocki]);
 
-  startdiscard = (left+pos5) % 32U;
-  enddiscard = (left+pos3) % 32U;
   offset = -startdiscard;
   debug(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d, offset %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32,offset));
@@ -495,10 +505,9 @@ Genomebits_consecutive_matches_leftward (T ref, Compress_T query_compress,
   UINT8 diff_64;
 
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
+  left = Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    return 0;
   }
 
   debug(
@@ -522,13 +531,20 @@ Genomebits_consecutive_matches_leftward (T ref, Compress_T query_compress,
   debug(printf("Query (%s) shifted %d:\n",Compress_fwdp(query_compress) == true ? "fwd" : "rev",nshift));
   debug(Compress_print(query_compress,nshift,pos5,pos3));
 
+  startdiscard = (left+pos5) % 32U;
+  enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+    query_high_shifted--; query_low_shifted--; query_flags_shifted--;
+  }
+
   /* For leftward scanning */
   ref_high_ptr = &(ref->high_blocks[endblocki]);
   ref_low_ptr = &(ref->low_blocks[endblocki]);
   ref_flags_ptr = &(ref->flags_blocks[endblocki]);
 
-  startdiscard = (left+pos5) % 32U;
-  enddiscard = (left+pos3) % 32U;
   offset = (32 - enddiscard); /* For mismatch_position_from_pos3, do not need to add pos3 - 1 */
   debug(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d, offset %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32,offset));
@@ -698,5 +714,4 @@ Genomebits_consec_setup (bool query_unk_mismatch_p_in, bool genome_unk_mismatch_
 
   return;
 }
-
 

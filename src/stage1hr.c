@@ -9,6 +9,7 @@
 #endif
 
 #include "stage1hr.h"
+#include "debug_groups.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>		/* For memset() */
@@ -23,6 +24,7 @@
 
 #include "reader.h"
 #include "oligo.h"
+#include "signature.h"
 
 #include "list.h"
 #include "complement.h"
@@ -66,6 +68,10 @@ coordinates later.
    alignments, then this adds time and memory significantly. */
 /* #define AVOID_UNEVEN_LEVELS 1 */
 
+
+/* This can lead to bugs with repetitive kmers, which are processed by transcriptome procedures, but not genomic ones */
+/* #define REUSE_TR_FINDINGS_FOR_GEN */
+
 #define LOCALDB_REGION_SIZE 65536
 
 #define NO_EXTENSIONS_BEFORE_ZERO 1
@@ -95,9 +101,12 @@ static Indexdb_T indexdb_rev;
 static Indexdb_T indexdb_tr;
 
 static EF64_T repetitive_ef64;
+static bool segment_repetitive_kmer_filter_p = true;
 
 static int index1part;
 static int index1interval;
+static int msize;
+
 static int index1part_tr;
 static int index1interval_tr;
 
@@ -115,6 +124,50 @@ static Transcriptome_T transcriptome;
 #define C_CHAR 0x1
 #define G_CHAR 0x2
 #define T_CHAR 0x3
+
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+static void
+segment_stream_oligo_to_nt (char *nt, Oligospace_T oligo, int oligosize) {
+  int i;
+
+  nt[oligosize] = '\0';
+  for (i = oligosize - 1; i >= 0; i--) {
+    switch (oligo & 0x3) {
+    case A_CHAR: nt[i] = 'A'; break;
+    case C_CHAR: nt[i] = 'C'; break;
+    case G_CHAR: nt[i] = 'G'; break;
+    case T_CHAR: nt[i] = 'T'; break;
+    default: nt[i] = 'N'; break;
+    }
+    oligo >>= 2;
+  }
+
+  return;
+}
+#endif
+
+struct Segment_kmer_position_T {
+  int querypos;
+  unsigned long long npositions;
+};
+
+static int
+Segment_kmer_position_cmp_desc (const void *a, const void *b) {
+  const struct Segment_kmer_position_T *x = (const struct Segment_kmer_position_T *) a;
+  const struct Segment_kmer_position_T *y = (const struct Segment_kmer_position_T *) b;
+
+  if (x->npositions < y->npositions) {
+    return 1;
+  } else if (x->npositions > y->npositions) {
+    return -1;
+  } else if (x->querypos > y->querypos) {
+    return 1;
+  } else if (x->querypos < y->querypos) {
+    return -1;
+  } else {
+    return 0;
+  }
+}
 
 
 /* Originally allowed only 1, to print only unique translocations.
@@ -134,28 +187,21 @@ static Transcriptome_T transcriptome;
 
 
 /* Overall flow */
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW) || defined(DEBUG_SINGLE_FLOW)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
-/* Stage1_list_paths */
-#ifdef DEBUG1
-#define debug1(x) x
-#else
-#define debug1(x)
-#endif
-
 /* Stage1_init_end_gen */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PAIRED_FLOW) || defined(DEBUG_SINGLE_FLOW)
 #define debug2(x) x
 #else
 #define debug2(x)
 #endif
 
 /* Stage1_init_end_oligos_tr and Stage1_init_end_positions_tr */
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PAIRED_DEEP) || defined(DEBUG_SINGLE_DEEP)
 #define debug3(x) x
 #else
 #define debug3(x)
@@ -220,37 +266,31 @@ Stage1_init_computation (T this) {
   this->all_nunivdiagonals_gplus = 0;
   this->all_nunivdiagonals_gminus = 0;
 
-  this->extension_gplus = (Univcoord_T *) NULL;
-  this->extension_qstart_gplus = (int *) NULL;
-  this->extension_qend_gplus = (int *) NULL;
-  this->nextension_gplus = 0;
-
-  this->extension_gminus = (Univcoord_T *) NULL;
-  this->extension_qstart_gminus = (int *) NULL;
-  this->extension_qend_gminus = (int *) NULL;
-  this->nextension_gminus = 0;
-
   this->exhaustive_gplus = (Univcoord_T *) NULL; /* aligned */
-  this->exhaustive_qstart_gplus = (int *) NULL;
-  this->exhaustive_qend_gplus = (int *) NULL;
   this->exhaustive_counts_gplus = (int *) NULL;
+  this->exhaustive_eltarray_gplus = (Singleelt_T *) NULL;
+  this->exhaustive_minpure_specificity_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_observations_gplus = (int *) NULL;
+  this->exhaustive_minpure_specificity_min_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_specificity_max_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_min_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_max_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_sum_gplus = (unsigned long long *) NULL;
+  this->exhaustive_auxinfo_gplus = (Auxinfo_T *) NULL;
   this->nexhaustive_gplus = 0;
 
   this->exhaustive_gminus = (Univcoord_T *) NULL; /* aligned */
-  this->exhaustive_qstart_gminus = (int *) NULL;
-  this->exhaustive_qend_gminus = (int *) NULL;
   this->exhaustive_counts_gminus = (int *) NULL;
+  this->exhaustive_eltarray_gminus = (Singleelt_T *) NULL;
+  this->exhaustive_minpure_specificity_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_observations_gminus = (int *) NULL;
+  this->exhaustive_minpure_specificity_min_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_specificity_max_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_min_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_max_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_sum_gminus = (unsigned long long *) NULL;
+  this->exhaustive_auxinfo_gminus = (Auxinfo_T *) NULL;
   this->nexhaustive_gminus = 0;
-
-  /* this->unsolved_sense_paths_gplus = (List_T) NULL; */
-  /* this->unsolved_sense_paths_gminus = (List_T) NULL; */
-  /* this->unsolved_antisense_paths_gplus = (List_T) NULL; */
-  /* this->unsolved_antisense_paths_gminus = (List_T) NULL; */
-
-  /* this->unextended_sense_paths_gplus = (List_T) NULL; */
-  /* this->unextended_sense_paths_gminus = (List_T) NULL; */
-  /* this->unextended_antisense_paths_gplus = (List_T) NULL; */
-  /* this->unextended_antisense_paths_gminus = (List_T) NULL; */
 
 
   /* Completed paths are stored as arrays */
@@ -260,12 +300,6 @@ Stage1_init_computation (T this) {
   this->antisense_paths_gminus = (Path_T *) NULL;
 
 
-  /* Uses Listpool_T procedures */
-  this->queryfwd_plus_set = (List_T) NULL;
-  this->queryfwd_minus_set = (List_T) NULL;
-  this->queryrev_plus_set = (List_T) NULL;
-  this->queryrev_minus_set = (List_T) NULL;
-
   this->tr_queryfwd_plus_set = (List_T) NULL;
   this->tr_queryfwd_minus_set = (List_T) NULL;
   this->tr_queryrev_plus_set = (List_T) NULL;
@@ -274,6 +308,7 @@ Stage1_init_computation (T this) {
   this->exact_paths_computed_p = false;
   this->all_oligos_gen_filledp = false;
   this->all_positions_gen_filledp = false;
+  this->segment_positions_filter_removed = 0;
 
   return;
 }
@@ -289,8 +324,12 @@ Stage1_new (bool first_read_p) {
 
   if (transcriptome == NULL) {
     new->tr_reader = (Reader_T) NULL;
+
+#ifdef REUSE_TR_FINDINGS_FOR_GEN
   } else if (index1part_tr == index1part) {
     new->tr_reader = new->reader;
+#endif
+
   } else {
     new->tr_reader = Reader_new(/*oligosize*/index1part_tr);
   }
@@ -416,7 +455,8 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
 		     int querylength, int genestrand) {
   Oligostate_T last_state;
   Oligospace_T forward, revcomp, forward_oligo, revcomp_oligo;
-  int querypos;
+  Signature_T forward_signature, revcomp_signature;
+  int querypos, prev_querypos;
   int mod;
   bool donep;
 
@@ -436,7 +476,8 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
       /* querypos is not defined when last_state != VALID */
       debug8(printf("oligo at querypos %d is not valid\n",querypos));
 
-    } else if (EF64_presentp(forward & oligobase_mask,repetitive_ef64) == true) {
+    } else if (segment_repetitive_kmer_filter_p == true && repetitive_ef64 != NULL &&
+	       EF64_presentp(forward & oligobase_mask,repetitive_ef64) == true) {
       debug8(printf("oligo at querypos %d is repetitive\n",querypos));
 
     } else {
@@ -454,30 +495,42 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
 
     this->validp[querypos] = true;
     forward_oligo = this->forward_oligos[querypos] = forward & oligobase_mask;
+    revcomp_oligo = this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
+    if (msize == index1part) {
+      forward_signature = this->forward_signatures[querypos] = forward_oligo;
+      revcomp_signature = this->revcomp_signatures[querypos] = revcomp_oligo;
+    } else {
+      forward_signature = this->forward_signatures[querypos] = Signature_get(forward_oligo);
+      revcomp_signature = this->revcomp_signatures[querypos] = Signature_get(revcomp_oligo);
+    }
+
 #ifdef LARGE_GENOMES      
     this->plus_npositions[querypos] =
       Indexdb_largeptr(&(this->plus_positions_high[querypos]),&(this->plus_positions[querypos]),
-		       /*plus_indexdb*/indexdb_fwd,forward_oligo);
+		       /*plus_indexdb*/indexdb_fwd,forward_signature);
 #else
     this->plus_npositions[querypos] =
-      Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_oligo);
+      Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_signature);
 #endif
     this->plus_diagterms[querypos] = querylength - querypos; /* plus */
     this->plus_retrievedp[querypos] = true;
-    debug2(printf("(1) plus_npositions_end5[%d] = %d, oligo %016lX\n",
-		  querypos,this->plus_npositions[querypos],forward_oligo));
+    debug2(printf("(1) plus_npositions_end5[%d] = %d, oligo %016lX, signature %016lX\n",
+		  querypos,this->plus_npositions[querypos],forward_oligo,forward_signature));
       
-    revcomp_oligo = this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
 #ifdef LARGE_GENOMES
     this->minus_npositions[querypos] =
       Indexdb_largeptr(&(this->minus_positions_high[querypos]),&(this->minus_positions[querypos]),
-		       /*minus_indexdb*/indexdb_rev,revcomp_oligo);
+		       /*minus_indexdb*/indexdb_rev,revcomp_signature);
 #else
     this->minus_npositions[querypos] =
-      Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_oligo);
+      Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_signature);
 #endif
     this->minus_diagterms[querypos] = querypos + index1part; /* minus */
     this->minus_retrievedp[querypos] = true;
+    debug2(printf("(1) minus_npositions_end5[%d] = %d, oligo %016lX, signature %016lX\n",
+		  querypos,this->minus_npositions[querypos],revcomp_oligo,revcomp_signature));
+
+    prev_querypos = querypos;
     mod++;
 
     while (mod < index1interval &&
@@ -486,36 +539,50 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
       this->validp[querypos] = true;
 
       forward_oligo = this->forward_oligos[querypos] = forward & oligobase_mask;
+      revcomp_oligo = this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
+      if (msize == index1part) {
+	forward_signature = this->forward_signatures[querypos] = forward_oligo;
+	revcomp_signature = this->revcomp_signatures[querypos] = revcomp_oligo;
+      } else if (this->validp[prev_querypos] == true && querypos == prev_querypos + 1) {
+	forward_signature = this->forward_signatures[querypos] =
+	  Signature_revise_right(forward_oligo,this->forward_signatures[prev_querypos]);
+	revcomp_signature = this->revcomp_signatures[querypos] =
+	  Signature_revise_left(revcomp_oligo,this->revcomp_signatures[prev_querypos]);
+      } else {
+	forward_signature = this->forward_signatures[querypos] = Signature_get(forward_oligo);
+	revcomp_signature = this->revcomp_signatures[querypos] = Signature_get(revcomp_oligo);
+      }
+
 #ifdef LARGE_GENOMES      
       this->plus_npositions[querypos] =
 	Indexdb_largeptr(&(this->plus_positions_high[querypos]),&(this->plus_positions[querypos]),
-			 /*plus_indexdb*/indexdb_fwd,forward_oligo);
+			 /*plus_indexdb*/indexdb_fwd,forward_signature);
 #else
       this->plus_npositions[querypos] =
-	Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_oligo);
+	Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_signature);
 #endif
       this->plus_diagterms[querypos] = querylength - querypos; /* plus */
       this->plus_retrievedp[querypos] = true;
-      debug2(printf("(1) plus_npositions_end5[%d] = %d, oligo %016lX\n",
-		    querypos,this->plus_npositions[querypos],forward_oligo));
+      debug2(printf("(1) plus_npositions_end5[%d] = %d, oligo %016lX, signature %016lX\n",
+		    querypos,this->plus_npositions[querypos],forward_oligo,forward_signature));
       
-      revcomp_oligo = this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
 #ifdef LARGE_GENOMES
       this->minus_npositions[querypos] =
 	Indexdb_largeptr(&(this->minus_positions_high[querypos]),&(this->minus_positions[querypos]),
-			 /*minus_indexdb*/indexdb_rev,revcomp_oligo);
+			 /*minus_indexdb*/indexdb_rev,revcomp_signature);
 #else
       this->minus_npositions[querypos] =
-	Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_oligo);
+	Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_signature);
 #endif
       this->minus_diagterms[querypos] = querypos + index1part; /* minus */
       this->minus_retrievedp[querypos] = true;
-      debug2(printf("(2) minus_npositions_end5[%d] = %d, oligo %016lX\n",
-		    querypos,this->minus_npositions[querypos],revcomp_oligo));
+      debug2(printf("(2) minus_npositions_end5[%d] = %d, oligo %016lX, signature %016lX\n",
+		    querypos,this->minus_npositions[querypos],revcomp_oligo,revcomp_signature));
       
       debug2(printf("5' end: %s %s: %d plus positions, %d minus positions, genestrand %d\n",
 		    Oligo_one_nt(forward_oligo,index1part),Oligo_one_nt(revcomp_oligo,index1part),
 		    this->plus_npositions[querypos],this->minus_npositions[querypos],genestrand));
+      prev_querypos = querypos;
       mod++;
     }
   }
@@ -536,7 +603,8 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
       /* querypos is not defined when last_state != VALID */
       debug8(printf("oligo at querypos %d is not valid\n",querypos));
 
-    } else if (EF64_presentp(revcomp & oligobase_mask,repetitive_ef64) == true) {
+    } else if (segment_repetitive_kmer_filter_p == true && repetitive_ef64 != NULL &&
+	       EF64_presentp(revcomp & oligobase_mask,repetitive_ef64) == true) {
       debug8(printf("oligo at querypos %d is repetitive\n",querypos));
 
     } else {
@@ -556,31 +624,41 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
     this->validp[querypos] = true;
 
     forward_oligo = this->forward_oligos[querypos] = (forward >> leftreadshift) & oligobase_mask;
+    revcomp_oligo = this->revcomp_oligos[querypos] = revcomp & oligobase_mask;
+    if (msize == index1part) {
+      forward_signature = this->forward_signatures[querypos] = forward_oligo;
+      revcomp_signature = this->revcomp_signatures[querypos] = revcomp_oligo;
+    } else {
+      forward_signature = this->forward_signatures[querypos] = Signature_get(forward_oligo);
+      revcomp_signature = this->revcomp_signatures[querypos] = Signature_get(revcomp_oligo);
+    }
+
 #ifdef LARGE_GENOMES
     this->plus_npositions[querypos] =
       Indexdb_largeptr(&(this->plus_positions_high[querypos]),&(this->plus_positions[querypos]),
-		       /*plus_indexdb*/indexdb_fwd,forward_oligo);
+		       /*plus_indexdb*/indexdb_fwd,forward_signature);
 #else
     this->plus_npositions[querypos] =
-      Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_oligo);
+      Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_signature);
 #endif
     this->plus_diagterms[querypos] = querylength - querypos; /* plus */
     this->plus_retrievedp[querypos] = true;
-    debug2(printf("(3) plus_npositions[%d] = %d, oligo %016lX\n",
-		  querypos,this->plus_npositions[querypos],forward_oligo));
+    debug2(printf("(3) plus_npositions[%d] = %d, oligo %016lX, signature %016lX\n",
+		  querypos,this->plus_npositions[querypos],forward_oligo,forward_signature));
 
-    revcomp_oligo = this->revcomp_oligos[querypos] = revcomp & oligobase_mask;
 #ifdef LARGE_GENOMES
     this->minus_npositions[querypos] =
       Indexdb_largeptr(&(this->minus_positions_high[querypos]),&(this->minus_positions[querypos]),
-		       /*minus_indexdb*/indexdb_rev,revcomp_oligo);
+		       /*minus_indexdb*/indexdb_rev,revcomp_signature);
 #else
     this->minus_npositions[querypos] =
-      Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_oligo);
+      Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_signature);
 #endif
     this->minus_diagterms[querypos] = querypos + index1part; /* minus */
     this->minus_retrievedp[querypos] = true;
-
+    debug2(printf("(3) minus_npositions[%d] = %d, oligo %016lX, signature %016lX\n",
+		  querypos,this->minus_npositions[querypos],revcomp_oligo,revcomp_signature));
+    prev_querypos = querypos;
     mod++;
 
     while (mod < index1interval &&
@@ -589,27 +667,40 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
       this->validp[querypos] = true;
 
       forward_oligo = this->forward_oligos[querypos] = (forward >> leftreadshift) & oligobase_mask;
+      revcomp_oligo = this->revcomp_oligos[querypos] = revcomp & oligobase_mask;
+      if (msize == index1part) {
+	forward_signature = this->forward_signatures[querypos] = forward_oligo;
+	revcomp_signature = this->revcomp_signatures[querypos] = revcomp_oligo;
+      } else if (this->validp[prev_querypos] == true && querypos == prev_querypos - 1) {
+	forward_signature = this->forward_signatures[querypos] =
+	  Signature_revise_left(forward_oligo,this->forward_signatures[prev_querypos]);
+	revcomp_signature = this->revcomp_signatures[querypos] =
+	  Signature_revise_right(revcomp_oligo,this->revcomp_signatures[prev_querypos]);
+      } else {
+	forward_signature = this->forward_signatures[querypos] = Signature_get(forward_oligo);
+	revcomp_signature = this->revcomp_signatures[querypos] = Signature_get(revcomp_oligo);
+      }
+
 #ifdef LARGE_GENOMES
       this->plus_npositions[querypos] =
 	Indexdb_largeptr(&(this->plus_positions_high[querypos]),&(this->plus_positions[querypos]),
-			 /*plus_indexdb*/indexdb_fwd,forward_oligo);
+			 /*plus_indexdb*/indexdb_fwd,forward_signature);
 #else
       this->plus_npositions[querypos] =
-	Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_oligo);
+	Indexdb_ptr(&(this->plus_positions[querypos]),/*plus_indexdb*/indexdb_fwd,forward_signature);
 #endif
       this->plus_diagterms[querypos] = querylength - querypos; /* plus */
       this->plus_retrievedp[querypos] = true;
       debug2(printf("(3) plus_npositions[%d] = %d, oligo %016lX\n",
 		    querypos,this->plus_npositions[querypos],forward_oligo));
       
-      revcomp_oligo = this->revcomp_oligos[querypos] = revcomp & oligobase_mask;
 #ifdef LARGE_GENOMES
       this->minus_npositions[querypos] =
 	Indexdb_largeptr(&(this->minus_positions_high[querypos]),&(this->minus_positions[querypos]),
-			 /*minus_indexdb*/indexdb_rev,revcomp_oligo);
+			 /*minus_indexdb*/indexdb_rev,revcomp_signature);
 #else
       this->minus_npositions[querypos] =
-	Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_oligo);
+	Indexdb_ptr(&(this->minus_positions[querypos]),/*minus_indexdb*/indexdb_rev,revcomp_signature);
 #endif
       this->minus_diagterms[querypos] = querypos + index1part; /* minus */
       this->minus_retrievedp[querypos] = true;
@@ -619,6 +710,7 @@ Stage1_init_end_gen (int *querystart, int *queryend, T this,
       debug2(printf("3' end: %s %s: %d plus positions, %d minus positions, genestrand %d\n",
 		    Oligo_one_nt(forward_oligo,index1part),Oligo_one_nt(revcomp_oligo,index1part),
 		    this->plus_npositions[querypos],this->minus_npositions[querypos],genestrand));
+      prev_querypos = querypos;
       mod++;
     }
   }
@@ -643,12 +735,13 @@ Stage1_init_end_tr (T this, int querylength) {
     this->tr_validp[querypos] = true;
 
     forward_oligo = this->tr_forward_oligos[querypos] = forward & oligobase_mask_tr;
+    revcomp_oligo = this->tr_revcomp_oligos[querypos] = (revcomp >> leftreadshift_tr) & oligobase_mask_tr;
+
     this->tr_plus_npositions[querypos] =
       Indexdb_ptr(&(this->tr_plus_positions[querypos]),indexdb_tr,forward_oligo);
     this->tr_plus_diagterms[querypos] = querylength - querypos; /* plus */
     this->tr_plus_retrievedp[querypos] = true;
 
-    revcomp_oligo = this->tr_revcomp_oligos[querypos] = (revcomp >> leftreadshift_tr) & oligobase_mask_tr;
     this->tr_minus_npositions[querypos] =
       Indexdb_ptr(&(this->tr_minus_positions[querypos]),indexdb_tr,revcomp_oligo);
     this->tr_minus_diagterms[querypos] = querypos + index1part_tr; /* minus */
@@ -668,13 +761,15 @@ Stage1_init_end_tr (T this, int querylength) {
 
   } else if (querypos == (query_lastpos = querylength - index1part_tr)) {
     this->tr_validp[querypos] = true;
+
     forward_oligo = this->tr_forward_oligos[querypos] = (forward >> leftreadshift_tr) & oligobase_mask_tr;
+    revcomp_oligo = this->tr_revcomp_oligos[querypos] = revcomp & oligobase_mask_tr;
+
     this->tr_plus_npositions[querypos] =
       Indexdb_ptr(&(this->tr_plus_positions[querypos]),indexdb_tr,forward_oligo);
     this->tr_plus_diagterms[querypos] = querylength - querypos; /* plus */
     this->tr_plus_retrievedp[querypos] = true;
       
-    revcomp_oligo = this->tr_revcomp_oligos[querypos] = revcomp & oligobase_mask_tr;
     this->tr_minus_npositions[querypos] =
       Indexdb_ptr(&(this->tr_minus_positions[querypos]),indexdb_tr,revcomp_oligo);
     this->tr_minus_diagterms[querypos] = querypos + index1part_tr; /* minus */
@@ -943,13 +1038,13 @@ Stage1_integrate_end_positions (T this, int querylength) {
 /* Worrying about repetitive oligos slows down program */
 void
 Stage1_fill_all_oligos_gen (T this, int querylength, int genestrand) {
-  int querypos;
+  int querypos, prev_querypos;
   Oligostate_T last_state = INIT;
   Oligospace_T forward = 0, revcomp = 0;
+  Oligospace_T forward_oligo, revcomp_oligo;
 
 #if 0
   Univcoordtable_T oligo_seenp;
-  Oligospace_T oligo;
   oligo_seenp = Univcoordtable_new(/*hint*/querylength);
 #endif
 
@@ -959,23 +1054,38 @@ Stage1_fill_all_oligos_gen (T this, int querylength, int genestrand) {
   /* Note: leftshifting is done here, rather than in Oligo_lookup */
   /* Format is 010llX because 19-mer is maximum k-mer size, which would require 10 chars */
   /* debug(printf("oligobase_mask: %010llX\n",oligobase_mask)); */
-  querypos = 0;
+  prev_querypos = querypos = 0;
   while ((last_state = Oligo_next_5(last_state,&querypos,&forward,&revcomp,
 				    this->reader,genestrand)) != DONE) {
     if (last_state != VALID) {
       /* querypos is not defined when last_state != VALID */
       debug8(printf("oligo at querypos %d is not valid\n",querypos));
 
-    } else if (EF64_presentp(forward & oligobase_mask,repetitive_ef64) == true) {
+    } else if (segment_repetitive_kmer_filter_p == true && repetitive_ef64 != NULL &&
+	       EF64_presentp(forward & oligobase_mask,repetitive_ef64) == true) {
       debug8(printf("oligo at querypos %d is repetitive\n",querypos));
 
     } else {
       /* querypos_rc = query_lastpos - querypos; */
       /* Previously assigned revcomp oligo to minus_oligos[querypos_rc] */
-      /* oligo = */ this->forward_oligos[querypos] = forward & oligobase_mask;
-      this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
-      debug8(printf("Putting forward oligo %016lX and revcomp oligo %016lX at querypos %d\n",
-		    this->forward_oligos[querypos],this->revcomp_oligos[querypos],querypos));
+      forward_oligo = this->forward_oligos[querypos] = forward & oligobase_mask;
+      revcomp_oligo = this->revcomp_oligos[querypos] = (revcomp >> leftreadshift) & oligobase_mask;
+      if (msize == index1part) {
+	this->forward_signatures[querypos] = forward_oligo;
+	this->revcomp_signatures[querypos] = revcomp_oligo;
+      } else if (this->validp[prev_querypos] == true && querypos == prev_querypos + 1) {
+	this->forward_signatures[querypos] =
+	  Signature_revise_right(forward_oligo,this->forward_signatures[prev_querypos]);
+	this->revcomp_signatures[querypos] =
+	  Signature_revise_left(revcomp_oligo,this->revcomp_signatures[prev_querypos]);
+      } else {
+	this->forward_signatures[querypos] = Signature_get(forward_oligo);
+	this->revcomp_signatures[querypos] = Signature_get(revcomp_oligo);
+      }
+
+      debug8(printf("Putting forward oligo %016lX, signature %016lX and revcomp oligo %016lX, signature %016lX at querypos %d\n",
+		    forward_oligo,this->forward_signatures[querypos],
+		    revcomp_oligo,this->revcomp_signatures[querypos],querypos));
 
 #if 0
       if (Univcoordtable_get(oligo_seenp,oligo) != NULL) {
@@ -989,6 +1099,7 @@ Stage1_fill_all_oligos_gen (T this, int querylength, int genestrand) {
 #else
       this->validp[querypos] = true;
 #endif
+      prev_querypos = querypos;
     }
   }
 
@@ -1056,9 +1167,11 @@ Stage1_fill_all_oligos_tr (T this, int
   Univcoordtable_free(&oligo_seenp);
 #endif
 
+#ifdef REUSE_TR_FINDINGS_FOR_GEN
   if (index1part_tr == index1part) {
     this->all_oligos_gen_filledp = true;
   }
+#endif
 
   return;
 }
@@ -1119,10 +1232,10 @@ Stage1_fill_all_positions_gen (int *total_npositions_plus, int *total_npositions
 #ifdef LARGE_GENOMES
 	npositions = this->plus_npositions[querypos] = 
 	  Indexdb_largeptr(&this->plus_positions_high[querypos],&this->plus_positions[querypos],
-			   plus_indexdb,this->forward_oligos[querypos]);
+			   plus_indexdb,this->forward_signatures[querypos]);
 #else
 	npositions = this->plus_npositions[querypos] = 
-	  Indexdb_ptr(&this->plus_positions[querypos],plus_indexdb,this->forward_oligos[querypos]);
+	  Indexdb_ptr(&this->plus_positions[querypos],plus_indexdb,this->forward_signatures[querypos]);
 #endif
 
 #if 0
@@ -1149,10 +1262,10 @@ Stage1_fill_all_positions_gen (int *total_npositions_plus, int *total_npositions
 #ifdef LARGE_GENOMES
 	npositions = this->minus_npositions[querypos] =
 	  Indexdb_largeptr(&this->minus_positions_high[querypos],&this->minus_positions[querypos],
-			   minus_indexdb,this->revcomp_oligos[querypos]);
+			   minus_indexdb,this->revcomp_signatures[querypos]);
 #else
 	npositions = this->minus_npositions[querypos] =
-	  Indexdb_ptr(&this->minus_positions[querypos],minus_indexdb,this->revcomp_oligos[querypos]);
+	  Indexdb_ptr(&this->minus_positions[querypos],minus_indexdb,this->revcomp_signatures[querypos]);
 #endif
 
 #if 0
@@ -1173,6 +1286,198 @@ Stage1_fill_all_positions_gen (int *total_npositions_plus, int *total_npositions
 
   return;
 }
+
+
+int
+Stage1_filter_segment_kmer_positions_gen (T this, int querylength,
+					  int max_avg_kmer_positions, const char *label) {
+  int query_lastpos = querylength - index1part;
+  int querypos, survived_kmers = 0, removed_kmers = 0;
+  int remaining_kmers, min_remaining_kmers;
+  int candidate_i;
+  unsigned long long total_positions = 0U, current_positions, removed_positions = 0U;
+  unsigned long long threshold_total, kmer_positions;
+  struct Segment_kmer_position_T *kmers, *entry;
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  char forward_nt[64];
+#endif
+
+  for (querypos = 0; querypos <= query_lastpos; querypos++) {
+    this->segment_positions_filterp[querypos] = false;
+    this->segment_positions_filter_plus_npositions[querypos] = 0;
+    this->segment_positions_filter_minus_npositions[querypos] = 0;
+  }
+
+  if (max_avg_kmer_positions <= 0) {
+    this->segment_positions_filter_removed = 0;
+    return 0;
+  }
+
+  for (querypos = 0; querypos <= query_lastpos; querypos++) {
+    if (this->validp[querypos] == true) {
+      survived_kmers++;
+      total_positions +=
+	(unsigned long long) this->plus_npositions[querypos] +
+	(unsigned long long) this->minus_npositions[querypos];
+    }
+  }
+
+  if (survived_kmers == 0) {
+    this->segment_positions_filter_removed = 0;
+    return 0;
+  }
+
+  threshold_total = (unsigned long long) max_avg_kmer_positions *
+    (unsigned long long) survived_kmers;
+  if (total_positions <= threshold_total) {
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+    fprintf(stderr,
+	    "[SEGMENT_KMER_POSITION_FILTER] label=%s threshold=%d triggered=0 "
+	    "survived_before=%d avg=%.1f total_before=%llu\n",
+	    label,max_avg_kmer_positions,survived_kmers,
+	    (double) total_positions/(double) survived_kmers,total_positions);
+#endif
+    this->segment_positions_filter_removed = 0;
+    return 0;
+  }
+
+  kmers = (struct Segment_kmer_position_T *)
+    MALLOC(survived_kmers * sizeof(struct Segment_kmer_position_T));
+
+  entry = kmers;
+  for (querypos = 0; querypos <= query_lastpos; querypos++) {
+    if (this->validp[querypos] == true) {
+      entry->querypos = querypos;
+      entry->npositions =
+	(unsigned long long) this->plus_npositions[querypos] +
+	(unsigned long long) this->minus_npositions[querypos];
+      entry++;
+    }
+  }
+
+  qsort(kmers,survived_kmers,sizeof(struct Segment_kmer_position_T),
+	Segment_kmer_position_cmp_desc);
+
+  current_positions = total_positions;
+  min_remaining_kmers = survived_kmers < 16 ? survived_kmers : 16;
+  candidate_i = 0;
+  while (candidate_i < survived_kmers &&
+	 removed_kmers < survived_kmers - min_remaining_kmers &&
+	 current_positions > (unsigned long long) max_avg_kmer_positions *
+	 (unsigned long long) (survived_kmers - removed_kmers)) {
+    querypos = kmers[candidate_i].querypos;
+    kmer_positions = kmers[candidate_i].npositions;
+    candidate_i++;
+
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+    if (index1part < (int) sizeof(forward_nt)) {
+      segment_stream_oligo_to_nt(forward_nt,this->forward_oligos[querypos],index1part);
+      fprintf(stderr,
+	      "[SEGMENT_KMER_POSITION_FILTER] label=%s removed_querypos=%d "
+	      "kmer=%s plus=%d minus=%d total=%llu\n",
+	      label,querypos,forward_nt,
+	      this->plus_npositions[querypos],this->minus_npositions[querypos],
+	      kmer_positions);
+    }
+#endif
+    this->segment_positions_filterp[querypos] = true;
+    this->segment_positions_filter_plus_npositions[querypos] =
+      this->plus_npositions[querypos];
+    this->segment_positions_filter_minus_npositions[querypos] =
+      this->minus_npositions[querypos];
+    this->validp[querypos] = false;
+    this->plus_npositions[querypos] = 0;
+    this->minus_npositions[querypos] = 0;
+    removed_kmers++;
+    removed_positions += kmer_positions;
+    current_positions -= kmer_positions;
+  }
+  FREE(kmers);
+
+  remaining_kmers = survived_kmers - removed_kmers;
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  fprintf(stderr,
+	  "[SEGMENT_KMER_POSITION_FILTER] label=%s threshold=%d triggered=1 "
+	  "survived_before=%d removed=%d remaining=%d min_remaining=%d avg=%.1f "
+	  "avg_after=%.1f total_before=%llu total_removed=%llu total_after=%llu\n",
+	  label,max_avg_kmer_positions,survived_kmers,removed_kmers,
+	  remaining_kmers,min_remaining_kmers,
+	  (double) total_positions/(double) survived_kmers,
+	  remaining_kmers == 0 ? 0.0 : (double) current_positions/(double) remaining_kmers,
+	  total_positions,removed_positions,current_positions);
+#endif
+
+  this->segment_positions_filter_removed = removed_kmers;
+  return removed_kmers;
+}
+
+
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+void
+Stage1_print_segment_kmer_positions_gen (T this, int querylength, const char *label) {
+  char forward_nt[64], revcomp_nt[64];
+  int query_lastpos = querylength - index1part;
+  int querypos, survived_kmers = 0, nonzero_kmers = 0, removed_kmers = 0;
+  unsigned long long total_npositions_plus = 0U, total_npositions_minus = 0U;
+  unsigned long long removed_npositions_plus = 0U, removed_npositions_minus = 0U;
+
+  for (querypos = 0; querypos <= query_lastpos; querypos++) {
+    if (this->validp[querypos] == true) {
+      survived_kmers++;
+      total_npositions_plus += this->plus_npositions[querypos];
+      total_npositions_minus += this->minus_npositions[querypos];
+      if (this->plus_npositions[querypos] > 0 || this->minus_npositions[querypos] > 0) {
+	nonzero_kmers++;
+      }
+    } else if (this->segment_positions_filterp[querypos] == true) {
+      removed_kmers++;
+      removed_npositions_plus += this->segment_positions_filter_plus_npositions[querypos];
+      removed_npositions_minus += this->segment_positions_filter_minus_npositions[querypos];
+    }
+  }
+
+  fprintf(stderr,
+	  "[SEGMENT_KMER_POSITIONS] label=%s stage1=%p querylength=%d query_kmers=%d "
+	  "survived_kmers=%d nonzero_kmers=%d removed_by_position_filter=%d "
+	  "total_plus=%llu total_minus=%llu avg_total=%.1f "
+	  "removed_plus=%llu removed_minus=%llu removed_avg_total=%.1f\n",
+	  label,this,querylength,query_lastpos + 1,survived_kmers,nonzero_kmers,
+	  removed_kmers,total_npositions_plus,total_npositions_minus,
+	  survived_kmers == 0 ? 0.0 :
+	  (double) (total_npositions_plus + total_npositions_minus)/(double) survived_kmers,
+	  removed_npositions_plus,removed_npositions_minus,
+	  removed_kmers == 0 ? 0.0 :
+	  (double) (removed_npositions_plus + removed_npositions_minus)/(double) removed_kmers);
+
+  if (index1part < (int) sizeof(forward_nt)) {
+    for (querypos = 0; querypos <= query_lastpos; querypos++) {
+      if (this->validp[querypos] == true) {
+	segment_stream_oligo_to_nt(forward_nt,this->forward_oligos[querypos],index1part);
+	segment_stream_oligo_to_nt(revcomp_nt,this->revcomp_oligos[querypos],index1part);
+	fprintf(stderr,
+		"[SEGMENT_KMER_POSITIONS] label=%s stage1=%p querypos=%d kmer=%s "
+		"revcomp=%s plus=%d minus=%d total=%d\n",
+		label,this,querypos,forward_nt,revcomp_nt,
+		this->plus_npositions[querypos],this->minus_npositions[querypos],
+		this->plus_npositions[querypos] + this->minus_npositions[querypos]);
+      } else if (this->segment_positions_filterp[querypos] == true) {
+	segment_stream_oligo_to_nt(forward_nt,this->forward_oligos[querypos],index1part);
+	segment_stream_oligo_to_nt(revcomp_nt,this->revcomp_oligos[querypos],index1part);
+	fprintf(stderr,
+		"[SEGMENT_KMER_POSITIONS_REMOVED] label=%s stage1=%p querypos=%d kmer=%s "
+		"revcomp=%s plus=%d minus=%d total=%d\n",
+		label,this,querypos,forward_nt,revcomp_nt,
+		this->segment_positions_filter_plus_npositions[querypos],
+		this->segment_positions_filter_minus_npositions[querypos],
+		this->segment_positions_filter_plus_npositions[querypos] +
+		this->segment_positions_filter_minus_npositions[querypos]);
+      }
+    }
+  }
+
+  return;
+}
+#endif
 
 
 void
@@ -1305,18 +1610,8 @@ Stage1_list_coords (T this) {
 
 void
 Stage1_list_extension (T this) {
-  int i;
-
-  printf("=====%s Dump of extension=====\n",this->first_read_p ? "5'" : "3'");
-  printf(">plus extension\n");
-  for (i = 0; i < this->nextension_gplus; i++) {
-    printf("%u %d..%d\n",this->extension_gplus[i],this->extension_qstart_gplus[i],this->extension_qend_gplus[i]);
-  }
-  printf(">minus extension\n");
-  for (i = 0; i < this->nextension_gminus; i++) {
-    printf("%u %d..%d\n",this->extension_gminus[i],this->extension_qstart_gminus[i],this->extension_qend_gminus[i]);
-  }
-  printf("=====%s End of extension=====\n",this->first_read_p ? "5'" : "3'");
+  printf("=====Dump of extension via all univdiagonals=====\n");
+  Stage1_list_all_univdiagonals(this);
 
   return;
 }
@@ -1325,21 +1620,28 @@ Stage1_list_extension (T this) {
 void
 Stage1_list_exhaustive (T this) {
   int i;
+  Singleelt_T elt;
 
-  printf("=====%s Dump of exhaustive=====\n",this->first_read_p ? "5'" : "3'");
+  printf("=====Dump of exhaustive=====\n");
   printf(">plus exhaustive\n");
   for (i = 0; i < this->nexhaustive_gplus; i++) {
-    printf("%u %d..%d %d\n",
-	   this->exhaustive_gplus[i],this->exhaustive_qstart_gplus[i],this->exhaustive_qend_gplus[i],
-	   this->exhaustive_counts_gplus[i]);
+    elt = this->exhaustive_eltarray_gplus != NULL ? this->exhaustive_eltarray_gplus[i] : (Singleelt_T) NULL;
+    if (elt != NULL) {
+      printf("%u %d..%d %d\n",this->exhaustive_gplus[i],elt->qstart,elt->qend,this->exhaustive_counts_gplus[i]);
+    } else {
+      printf("%u count %d\n",this->exhaustive_gplus[i],this->exhaustive_counts_gplus[i]);
+    }
   }
   printf(">minus exhaustive\n");
   for (i = 0; i < this->nexhaustive_gminus; i++) {
-    printf("%u %d..%d %d\n",
-	   this->exhaustive_gminus[i],this->exhaustive_qstart_gminus[i],this->exhaustive_qend_gminus[i],
-	   this->exhaustive_counts_gminus[i]);
+    elt = this->exhaustive_eltarray_gminus != NULL ? this->exhaustive_eltarray_gminus[i] : (Singleelt_T) NULL;
+    if (elt != NULL) {
+      printf("%u %d..%d %d\n",this->exhaustive_gminus[i],elt->qstart,elt->qend,this->exhaustive_counts_gminus[i]);
+    } else {
+      printf("%u count %d\n",this->exhaustive_gminus[i],this->exhaustive_counts_gminus[i]);
+    }
   }
-  printf("=====%s End of exhaustive=====\n",this->first_read_p ? "5'" : "3'");
+  printf("=====End of exhaustive=====\n");
 
   return;
 }
@@ -1478,6 +1780,7 @@ Stage1_free_computation (T this, Trdiagpool_T trdiagpool, Univdiagpool_T univdia
 			 Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			 Listpool_T listpool, Pathpool_T pathpool, Trpathpool_T trpathpool,
 			 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
+  int i;
 
   Stage1_trdiagonals_gc(this);
 
@@ -1486,41 +1789,57 @@ Stage1_free_computation (T this, Trdiagpool_T trdiagpool, Univdiagpool_T univdia
   this->all_univdiagonals_gplus = (Univcoord_T *) NULL;
   this->all_univdiagonals_gminus = (Univcoord_T *) NULL;
 
-  FREE(this->extension_gplus); /* Not aligned */
-  FREE(this->extension_qstart_gplus);
-  FREE(this->extension_qend_gplus);
-  this->extension_gplus = (Univcoord_T *) NULL;
-  this->extension_qstart_gplus = (int *) NULL;
-  this->extension_qend_gplus = (int *) NULL;
-  this->nextension_gplus = 0;
-
-  FREE(this->extension_gminus);
-  FREE(this->extension_qstart_gminus);
-  FREE(this->extension_qend_gminus);
-  this->extension_gminus = (Univcoord_T *) NULL;
-  this->extension_qstart_gminus = (int *) NULL;
-  this->extension_qend_gminus = (int *) NULL;
-  this->nextension_gminus = 0;
-
   FREE_ALIGN(this->exhaustive_gplus);
-  FREE(this->exhaustive_qstart_gplus);
-  FREE(this->exhaustive_qend_gplus);
   FREE(this->exhaustive_counts_gplus);
+  Singleelt_gc_array(this->exhaustive_eltarray_gplus,this->nexhaustive_gplus,listpool);
+  FREE(this->exhaustive_minpure_specificity_gplus);
+  FREE(this->exhaustive_minpure_observations_gplus);
+  FREE(this->exhaustive_minpure_specificity_min_gplus);
+  FREE(this->exhaustive_minpure_specificity_max_gplus);
+  FREE(this->exhaustive_minpure_frequency_min_gplus);
+  FREE(this->exhaustive_minpure_frequency_max_gplus);
+  FREE(this->exhaustive_minpure_frequency_sum_gplus);
   this->exhaustive_gplus = (Univcoord_T *) NULL; /* aligned */
-  this->exhaustive_qstart_gplus = (int *) NULL;
-  this->exhaustive_qend_gplus = (int *) NULL;
   this->exhaustive_counts_gplus = (int *) NULL;
+  this->exhaustive_eltarray_gplus = (Singleelt_T *) NULL;
+  this->exhaustive_minpure_specificity_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_observations_gplus = (int *) NULL;
+  this->exhaustive_minpure_specificity_min_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_specificity_max_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_min_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_max_gplus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_sum_gplus = (unsigned long long *) NULL;
   this->nexhaustive_gplus = 0;
 
+  Auxinfo_gc(this->exhaustive_auxinfo_gplus,this->nexhaustive_gplus,
+	     univdiagpool,auxinfopool,listpool);
+  this->exhaustive_auxinfo_gplus = (Auxinfo_T *) NULL;
+
   FREE_ALIGN(this->exhaustive_gminus);
-  FREE(this->exhaustive_qstart_gminus);
-  FREE(this->exhaustive_qend_gminus);
   FREE(this->exhaustive_counts_gminus);
+  Singleelt_gc_array(this->exhaustive_eltarray_gminus,this->nexhaustive_gminus,listpool);
+  FREE(this->exhaustive_minpure_specificity_gminus);
+  FREE(this->exhaustive_minpure_observations_gminus);
+  FREE(this->exhaustive_minpure_specificity_min_gminus);
+  FREE(this->exhaustive_minpure_specificity_max_gminus);
+  FREE(this->exhaustive_minpure_frequency_min_gminus);
+  FREE(this->exhaustive_minpure_frequency_max_gminus);
+  FREE(this->exhaustive_minpure_frequency_sum_gminus);
   this->exhaustive_gminus = (Univcoord_T *) NULL; /* aligned */
-  this->exhaustive_qstart_gminus = (int *) NULL;
-  this->exhaustive_qend_gminus = (int *) NULL;
   this->exhaustive_counts_gminus = (int *) NULL;
+  this->exhaustive_eltarray_gminus = (Singleelt_T *) NULL;
+  this->exhaustive_minpure_specificity_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_observations_gminus = (int *) NULL;
+  this->exhaustive_minpure_specificity_min_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_specificity_max_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_min_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_max_gminus = (unsigned int *) NULL;
+  this->exhaustive_minpure_frequency_sum_gminus = (unsigned long long *) NULL;
   this->nexhaustive_gminus = 0;
+
+  Auxinfo_gc(this->exhaustive_auxinfo_gminus,this->nexhaustive_gminus,
+	     univdiagpool,auxinfopool,listpool);
+  this->exhaustive_auxinfo_gminus = (Auxinfo_T *) NULL;
 
   Pathstore_gc(this->all_pathstores_gplus,this->all_nunivdiagonals_gplus,
 	       pathstorepool,intlistpool,univcoordlistpool,listpool,pathpool,
@@ -1532,9 +1851,9 @@ Stage1_free_computation (T this, Trdiagpool_T trdiagpool, Univdiagpool_T univdia
   this->all_pathstores_gminus = (Pathstore_T *) NULL;
 
   Auxinfo_gc(this->all_auxinfo_gplus,this->all_nunivdiagonals_gplus,
-	     univdiagpool,auxinfopool);
+	     univdiagpool,auxinfopool,listpool);
   Auxinfo_gc(this->all_auxinfo_gminus,this->all_nunivdiagonals_gminus,
-	     univdiagpool,auxinfopool);
+	     univdiagpool,auxinfopool,listpool);
   this->all_auxinfo_gplus = (Auxinfo_T *) NULL;
   this->all_auxinfo_gminus = (Auxinfo_T *) NULL;
 
@@ -1551,11 +1870,6 @@ Stage1_free_computation (T this, Trdiagpool_T trdiagpool, Univdiagpool_T univdia
 	    intlistpool,uintlistpool,listpool,pathpool,trpathpool,hitlistpool);
   this->sense_trpaths = (List_T) NULL;
   this->antisense_trpaths = (List_T) NULL;
-
-  Elt_gc(&this->queryfwd_plus_set,listpool);
-  Elt_gc(&this->queryfwd_minus_set,listpool);
-  Elt_gc(&this->queryrev_plus_set,listpool);
-  Elt_gc(&this->queryrev_minus_set,listpool);
 
   Tr_elt_gc(&this->tr_queryfwd_plus_set,listpool,trdiagpool);
   Tr_elt_gc(&this->tr_queryfwd_minus_set,listpool,trdiagpool);
@@ -1613,14 +1927,24 @@ Stage1_free_sequence (T this) {
     FREE(this->tr_minus_diagterms);
   }
 
+  FREE(this->forward_signatures);
+  FREE(this->revcomp_signatures);
+
   FREE(this->validp);
+  FREE(this->segment_positions_filterp);
+  FREE(this->segment_positions_filter_plus_npositions);
+  FREE(this->segment_positions_filter_minus_npositions);
   FREE(this->forward_oligos);
   FREE(this->revcomp_oligos);
 
   if (transcriptome == NULL) {
     /* Skip */
+
+#ifdef REUSE_TR_FINDINGS_FOR_GEN
   } else if (index1part_tr == index1part) {
     /* Skip */
+#endif
+
   } else {
     FREE(this->tr_validp);
     FREE(this->tr_forward_oligos);
@@ -1645,8 +1969,12 @@ Stage1_free (T *old, Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
 
   if (transcriptome == NULL) {
     /* Skip */
+
+#ifdef REUSE_TR_FINDINGS_FOR_GEN
   } else if (index1part_tr == index1part) {
     /* Skip */
+#endif
+
   } else {
     Reader_free(&(*old)->tr_reader);
   }
@@ -1803,18 +2131,29 @@ Stage1_set_sequence (T this, Shortread_T queryseq, Localdb_T localdb) {
   Reader_set_sequence(this->reader,queryuc_ptr,/*querystart*/0,/*queryend*/querylength);
   
   this->validp = (bool *) CALLOC(querylength+overhang,sizeof(bool));
+  this->segment_positions_filterp = (bool *) CALLOC(querylength+overhang,sizeof(bool));
+  this->segment_positions_filter_plus_npositions =
+    (int *) CALLOC(querylength+overhang,sizeof(int));
+  this->segment_positions_filter_minus_npositions =
+    (int *) CALLOC(querylength+overhang,sizeof(int));
   this->forward_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
   this->revcomp_oligos = (Oligospace_T *) MALLOC((querylength+overhang)*sizeof(Oligospace_T));
+
+  this->forward_signatures = (Signature_T *) MALLOC((querylength+overhang)*sizeof(Signature_T));
+  this->revcomp_signatures = (Signature_T *) MALLOC((querylength+overhang)*sizeof(Signature_T));
 
   if (transcriptome == NULL) {
     this->tr_reader = (Reader_T) NULL;
     this->tr_validp = (bool *) NULL;
     this->tr_forward_oligos = this->tr_revcomp_oligos = (Oligospace_T *) NULL;
 
+#ifdef REUSE_TR_FINDINGS_FOR_GEN
   } else if (index1part_tr == index1part) {
+    /* This can lead to bugs with repetitive kmers, which are processed by transcriptome procedures, but not genomic ones */
     this->tr_validp = this->validp;
     this->tr_forward_oligos = this->forward_oligos;
     this->tr_revcomp_oligos = this->revcomp_oligos;
+#endif
 
   } else {
     /* tr_reader is distinct from reader */
@@ -1847,7 +2186,8 @@ Stage1_collect_paths (List_T *sense_paths_gplus, List_T *sense_paths_gminus,
 
 void
 Stage1hr_setup (Indexdb_T indexdb_fwd_in, Indexdb_T indexdb_rev_in, Indexdb_T indexdb_tr_in,
-		EF64_T repetitive_ef64_in, int index1part_in, int index1interval_in,
+		EF64_T repetitive_ef64_in, bool segment_repetitive_kmer_filter_p_in,
+		int index1part_in, int index1interval_in, int msize_in,
 		int index1part_tr_in, int index1interval_tr_in, 
 		int max_deletionlen, Chrpos_T shortsplicedist,
 		Transcriptome_T transcriptome_in) {
@@ -1857,9 +2197,12 @@ Stage1hr_setup (Indexdb_T indexdb_fwd_in, Indexdb_T indexdb_rev_in, Indexdb_T in
   indexdb_tr = indexdb_tr_in;
 
   repetitive_ef64 = repetitive_ef64_in;
+  segment_repetitive_kmer_filter_p = segment_repetitive_kmer_filter_p_in;
 
   index1part = index1part_in;
   index1interval = index1interval_in;
+  msize = msize_in;
+
   index1part_tr = index1part_tr_in;
   index1interval_tr = index1interval_tr_in;
 

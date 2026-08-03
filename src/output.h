@@ -44,7 +44,7 @@ Output_setup (Univ_IIT_T chromosome_iit_in,
 #ifdef GSNAP
 extern Filestring_T
 Output_filestring_fromresult (Filestring_T *fp_failedinput, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
-			      Result_T result, Request_T request, Listpool_T listpool);
+			      Result_T result, Request_T request, double worker_runtime, Listpool_T listpool);
 #else
 extern Filestring_T
 Output_filestring_fromresult (Filestring_T *fp_failedinput, Result_T result, Request_T request,

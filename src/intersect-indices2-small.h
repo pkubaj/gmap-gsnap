@@ -2,6 +2,7 @@
 #define INTERSECT_INDICES2_SMALL_INCLUDED
 
 /* Kmer_segment wants the indices of set2 */
+/* Writes only the indices for set 2 */
 extern int
 Intersect_indices2_small (int *indices,
 			 const unsigned int *set1, const int length1, int diagterm1,

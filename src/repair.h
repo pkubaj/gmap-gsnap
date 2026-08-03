@@ -47,7 +47,7 @@ Repair_new (int transcript_genestrand,
 extern List_T
 Repair_make_unique (List_T repairs, Listpool_T listpool, Transcriptpool_T transcriptpool);
 extern Path_T
-Repair_path (int *found_score, T this, Path_T oldpath, int sensedir,
+Repair_path (int *found_score, int *end_score, T this, Path_T oldpath, int sensedir,
 	     Compress_T query_compress,
 	     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 	     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,

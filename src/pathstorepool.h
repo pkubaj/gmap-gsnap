@@ -1,4 +1,3 @@
-/* $Id: b77da64b3fdd3d2e6733712433b2e8332da5ac62 $ */
 #ifndef PATHSTOREPOOL_INCLUDED
 #define PATHSTOREPOOL_INCLUDED
 
@@ -14,7 +13,6 @@
 typedef struct Pathstorepool_T *Pathstorepool_T;
 
 #include "pathstore.h"
-#include "univdiag.h"
 
 #define T Pathstorepool_T
 

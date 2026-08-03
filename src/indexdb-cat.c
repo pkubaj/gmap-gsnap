@@ -33,6 +33,7 @@
 #include "indexdb.h"
 #include "indexdbdef.h"
 #include "indexdb-write.h"
+#include "signature.h"		/* For Signature_setup */
 
 #include "bitpack64-write.h"
 #include "bitpack64-read.h"	/* for Bitpack64_block_offsets */
@@ -48,7 +49,7 @@
 #define BUFFER_SIZE 1000000
 
 #define MONITOR_INTERVAL 10000000
-#define MONITOR_INTERVAL_OLIGO 1000000
+#define MONITOR_INTERVAL_SIGNATURE 1000000
 
 
 #ifdef DEBUG
@@ -69,6 +70,9 @@ static int required_index1part = 0;
 static int index1interval;
 static int required_index1interval = 0;
 
+static int msize = 0;
+static int required_msize = 0;
+
 static char *snps_root = NULL;
 
 
@@ -77,6 +81,7 @@ static struct option long_options[] = {
   {"destdir", required_argument, 0, 'D'},	/* user_destdir */
   {"kmer", required_argument, 0, 'k'}, /* required_index1part */
   {"sampling", required_argument, 0, 'q'}, /* required_index1interval */
+  {"minimizer", required_argument, 0, 'm'}, /* required_msize */
   {"db", required_argument, 0, 'd'}, /* fileroot */
   {"usesnps", required_argument, 0, 'v'}, /* snps_root */
 
@@ -125,7 +130,7 @@ static void
 merge_indexdbs_uint4 (char *new_pointers_filename, char *new_offsets_filename,
 		      char *new_positions_filename,
 		      Indexdb_T *indexdbs, Univcoord_T *genome_univcoord, int ngenomes, 
-		      Oligospace_T oligospace) {
+		      Signature_T signaturespace) {
   UINT4 *ascending4, npositions, k;
   UINT4 offset, increment;
   UINT4 **block_offsets;
@@ -136,7 +141,7 @@ merge_indexdbs_uint4 (char *new_pointers_filename, char *new_offsets_filename,
 
   Indexdb_T indexdb;
   Univcoord_T univcoord;
-  Oligospace_T oligoi;
+  Signature_T signaturei;
   int ii, genomei;
 #ifdef DEBUG
   char *nt1, *nt2;
@@ -151,7 +156,7 @@ merge_indexdbs_uint4 (char *new_pointers_filename, char *new_offsets_filename,
     for (genomei = 0; genomei < ngenomes; genomei++) {
       positions_ptrs[genomei] = &(indexdbs[genomei]->positions[0]);
     }
-    ascending4 = MALLOC((oligospace+1)*sizeof(UINT4));
+    ascending4 = MALLOC((signaturespace+1)*sizeof(UINT4));
 
     block_offsets = (UINT4 **) MALLOC(ngenomes*sizeof(UINT4 *));
     for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -162,21 +167,21 @@ merge_indexdbs_uint4 (char *new_pointers_filename, char *new_offsets_filename,
   fprintf(stderr,"Merging offsets and positions");
 
   offset = 0;
-  for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-    if (oligoi % MONITOR_INTERVAL_OLIGO == 0) {
+  for (signaturei = 0; signaturei < signaturespace; signaturei += BLOCKSIZE) {
+    if (signaturei % MONITOR_INTERVAL_SIGNATURE == 0) {
       fprintf(stderr,".");
     }
 
     /* Obtain a block of BLOCKSIZE (64) offsets for each genome */
     for (genomei = 0; genomei < ngenomes; genomei++) {
       indexdb = indexdbs[genomei];
-      Bitpack64_block_offsets(block_offsets[genomei],oligoi,
+      Bitpack64_block_offsets(block_offsets[genomei],signaturei,
 			      indexdb->offsetsmeta,indexdb->offsetsstrm);
     }
 
-    /* Loop through each oligo in the block */
+    /* Loop through each signature in the block */
     for (ii = 0; ii < BLOCKSIZE; ii++) {
-      ascending4[oligoi+ii] = offset; /* ascending4[0] == 0 */
+      ascending4[signaturei+ii] = offset; /* ascending4[0] == 0 */
 
       increment = 0;
       for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -185,27 +190,27 @@ merge_indexdbs_uint4 (char *new_pointers_filename, char *new_offsets_filename,
 	ptr = positions_ptrs[genomei];
 	assert(ptr == &(indexdb->positions[block_offsets[genomei][ii]]));
 
-	/* Determine number of positions for genomei for this oligo, and append them */
+	/* Determine number of positions for genomei for this signature, and append them */
 	increment += (npositions = block_offsets[genomei][ii+1] - block_offsets[genomei][ii]);
 	for (k = 0; k < npositions; k++) {
 	  position4 = (UINT4) (univcoord + (*ptr++));
 	  FWRITE_UINT(position4,positions_fp);
 	}
 
-	positions_ptrs[genomei] = ptr; /* Update for next oligo */
+	positions_ptrs[genomei] = ptr; /* Update for next signature */
       }
       offset += increment;
     }
   }
 
   /* Final offset */
-  ascending4[oligospace] = offset;
+  ascending4[signaturespace] = offset;
   fclose(positions_fp);
   fprintf(stderr,"done\n");
 
   fprintf(stderr,"Writing offsets...");
   Bitpack64_write_differential(new_pointers_filename,new_offsets_filename,
-			       ascending4,oligospace);
+			       ascending4,signaturespace);
   fprintf(stderr,"done\n");
 
   for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -225,7 +230,7 @@ static void
 merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
 		      char *new_positions_high_filename, char *new_positions_filename,
 		      Indexdb_T *indexdbs, Univcoord_T *genome_univcoord,
-		      bool *genome_8p, int ngenomes, Oligospace_T oligospace) {
+		      bool *genome_8p, int ngenomes, Signature_T signaturespace) {
   UINT4 *ascending4, npositions, k;
   UINT4 offset, increment;
   UINT4 **block_offsets;
@@ -237,7 +242,7 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
 
   Indexdb_T indexdb;
   Univcoord_T univcoord;
-  Oligospace_T oligoi;
+  Signature_T signaturei;
   int ii, genomei;
 
   if ((positions_high_fp = FOPEN_WRITE_BINARY(new_positions_high_filename)) == NULL) {
@@ -258,7 +263,7 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
       }
       positions_ptrs[genomei] = &(indexdbs[genomei]->positions[0]);
     }
-    ascending4 = MALLOC((oligospace+1)*sizeof(UINT4));
+    ascending4 = MALLOC((signaturespace+1)*sizeof(UINT4));
 
     block_offsets = (UINT4 **) MALLOC(ngenomes*sizeof(UINT4 *));
     for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -269,21 +274,21 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
   fprintf(stderr,"Merging offsets and positions");
 
   offset = 0;
-  for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-    if (oligoi % MONITOR_INTERVAL_OLIGO == 0) {
+  for (signaturei = 0; signaturei < signaturespace; signaturei += BLOCKSIZE) {
+    if (signaturei % MONITOR_INTERVAL_SIGNATURE == 0) {
       fprintf(stderr,".");
     }
 
     /* Obtain a block of BLOCKSIZE (64) offsets for each genome */
     for (genomei = 0; genomei < ngenomes; genomei++) {
       indexdb = indexdbs[genomei];
-      Bitpack64_block_offsets(block_offsets[genomei],oligoi,
+      Bitpack64_block_offsets(block_offsets[genomei],signaturei,
 			      indexdb->offsetsmeta,indexdb->offsetsstrm);
     }
 
-    /* Loop through each oligo in the block */
+    /* Loop through each signature in the block */
     for (ii = 0; ii < BLOCKSIZE; ii++) {
-      ascending4[oligoi+ii] = offset; /* ascending4[0] == 0 */
+      ascending4[signaturei+ii] = offset; /* ascending4[0] == 0 */
 
       increment = 0;
       for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -292,7 +297,7 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
 	ptr = positions_ptrs[genomei];
 	assert(ptr == &(indexdb->positions[block_offsets[genomei][ii]]));
 
-	/* Determine number of positions for genomei for this oligo, and append them */
+	/* Determine number of positions for genomei for this signature, and append them */
 	increment += (npositions = block_offsets[genomei][ii+1] - block_offsets[genomei][ii]);
 	if ((high_ptr = positions_high_ptrs[genomei]) == NULL) {
 	  for (k = 0; k < npositions; k++) {
@@ -303,7 +308,7 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
 	    FWRITE_CHAR(position8_high,positions_high_fp);
 	    FWRITE_UINT(position8_low,positions_fp);
 	  }
-	  positions_ptrs[genomei] = ptr; /* Update for next oligo */
+	  positions_ptrs[genomei] = ptr; /* Update for next signature */
 
 	} else {
 	  for (k = 0; k < npositions; k++) {
@@ -314,7 +319,7 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
 	    FWRITE_CHAR(position8_high,positions_high_fp);
 	    FWRITE_UINT(position8_low,positions_fp);
 	  }
-	  positions_high_ptrs[genomei] = high_ptr; /* Update for next oligo */
+	  positions_high_ptrs[genomei] = high_ptr; /* Update for next signature */
 	  positions_ptrs[genomei] = ptr;
 	}
 
@@ -324,14 +329,14 @@ merge_indexdbs_uint8 (char *new_pointers_filename, char *new_offsets_filename,
   }
 
   /* Final offset */
-  ascending4[oligospace] = offset;
+  ascending4[signaturespace] = offset;
   fclose(positions_fp);
   fclose(positions_high_fp);
   fprintf(stderr,"done\n");
 
   fprintf(stderr,"Writing offsets...");
   Bitpack64_write_differential(new_pointers_filename,new_offsets_filename,
-			       ascending4,oligospace);
+			       ascending4,signaturespace);
   fprintf(stderr,"done\n");
 
   for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -353,7 +358,7 @@ static void
 merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename,
 			   char *new_offsets_filename, char *new_positions_filename,
 			   Indexdb_T *indexdbs, bool *hugep, Univcoord_T *genome_univcoord,
-			   int ngenomes, Oligospace_T oligospace) {
+			   int ngenomes, Signature_T signaturespace) {
   UINT8 *ascending8, npositions, k;
   UINT8 offset, increment;
   UINT8 **block_offsets_uint8;
@@ -365,7 +370,7 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
 
   Indexdb_T indexdb;
   Univcoord_T univcoord;
-  Oligospace_T oligoi;
+  Signature_T signaturei;
   int ii, genomei;
 
   if ((positions_fp = FOPEN_WRITE_BINARY(new_positions_filename)) == NULL) {
@@ -377,7 +382,7 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
     for (genomei = 0; genomei < ngenomes; genomei++) {
       positions_ptrs[genomei] = &(indexdbs[genomei]->positions[0]);
     }
-    ascending8 = MALLOC((oligospace+1)*sizeof(UINT8));
+    ascending8 = MALLOC((signaturespace+1)*sizeof(UINT8));
 
     block_offsets_uint8 = (UINT8 **) MALLOC(ngenomes*sizeof(UINT8 *));
     block_offsets_uint4 = (UINT4 **) MALLOC(ngenomes*sizeof(UINT4 *));
@@ -393,8 +398,8 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
   fprintf(stderr,"Merging offsets and positions");
 
   offset = 0;
-  for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-    if (oligoi % MONITOR_INTERVAL_OLIGO == 0) {
+  for (signaturei = 0; signaturei < signaturespace; signaturei += BLOCKSIZE) {
+    if (signaturei % MONITOR_INTERVAL_SIGNATURE == 0) {
       fprintf(stderr,".");
     }
 
@@ -402,17 +407,17 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
     for (genomei = 0; genomei < ngenomes; genomei++) {
       indexdb = indexdbs[genomei];
       if (hugep[genomei] == true) {
-	Bitpack64_block_offsets_huge(block_offsets_uint8[genomei],oligoi,indexdb->offsetspages,
+	Bitpack64_block_offsets_huge(block_offsets_uint8[genomei],signaturei,indexdb->offsetspages,
 				     indexdb->offsetsmeta,indexdb->offsetsstrm);
       } else {
-	Bitpack64_block_offsets(block_offsets_uint4[genomei],oligoi,
+	Bitpack64_block_offsets(block_offsets_uint4[genomei],signaturei,
 				indexdb->offsetsmeta,indexdb->offsetsstrm);
       }
     }
 
-    /* Loop through each oligo in the block */
+    /* Loop through each signature in the block */
     for (ii = 0; ii < BLOCKSIZE; ii++) {
-      ascending8[oligoi+ii] = offset; /* ascending4[0] == 0 */
+      ascending8[signaturei+ii] = offset; /* ascending4[0] == 0 */
 
       increment = 0;
       for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -420,7 +425,7 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
 	univcoord = genome_univcoord[genomei];
 	ptr = positions_ptrs[genomei];
 
-	/* Determine number of positions for genomei for this oligo, and append them */
+	/* Determine number of positions for genomei for this signature, and append them */
 	if (hugep[genomei] == true) {
 	  assert(ptr == &(indexdb->positions[block_offsets_uint8[genomei][ii]]));
 	  increment += (npositions = block_offsets_uint8[genomei][ii+1] - block_offsets_uint8[genomei][ii]);
@@ -433,7 +438,7 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
 	  position4 = (UINT4) (univcoord + (*ptr++));
 	  FWRITE_UINT(position4,positions_fp);
 	}
-	positions_ptrs[genomei] = ptr; /* Update for next oligo */
+	positions_ptrs[genomei] = ptr; /* Update for next signature */
       }
 
       offset += increment;
@@ -441,13 +446,13 @@ merge_indexdbs_huge_uint4 (char *new_pages_filename, char *new_pointers_filename
   }
 
   /* Final offset */
-  ascending8[oligospace] = offset;
+  ascending8[signaturespace] = offset;
   fclose(positions_fp);
   fprintf(stderr,"done\n");
 
   fprintf(stderr,"Writing offsets...");
   Bitpack64_write_differential_huge(new_pages_filename,new_pointers_filename,new_offsets_filename,
-				    ascending8,oligospace);
+				    ascending8,signaturespace);
   fprintf(stderr,"done\n");
 
   for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -473,7 +478,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
 			   char *new_offsets_filename,
 			   char *new_positions_high_filename, char *new_positions_filename,
 			   Indexdb_T *indexdbs, bool *hugep, Univcoord_T *genome_univcoord,
-			   bool *genome_8p, int ngenomes, Oligospace_T oligospace) {
+			   bool *genome_8p, int ngenomes, Signature_T signaturespace) {
   UINT8 *ascending8, npositions, k;
   UINT8 offset, increment;
   UINT8 **block_offsets_uint8;
@@ -486,7 +491,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
 
   Indexdb_T indexdb;
   Univcoord_T univcoord;
-  Oligospace_T oligoi;
+  Signature_T signaturei;
   int ii, genomei;
 
   if ((positions_high_fp = FOPEN_WRITE_BINARY(new_positions_high_filename)) == NULL) {
@@ -507,7 +512,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
       }
       positions_ptrs[genomei] = &(indexdbs[genomei]->positions[0]);
     }
-    ascending8 = MALLOC((oligospace+1)*sizeof(UINT8));
+    ascending8 = MALLOC((signaturespace+1)*sizeof(UINT8));
 
     block_offsets_uint8 = (UINT8 **) MALLOC(ngenomes*sizeof(UINT8 *));
     block_offsets_uint4 = (UINT4 **) MALLOC(ngenomes*sizeof(UINT4 *));
@@ -523,8 +528,8 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
   fprintf(stderr,"Merging offsets and positions");
 
   offset = 0;
-  for (oligoi = 0; oligoi < oligospace; oligoi += BLOCKSIZE) {
-    if (oligoi % MONITOR_INTERVAL_OLIGO == 0) {
+  for (signaturei = 0; signaturei < signaturespace; signaturei += BLOCKSIZE) {
+    if (signaturei % MONITOR_INTERVAL_SIGNATURE == 0) {
       fprintf(stderr,".");
     }
 
@@ -532,17 +537,17 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
     for (genomei = 0; genomei < ngenomes; genomei++) {
       indexdb = indexdbs[genomei];
       if (hugep[genomei] == true) {
-	Bitpack64_block_offsets_huge(block_offsets_uint8[genomei],oligoi,indexdb->offsetspages,
+	Bitpack64_block_offsets_huge(block_offsets_uint8[genomei],signaturei,indexdb->offsetspages,
 				     indexdb->offsetsmeta,indexdb->offsetsstrm);
       } else {
-	Bitpack64_block_offsets(block_offsets_uint4[genomei],oligoi,
+	Bitpack64_block_offsets(block_offsets_uint4[genomei],signaturei,
 				indexdb->offsetsmeta,indexdb->offsetsstrm);
       }
     }
 
-    /* Loop through each oligo in the block */
+    /* Loop through each signature in the block */
     for (ii = 0; ii < BLOCKSIZE; ii++) {
-      ascending8[oligoi+ii] = offset; /* ascending8[0] == 0 */
+      ascending8[signaturei+ii] = offset; /* ascending8[0] == 0 */
 
       increment = 0;
       for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -550,7 +555,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
 	univcoord = genome_univcoord[genomei];
 	ptr = positions_ptrs[genomei];
 
-	/* Determine number of positions for genomei for this oligo, and append them */
+	/* Determine number of positions for genomei for this signature, and append them */
 	if (hugep[genomei] == true) {
 	  assert(ptr == &(indexdb->positions[block_offsets_uint8[genomei][ii]]));
 	  increment += (npositions = block_offsets_uint8[genomei][ii+1] - block_offsets_uint8[genomei][ii]);
@@ -568,7 +573,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
 	    FWRITE_CHAR(position8_high,positions_high_fp);
 	    FWRITE_UINT(position8_low,positions_fp);
 	  }
-	  positions_ptrs[genomei] = ptr; /* Update for next oligo */
+	  positions_ptrs[genomei] = ptr; /* Update for next signature */
 
 	} else {
 	  for (k = 0; k < npositions; k++) {
@@ -579,7 +584,7 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
 	    FWRITE_CHAR(position8_high,positions_high_fp);
 	    FWRITE_UINT(position8_low,positions_fp);
 	  }
-	  positions_high_ptrs[genomei] = high_ptr; /* Update for next oligo */
+	  positions_high_ptrs[genomei] = high_ptr; /* Update for next signature */
 	  positions_ptrs[genomei] = ptr;
 	}
       }
@@ -589,14 +594,14 @@ merge_indexdbs_huge_uint8 (char *new_pages_filename, char *new_pointers_filename
   }
 
   /* Final offset */
-  ascending8[oligospace] = offset;
+  ascending8[signaturespace] = offset;
   fclose(positions_fp);
   fclose(positions_high_fp);
   fprintf(stderr,"done\n");
 
   fprintf(stderr,"Writing offsets...");
   Bitpack64_write_differential_huge(new_pages_filename,new_pointers_filename,new_offsets_filename,
-				    ascending8,oligospace);
+				    ascending8,signaturespace);
   fprintf(stderr,"done\n");
 
   for (genomei = 0; genomei < ngenomes; genomei++) {
@@ -631,6 +636,7 @@ main (int argc, char *argv[]) {
   int ngenomes, genomei;
   Univ_IIT_T chromosome_iit;
   Univcoord_T *genome_univcoord, total_genomelength, total_noffsets;
+  Signature_T signaturespace, npos = index1part - msize + 1;
   Oligospace_T oligospace;
   bool *hugep, huge_offsets_p;
   bool *genome_8p, coord_values_8p;
@@ -643,7 +649,7 @@ main (int argc, char *argv[]) {
   int long_option_index = 0;
   const char *long_name;
 
-  while ((opt = getopt_long(argc,argv,"F:D:d:k:q:v:",
+  while ((opt = getopt_long(argc,argv,"F:D:d:k:q:j:v:",
 			    long_options,&long_option_index)) != -1) {
     switch (opt) {
     case 0: 
@@ -666,6 +672,7 @@ main (int argc, char *argv[]) {
     case 'd': fileroot = optarg; break;
     case 'k': required_index1part = atoi(optarg); break;
     case 'q': required_index1interval = atoi(optarg); break;
+    case 'j': required_msize = atoi(optarg); break;
     case 'v': 
       snps_root = optarg;
       fprintf(stderr,"Combination of cmetindex and snps is not yet supported in 2018 versions\n");
@@ -732,10 +739,11 @@ main (int argc, char *argv[]) {
     strcpy(source_genome,argv[genomei]);
     source_dbroot = basename(source_genome);
 
-    if ((ifilenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,
+    if ((ifilenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,&msize,
 					    /*genomesubdir*/source_genome,/*fileroot*/source_dbroot,
-					    IDX_FILESUFFIX,snps_root,/*required_index1part*/0,/*required_index1interval*/0,
-					    /*offsets_only_p*/false)) == NULL) {
+					    IDX_FILESUFFIX,snps_root,
+					    /*required_index1part*/0,/*required_index1interval*/0,
+					    /*required_msize*/0,/*offsets_only_p*/false)) == NULL) {
       fprintf(stderr,"Could not find indexdb file for the input genome %s\n",argv[genomei]);
       exit(9);
     } else {
@@ -759,19 +767,20 @@ main (int argc, char *argv[]) {
     strcpy(source_genome,argv[genomei]);
     source_dbroot = basename(source_genome);
 
-    if ((ifilenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,
+    if ((ifilenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,&msize,
 					    /*genomesubdir*/source_genome,/*fileroot*/source_dbroot,
-					    IDX_FILESUFFIX,snps_root,/*required_index1part*/0,/*required_index1interval*/0,
-					    /*offsets_only_p*/false)) == NULL ||
+					    IDX_FILESUFFIX,snps_root,
+					    /*required_index1part*/0,/*required_index1interval*/0,
+					    /*required_msize*/0,/*offsets_only_p*/false)) == NULL ||
 	index1part != required_index1part || index1interval > required_index1interval) {
       fprintf(stderr,"Could not find indexdb file at kmer %d and sampling interval %d for %s\n",
 	      required_index1part,required_index1interval,argv[genomei]);
       exit(9);
-    } else if ((indexdbs[genomei] = Indexdb_new_genome(&index1part,&index1interval,
+    } else if ((indexdbs[genomei] = Indexdb_new_genome(&index1part,&index1interval,&msize,
 						       /*genomesubdir*/source_genome,/*snpsdir*/NULL,
 						       /*fileroot*/source_dbroot,IDX_FILESUFFIX,/*snps_root*/NULL,
 						       /*required_index1part*/0,/*required_index1interval*/0,
-						       /*offsetsstrm_access*/USE_MMAP_ONLY,
+						       /*required_msize*/0,/*offsetsstrm_access*/USE_MMAP_ONLY,
 						       /*positions_access*/USE_MMAP_ONLY,/*sharedp*/false,
 						       /*multiple_sequences_p*/false,/*preload_shared_memory_p*/false,
 						       /*unload_shared_memory_p*/false)) == NULL ||
@@ -790,7 +799,10 @@ main (int argc, char *argv[]) {
   index1interval = required_index1interval;
 
   Indexdb_setup(index1part);
+  Signature_setup(/*ksize*/index1part,msize);
   oligospace = power(4,index1part);
+  signaturespace = npos * (Signature_T) oligospace;
+
   if (index1interval == 3) {
     interval_char = '3';
   } else if (index1interval == 2) {
@@ -808,11 +820,11 @@ main (int argc, char *argv[]) {
   for (genomei = 0; genomei < ngenomes; genomei++) {
     if (indexdbs[genomei]->hugep == true) {
       hugep[genomei] = true;
-      total_noffsets += Bitpack64_read_one_huge(oligospace,indexdbs[genomei]->offsetspages,
+      total_noffsets += Bitpack64_read_one_huge(signaturespace,indexdbs[genomei]->offsetspages,
 						indexdbs[genomei]->offsetsmeta,indexdbs[genomei]->offsetsstrm);
     } else {
       hugep[genomei] = false;
-      total_noffsets += (Univcoord_T) Bitpack64_read_one(oligospace,indexdbs[genomei]->offsetsmeta,
+      total_noffsets += (Univcoord_T) Bitpack64_read_one(signaturespace,indexdbs[genomei]->offsetsmeta,
 							 indexdbs[genomei]->offsetsstrm);
     }
   }
@@ -869,31 +881,31 @@ main (int argc, char *argv[]) {
     merge_indexdbs_huge_uint8(new_pages_filename,new_pointers_filename,new_offsets_filename,
 			      new_positions_high_filename,new_positions_filename,
 			      indexdbs,hugep,genome_univcoord,genome_8p,ngenomes,
-			      oligospace);
+			      signaturespace);
 
   } else if (huge_offsets_p == true) {
     fprintf(stderr,"Genomic coords are 4-byte\n");
     merge_indexdbs_huge_uint4(new_pages_filename,new_pointers_filename,new_offsets_filename,
 			      new_positions_filename,indexdbs,hugep,genome_univcoord,ngenomes,
-			      oligospace);
+			      signaturespace);
 
   } else if (coord_values_8p == true) {
     fprintf(stderr,"Genomic coords are 8-byte\n");
     merge_indexdbs_uint8(new_pointers_filename,new_offsets_filename,
 			 new_positions_high_filename,new_positions_filename,
 			 indexdbs,genome_univcoord,genome_8p,ngenomes,
-			 oligospace);
+			 signaturespace);
 
   } else {
     fprintf(stderr,"Genomic coords are 4-byte\n");
     merge_indexdbs_uint4(new_pointers_filename,new_offsets_filename,
 			 new_positions_filename,indexdbs,genome_univcoord,ngenomes,
-			 oligospace);
+			 signaturespace);
   }
 #else
   merge_indexdbs_uint4(new_pointers_filename,new_offsets_filename,
 		       new_positions_filename,indexdbs,genome_univcoord,ngenomes,
-		       oligospace);
+		       signaturespace);
 #endif
 
   /* Print values similarly to "gmapindex -N", so gmap_cat knows whether the result will be large */
@@ -943,6 +955,9 @@ Usage: indexdb_cat [OPTIONS...] -d </path/to/genome>\n\
   -q, --sampling=INT             Sampling to use in genome database.  If not specified, the program\n\
                                    will find the smallest available sampling value in the genome database\n\
                                    within selected basesize and k-mer size\n\
+  -j, --minimizer=INT            Minimizer length to use in genome database\n\
+                                   If not specified, the program will find the highest available\n\
+                                   minimizer length in the genome database, if any exist\n\
   -v, --use-snps=STRING          Use database containing known SNPs (in <STRING>.iit, built\n\
                                    previously using snpindex) for tolerance to SNPs\n\
 \n\

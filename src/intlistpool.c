@@ -9,6 +9,7 @@ static char rcsid[] = "$Id: 20a23498d69176ec26f2aabd4447cebe065f1c46 $";
 #include "mem.h"
 #include "comp.h"
 #include "list.h"
+#include "cascade-stage-probe.h"
 
 #define CHUNKSIZE 16384
 
@@ -201,6 +202,15 @@ static struct Intlist_T *
 add_new_chunk (T this) {
   struct Intlist_T *chunk;
 
+#if defined(GSNAP_UNIVDIAGPOOL_STAGE_PROBE)
+  fprintf(stderr,
+	  "pool_stage_probe\tpool=intlist\talloc_attempt\tstage=%s\trole=%s\tqname=%s\tbytes=%zu\tpoolptr=%p\n",
+	  GSNAP_univdiagpool_stage_probe_stage == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_stage,
+	  GSNAP_univdiagpool_stage_probe_role == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_role,
+	  GSNAP_univdiagpool_stage_probe_qname == NULL ? "unset" : GSNAP_univdiagpool_stage_probe_qname,
+	  CHUNKSIZE*sizeof(struct Intlist_T),(void *) this);
+#endif
+
   chunk = (struct Intlist_T *) MALLOC_KEEP(CHUNKSIZE*sizeof(struct Intlist_T));
   this->chunks = List_push_keep(this->chunks,(void *) chunk);
 #ifdef INTLISTPOOL_REUSE
@@ -276,4 +286,3 @@ Intlistpool_init (T this) {
 
   return;
 }
-

@@ -6,6 +6,7 @@
 #endif
 
 #include "path-print-sam.h"
+#include "parameters.h"
 
 
 #include <stdio.h>
@@ -37,10 +38,10 @@ static bool fastq_format_p;
 static bool extend_soft_clips_p;
 static bool method_print_p;
 
-static bool only_tr_consistent_p;
 static bool only_concordant_p;
 static bool omit_concordant_uniq_p;
 static bool omit_concordant_mult_p;
+static bool only_tr_consistent_p;
 
 static bool *circularp;
 
@@ -57,6 +58,17 @@ static Univ_IIT_T transcript_iit;
 static IIT_T snps_iit;
 static bool maskedp;
 
+static bool timingp;
+
+#if defined(__GNUC__)
+#define CASCADE_TIMING_TLS __thread
+#else
+#define CASCADE_TIMING_TLS _Thread_local
+#endif
+
+static CASCADE_TIMING_TLS const Cascade_Timing_T *current_cascade_timing = NULL;
+
+
 static char complCode[128] = COMPLEMENT_LC;
 
 
@@ -68,6 +80,88 @@ static char complCode[128] = COMPLEMENT_LC;
 #else
 #define debug(x)
 #endif
+
+static void
+print_timing_tags (Filestring_T fp, double worker_runtime) {
+  const Cascade_Timing_T *timing = current_cascade_timing;
+  unsigned long long total_us, stage_sum_us;
+  long long unaccounted_us;
+
+  if (timingp == false) {
+    return;
+  } else {
+    FPRINTF(fp,"\ttm:Z:%.3f",worker_runtime * 1e6);
+  }
+
+  if (timing == NULL || timing->validp == false) {
+    return;
+  } else {
+    total_us = timing->total_us > 0ULL ?
+      timing->total_us : (unsigned long long) (worker_runtime * 1000000.0 + 0.5);
+    stage_sum_us = Cascade_timing_stage_sum(timing);
+    unaccounted_us = (long long) total_us - (long long) stage_sum_us;
+
+    FPRINTF(fp,
+	    "\tct:Z:tot=%llu,setup=%llu,tr=%llu,trc13=%llu,trc11=%llu,"
+	    "trcfm=%llu,trcfmtd=%llu,trcfmlc=%llu,gex=%llu,gext=%llu,gseg=%llu,"
+	    "gconc=%llu,gmerge=%llu,goth=%llu,preMR=%llu,preGC=%llu,"
+	    "afSolve=%llu,afMR=%llu,psSolve=%llu,psMRr=%llu,psMR=%llu,"
+	    "eval=%llu,fbCollect=%llu,fbCons=%llu,term=%llu,support=%llu,"
+	    "result=%llu,cleanup=%llu,unacct=%lld",
+	    total_us,timing->setup_us,timing->tr_search_us,
+	    timing->tr_chain_k13_us,timing->tr_chain_k11_us,
+	    timing->tr_chain_fm_us,timing->tr_chain_fm_trdiag_us,
+	    timing->tr_chain_fm_lchain_us,
+	    timing->gen_exact_us,timing->gen_extension_us,timing->gen_segment_us,
+	    timing->gen_concordance_us,timing->gen_merge_us,timing->gen_other_us,
+	    timing->pre_eval_rescue_us,timing->pre_eval_cleanup_us,
+	    timing->anchor_first_solve_us,timing->anchor_first_rescue_us,
+	    timing->postsolve_solve_us,timing->postsolve_rescue_reliable_us,
+	    timing->postsolve_rescue_us,timing->pathpair_eval_us,
+	    timing->fallback_collect_us,timing->fallback_consolidate_us,
+	    timing->terminal_anchor_eval_us,timing->support_revise_us,
+	    timing->result_build_us,timing->cleanup_us,unaccounted_us);
+
+    FPRINTF(fp,
+	    "\tcx:Z:f5i=%llu,f5occ=%llu,f5sa=%llu,f5a=%llu,f5cap=%llu,"
+	    "f5ch=%llu,f5ca=%llu,f5lc=%llu,"
+	    "f3i=%llu,f3occ=%llu,f3sa=%llu,f3a=%llu,f3cap=%llu,"
+	    "f3ch=%llu,f3ca=%llu,f3lc=%llu",
+	    timing->tr_chain_fm_mate5.intervals,
+	    timing->tr_chain_fm_mate5.occ,
+	    timing->tr_chain_fm_mate5.sa_visits,
+	    timing->tr_chain_fm_mate5.anchors,
+	    timing->tr_chain_fm_mate5.cap_anchors,
+	    timing->tr_chain_fm_mate5.chains,
+	    timing->tr_chain_fm_mate5.chain_anchors,
+	    timing->tr_chain_fm_mate5.lchain_us,
+	    timing->tr_chain_fm_mate3.intervals,
+	    timing->tr_chain_fm_mate3.occ,
+	    timing->tr_chain_fm_mate3.sa_visits,
+	    timing->tr_chain_fm_mate3.anchors,
+	    timing->tr_chain_fm_mate3.cap_anchors,
+	    timing->tr_chain_fm_mate3.chains,
+	    timing->tr_chain_fm_mate3.chain_anchors,
+	    timing->tr_chain_fm_mate3.lchain_us);
+  }
+  return;
+}
+
+static bool
+skip_zero_m_between_indel_and_splice_p (Junction_T prev_junction, Junction_T junction) {
+  Junctiontype_T prev_type, type;
+
+  if (Parameters_fix_splice_boundary_indels_p == false) {
+    return false;
+  } else if (prev_junction == NULL || junction == NULL) {
+    return false;
+  }
+
+  prev_type = Junction_type(prev_junction);
+  type = Junction_type(junction);
+  return (((prev_type == INS_JUNCTION || prev_type == DEL_JUNCTION) && type == SPLICE_JUNCTION) ||
+	  (prev_type == SPLICE_JUNCTION && (type == INS_JUNCTION || type == DEL_JUNCTION))) ? true : false;
+}
 
 /* Printing of fusions */
 #ifdef DEBUG2
@@ -194,7 +288,7 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
   List_T j;
   Univcoordlist_T u;
   Univcoord_T deletionpos;
-  Junction_T junction;
+  Junction_T junction, prev_junction = (Junction_T) NULL;
   Junctiontype_T type;
   char *deletion_string;
   int qpos, nconsecutive, n, i;
@@ -258,8 +352,10 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
       q = Intlist_next(q);
       debug(printf("n %d = endpoint %d - qpos %d, nconsecutive %d\n",
 		   Intlist_head(q) - qpos,Intlist_head(q),qpos,nconsecutive));
+      junction = (Junction_T) List_head(j);
       n = Intlist_head(q) - qpos;
-      if (n > 0 || sam_insert_0M_p == true) {
+      if (n > 0 || (sam_insert_0M_p == true &&
+		    skip_zero_m_between_indel_and_splice_p(prev_junction,junction) == false)) {
 	FPRINTF(*cigar_fp,"%dM",n);
       }
       for (i = 0; i < n; i++) {
@@ -287,7 +383,6 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
       debug(printf("After cigar M, nconsecutive is %d\n",nconsecutive));
 
       ninserts = 0;
-      junction = (Junction_T) List_head(j);
       if (junction == JUNCTION_UNSOLVED) {
 	FPRINTF(*cigar_fp,"X");
 
@@ -315,6 +410,7 @@ Path_cigar_md (int *hardclip_low, int *hardclip_high,
       }
       qpos = Intlist_head(q) + ninserts;
 
+      prev_junction = junction;
       j = List_next(j);
       u = Univcoordlist_next(u);
     }
@@ -405,7 +501,7 @@ Path_supplemental_cigar_md (int *hardclip_low, int *hardclip_high,
   List_T j;
   Univcoordlist_T u;
   Univcoord_T deletionpos;
-  Junction_T junction;
+  Junction_T junction, prev_junction = (Junction_T) NULL;
   Junctiontype_T type;
   char *deletion_string;
   int qpos, nconsecutive, n, i;
@@ -460,8 +556,10 @@ Path_supplemental_cigar_md (int *hardclip_low, int *hardclip_high,
 
   while (j != NULL) {
     q = Intlist_next(q);
+    junction = (Junction_T) List_head(j);
     n = Intlist_head(q) - qpos;
-    if (n > 0 || sam_insert_0M_p == true) {
+    if (n > 0 || (sam_insert_0M_p == true &&
+		  skip_zero_m_between_indel_and_splice_p(prev_junction,junction) == false)) {
       FPRINTF(*cigar_fp,"%dM",n);
     }
     for (i = 0; i < n; i++) {
@@ -488,7 +586,6 @@ Path_supplemental_cigar_md (int *hardclip_low, int *hardclip_high,
     }
 
     ninserts = 0;
-    junction = (Junction_T) List_head(j);
     if (junction == JUNCTION_UNSOLVED) {
       FPRINTF(*cigar_fp,"X");
 
@@ -516,6 +613,7 @@ Path_supplemental_cigar_md (int *hardclip_low, int *hardclip_high,
     }
     qpos = Intlist_head(q) + ninserts;
 
+    prev_junction = junction;
     j = List_next(j);
     u = Univcoordlist_next(u);
   }
@@ -591,8 +689,8 @@ Path_print_sam_nomapping (Filestring_T fp, char *abbrev, Shortread_T queryseq, S
 			  Shortread_T single_cell_infoseq,
 			  char *acc1, char *acc2, Univ_IIT_T chromosome_iit, Resulttype_T resulttype, bool first_read_p,
 			  int pathnum, int npaths_primary, int npaths_altloc, bool artificial_mate_p, int npaths_mate,
-
-			  T mate, int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p) {
+			  T mate, int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
+			  double worker_runtime) {
   unsigned int flag;
 
   Univcoord_T mate_univcoord_low;
@@ -724,6 +822,8 @@ Path_print_sam_nomapping (Filestring_T fp, char *abbrev, Shortread_T queryseq, S
     Single_cell_print_fields(fp,single_cell_infoseq);
   }
 
+  print_timing_tags(fp,worker_runtime);
+
   FPRINTF(fp,"\n");
 
   Filestring_free(&mate_md_fp,/*free_string_p*/true);
@@ -744,7 +844,8 @@ print_substrings (int *hardclip_low, int *hardclip_high,
 
 		  T mate,
 		  Resulttype_T resulttype, bool first_read_p, bool artificial_mate_p, int npaths_mate,
-		  int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p) {
+		  int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
+		  double worker_runtime) {
   unsigned int flag = 0U;
 
   int mate_hardclip_low, mate_hardclip_high;
@@ -943,6 +1044,9 @@ print_substrings (int *hardclip_low, int *hardclip_high,
 
   /* 12. TAGS: NM (mismatches) */
   FPRINTF(fp,"\tNM:i:%d",Path_ndiffs(path));
+  if (path->final_score_p == true) {
+    FPRINTF(fp,"\tRS:i:%d\tPS:i:%d",path->final_read_score,path->final_pair_score);
+  }
   
   /* 12. TAGS: XE */
 #ifdef TO_FIX
@@ -1093,6 +1197,8 @@ print_substrings (int *hardclip_low, int *hardclip_high,
     Single_cell_print_fields(fp,single_cell_infoseq);
   }
 
+  print_timing_tags(fp,worker_runtime);
+
   FPRINTF(fp,"\n");
 
   Filestring_free(&mate_md_fp,/*free_string_p*/true);
@@ -1111,7 +1217,8 @@ print_circular (Filestring_T fp, char *abbrev, T path,
 		Shortread_T queryseq, Shortread_T mate_queryseq, Shortread_T single_cell_infoseq,
 		int pairedlength, int pair_relationship,
 		T mate, Resulttype_T resulttype, bool first_read_p, bool artificial_mate_p, int npaths_mate,
-		int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p) {
+		int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
+		double worker_runtime) {
 
   unsigned int flag = 0U;
 
@@ -1328,6 +1435,8 @@ print_circular (Filestring_T fp, char *abbrev, T path,
     Single_cell_print_fields(fp,single_cell_infoseq);
   }
 
+  print_timing_tags(fp,worker_runtime);
+
   FPRINTF(fp,"\n");
 
   Filestring_free(&mate_md_fp,/*free_string_p*/true);
@@ -1347,7 +1456,8 @@ print_fusion (Filestring_T fp, char *abbrev, T path,
 	      int pairedlength, int pair_relationship, int hardclip_low, int hardclip_high,
 
 	      T mate, Resulttype_T resulttype, bool first_read_p, bool artificial_mate_p, int npaths_mate,
-	      int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p) {
+	      int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
+	      double worker_runtime) {
   unsigned int flag = 0U;
 
   int hardclip_low_ignore, hardclip_high_ignore;
@@ -1851,6 +1961,8 @@ print_fusion (Filestring_T fp, char *abbrev, T path,
     Single_cell_print_fields(fp,single_cell_infoseq);
   }
 
+  print_timing_tags(fp,worker_runtime);
+
   FPRINTF(fp,"\n");
 
   Filestring_free(&mate_md_fp,/*free_string_p*/true);
@@ -1872,7 +1984,7 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
 		T mate, Resulttype_T resulttype, bool paired_read_p, bool first_read_p,
 		bool artificial_mate_p, int npaths_mate,
 		int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
-		Listpool_T listpool) {
+		double worker_runtime, Listpool_T listpool) {
 
   int hardclip_low, hardclip_high;
 
@@ -1886,7 +1998,7 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
     Path_print_sam_nomapping(fp,abbrev,queryseq,mate_queryseq,single_cell_infoseq,
 			     acc1,acc2,chromosome_iit,resulttype,first_read_p,
 			     /*pathnum*/0,/*npaths_primary*/0,/*npaths_altloc*/0,artificial_mate_p,npaths_mate,
-			     mate,quality_shift,sam_read_group_id,invertp,invert_mate_p);
+			     mate,quality_shift,sam_read_group_id,invertp,invert_mate_p,worker_runtime);
 
     if (failedinput_root != (char *) NULL && *fp_failedinput == (Filestring_T) NULL) {
       *fp_failedinput = Filestring_new();
@@ -1908,7 +2020,7 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
 		     queryseq,mate_queryseq,single_cell_infoseq,pairedlength,pair_relationship,
 		     mate,resulttype,first_read_p,artificial_mate_p,
 		     npaths_mate,quality_shift,sam_read_group_id,
-		     invertp,invert_mate_p);
+		     invertp,invert_mate_p,worker_runtime);
     debug(printf("print_substrings returning hardclips %d and %d\n",hardclip_low,hardclip_high));
   }
 
@@ -1920,7 +2032,7 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
 		   queryseq,mate_queryseq,single_cell_infoseq,pairedlength,pair_relationship,
 		   mate,resulttype,first_read_p,artificial_mate_p,
 		   npaths_mate,quality_shift,sam_read_group_id,
-		   invertp,invert_mate_p);
+		   invertp,invert_mate_p,worker_runtime);
   }
 
   if (this->fusion_querystart_junction != NULL || this->fusion_queryend_junction != NULL) {
@@ -1932,7 +2044,8 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
 		 queryseq,mate_queryseq,single_cell_infoseq,pairedlength,pair_relationship,
 		 hardclip_low,hardclip_high,mate,
 		 resulttype,first_read_p,artificial_mate_p,
-		 npaths_mate,quality_shift,sam_read_group_id,invertp,invert_mate_p);
+		 npaths_mate,quality_shift,sam_read_group_id,invertp,invert_mate_p,
+		 worker_runtime);
   }
 
   return;
@@ -1944,7 +2057,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		       Result_T result, Resulttype_T resulttype, Univ_IIT_T chromosome_iit,
 		       Shortread_T queryseq1, Shortread_T queryseq2, bool invert_first_p, bool invert_second_p,
 		       bool nofailsp, bool failsonlyp, int quality_shift, char *sam_read_group_id,
-		       Listpool_T listpool) {
+		       double worker_runtime, Listpool_T listpool) {
   Pathpair_T *pathpairarray, pathpair;
   T *patharray1, *patharray2, path, mate, path5, path3;
   int npaths_primary, npaths_altloc, npaths_max, npaths_primary_max, npaths_altloc_max,
@@ -1955,6 +2068,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
   char *abbrev;
   bool concordant_softclipped_p;
 
+
+  current_cascade_timing = Result_cascade_timing(result);
 
   acc1 = Shortread_accession(queryseq1);
   acc2 = Shortread_accession(queryseq2); /* NULL, unless --allow-pe-name-mismatch is specified */
@@ -1979,12 +2094,14 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			       /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 			       /*first_read_p*/true,/*pathnum*/0,/*npaths_primary*/0,/*npaths_altloc*/0,
 			       /*artificial_mate_p*/false,/*npaths_mate*/0,
-			       /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+			       /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			       worker_runtime);
       Path_print_sam_nomapping(fp,ABBREV_NOMAPPING_2,queryseq2,/*mate_queryseq*/queryseq1,
 			       /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 			       /*first_read_p*/false,/*pathnum*/0,/*npaths_primary*/0,/*npaths_altloc*/0,
 			       /*artificial_mate_p*/false,/*npaths_mate*/0,
-			       /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+			       /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			       worker_runtime);
 
       if (failedinput_root != NULL) {
 	*fp_failedinput_1 = Filestring_new();
@@ -2053,7 +2170,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		       pathpair->insertlength,pathpair->pair_relationship,
 		       /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 		       /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-		       quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+		       quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+		       worker_runtime,listpool);
 
 	/* print second end */
 	Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path3,
@@ -2064,7 +2182,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		       pathpair->insertlength,pathpair->pair_relationship,
 		       /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 		       /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-		       quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+		       quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+		       worker_runtime,listpool);
 
       } else {
 #ifdef TO_FIX
@@ -2139,12 +2258,14 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	  Path_print_sam_nomapping(fp,abbrev,queryseq2,/*mate_queryseq*/queryseq1,
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	}
 
       } else {
@@ -2189,7 +2310,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   pathpair->insertlength,pathpair->pair_relationship,
 			   /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			   worker_runtime,listpool);
 	    
 	    /* print second end */
 	    Path_print_sam(fp,&(*fp_failedinput_2),abbrev,
@@ -2200,7 +2322,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   pathpair->insertlength,pathpair->pair_relationship,
 			   /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			   worker_runtime,listpool);
 	  
 	  } else {
 #ifdef TO_FIX
@@ -2274,12 +2397,14 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	  Path_print_sam_nomapping(fp,ABBREV_CONCORDANT_TRANSLOC,queryseq2,/*mate_queryseq*/queryseq1,
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	}
 
       } else {
@@ -2307,7 +2432,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 pathpair->insertlength,pathpair->pair_relationship,
 			 /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 
 	  /* print second end */
 	  Path_print_sam(fp,&(*fp_failedinput_2),ABBREV_CONCORDANT_TRANSLOC,
@@ -2318,7 +2444,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 pathpair->insertlength,pathpair->pair_relationship,
 			 /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 	}
       }
     
@@ -2361,7 +2488,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		     pathpair->insertlength,pathpair->pair_relationship,
 		     /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 		     /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-		     quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+		     quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+		     worker_runtime,listpool);
 
       /* print second end */
       Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path3,
@@ -2372,7 +2500,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		     pathpair->insertlength,pathpair->pair_relationship,
 		     /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 		     /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-		     quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+		     quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+		     worker_runtime,listpool);
 
     } else if (resulttype == PAIRED_MULT) {
       pathpairarray = (Pathpair_T *) Result_array(&npaths_primary,&npaths_altloc,&first_absmq,&second_absmq,result);
@@ -2387,12 +2516,14 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	  Path_print_sam_nomapping(fp,ABBREV_PAIRED_MULT_XS,queryseq2,/*mate_queryseq*/queryseq1,
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths_primary,npaths_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   /*mate*/(T) NULL,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	}
 
       } else {
@@ -2422,7 +2553,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 pathpair->insertlength,pathpair->pair_relationship,
 			 /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 
 	  /* print second end */
 	  Path_print_sam(fp,&(*fp_failedinput_2),ABBREV_PAIRED_MULT,
@@ -2433,7 +2565,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 pathpair->insertlength,pathpair->pair_relationship,
 			 /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_primary + npaths_altloc,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 	}
       }
 
@@ -2468,7 +2601,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		     /*pairedlength*/0U,/*pair_relationship*/0,
 		     /*mate*/path3,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 		     /*artificial_mate_p*/false,/*npaths_mate*/1,quality_shift,sam_read_group_id,
-		     invert_first_p,invert_second_p,listpool);
+		     invert_first_p,invert_second_p,worker_runtime,listpool);
 
       /* Note: Do not act on add_paired_nomappers_p, since the two reads are artificially paired up already */
 
@@ -2483,7 +2616,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		     /*pairedlength*/0U,/*pair_relationship*/0,
 		     /*mate*/path5,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 		     /*artificial_mate_p*/false,/*npaths_mate*/1,quality_shift,sam_read_group_id,
-		     invert_second_p,invert_first_p,listpool);
+		     invert_second_p,invert_first_p,worker_runtime,listpool);
 
     } else if (resulttype == UNPAIRED_MULT || resulttype == UNPAIRED_TRANSLOC) {
       if (resulttype == UNPAIRED_MULT) {
@@ -2558,7 +2691,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*mate*/patharray2[pathnum-1],
 			 resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 
 	  path = patharray2[pathnum-1];
 	  Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
@@ -2570,7 +2704,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*mate*/patharray1[pathnum-1],
 			 resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 	}
 
 	/* Print remaining results with non-mappers */
@@ -2593,14 +2728,16 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,/*mate*/NULL,
 			   resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			   /*artificial_mate_p*/true,/*npaths_mate*/npaths_max,
-			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			   worker_runtime,listpool);
 
 	    /* matching nomapper for second end */
 	    Path_print_sam_nomapping(fp,abbrev,queryseq2,/*mate_queryseq*/queryseq1,
 				     /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				     /*first_read_p*/false,pathnum,npaths_primary_max,npaths_altloc_max,
 				     /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				     worker_runtime);
 	  }
 
 	} else if (npaths2_primary + npaths2_altloc > npaths1_primary + npaths1_altloc) {
@@ -2619,7 +2756,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				     /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				     /*first_read_p*/true,pathnum,npaths_primary_max,npaths_altloc_max,
 				     /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				     worker_runtime);
 
 	    Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
 			   acc1,acc2,pathnum,npaths_primary_max,npaths_altloc_max,
@@ -2628,7 +2766,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*queryseq*/queryseq2,/*mate_queryseq*/queryseq1,/*single_cell_infoseq*/NULL,
 			   /*pairedlength*/0U,/*pair_relationship*/0,/*mate*/NULL,
 			   resulttype,/*paired_read_p*/true,/*first_read_p*/false,/*artificial_mate_p*/true,/*npaths_mate*/npaths_max,
-			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			   worker_runtime,listpool);
 	  }
 	}
 
@@ -2669,7 +2808,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,mate,
 			 resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 
 	} else if (quiet_if_excessive_p && npaths1_primary + npaths1_altloc > maxpaths_report) {
 	  /* Just printing one end as nomapping */
@@ -2677,7 +2817,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths1_primary,npaths1_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 
 	} else {
 	  for (pathnum = 1; pathnum <= npaths1_primary + npaths1_altloc && pathnum <= maxpaths_report; pathnum++) {
@@ -2697,7 +2838,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,mate,
 			   resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			   worker_runtime,listpool);
 	  }
 	}
 			  
@@ -2737,7 +2879,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,mate,
 			 resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 	  
 	} else if (quiet_if_excessive_p && npaths2_primary + npaths2_altloc > maxpaths_report) {
 	  /* Just printing one end as nomapping */
@@ -2745,7 +2888,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths2_primary,npaths2_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	  
 	} else {
 	  for (pathnum = 1; pathnum <= npaths2_primary + npaths2_altloc && pathnum <= maxpaths_report; pathnum++) {
@@ -2765,7 +2909,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,
 			   mate,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			   worker_runtime,listpool);
 	  }
 	}
       }
@@ -2849,7 +2994,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/0,npaths1_primary,npaths1_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	}
 
       } else if (npaths1_primary + npaths1_altloc == 1) {
@@ -2874,12 +3020,14 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,
 			 mate,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/true,/*npaths_mate*/npaths_max,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 	  Path_print_sam_nomapping(fp,abbrev,queryseq2,/*mate_queryseq*/queryseq1,
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths1_primary,npaths1_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				   /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	} else {
 	  Path_print_sam(fp,&(*fp_failedinput_1),abbrev,path,
 			 acc1,acc2,/*pathnum*/1,npaths1_primary,npaths1_altloc,
@@ -2889,7 +3037,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,
 			 mate,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			 quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			 worker_runtime,listpool);
 	}
 
       } else if (quiet_if_excessive_p && npaths1_primary + npaths1_altloc > maxpaths_report) {
@@ -2902,7 +3051,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths1_primary,npaths1_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   mate,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	}
 
       } else {
@@ -2923,7 +3073,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				     /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				     /*first_read_p*/false,pathnum,npaths1_primary,npaths1_altloc,
 				     /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				     worker_runtime);
 	    Path_print_sam(fp,&(*fp_failedinput_1),abbrev,path,
 			   acc1,acc2,pathnum,npaths1_primary,npaths1_altloc,
 			   path->absmq_score,first_absmq1,second_absmq1,
@@ -2932,7 +3083,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,
 			   mate,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			   /*artificial_mate_p*/true,/*npaths_mate*/npaths_max,quality_shift,sam_read_group_id,
-			   invert_first_p,invert_second_p,listpool);
+			   invert_first_p,invert_second_p,worker_runtime,listpool);
 
 	  } else {
 	    Path_print_sam(fp,&(*fp_failedinput_1),abbrev,path,
@@ -2943,7 +3094,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,
 			   mate,resulttype,/*paired_read_p*/true,/*first_read_p*/true,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths2_primary + npaths2_altloc,
-			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,listpool);
+			   quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			   worker_runtime,listpool);
 	  }
 	}
       }
@@ -2977,7 +3129,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/0,npaths2_primary,npaths2_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	}
 
       } else if (npaths2_primary + npaths2_altloc == 1) {
@@ -2998,7 +3151,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/true,/*pathnum*/1,npaths2_primary,npaths2_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				   /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				   /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				   worker_runtime);
 	  Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
 			 acc1,acc2,/*pathnum*/1,npaths2_primary,npaths2_altloc,
 			 path->absmq_score,first_absmq2,/*second_absmq2*/0,
@@ -3007,7 +3161,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,
 			 mate,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/true,/*npaths_mate*/npaths_max,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 
 	} else {
 	  Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
@@ -3018,7 +3173,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			 /*pairedlength*/0U,/*pair_relationship*/0,
 			 mate,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			 /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			 quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			 worker_runtime,listpool);
 	}
 
       } else if (quiet_if_excessive_p && npaths2_primary + npaths2_altloc > maxpaths_report) {
@@ -3031,7 +3187,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				   /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				   /*first_read_p*/false,/*pathnum*/1,npaths2_primary,npaths2_altloc,
 				   /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p);
+				   mate,quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+				   worker_runtime);
 	}
 
       } else {
@@ -3052,7 +3209,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 				     /*single_cell_infoseq*/NULL,acc1,acc2,chromosome_iit,resulttype,
 				     /*first_read_p*/true,pathnum,npaths2_primary,npaths2_altloc,
 				     /*artificial_mate_p*/false,/*npaths_mate*/npaths_max,
-				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				     /*mate*/path,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				     worker_runtime);
 	    Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
 			   acc1,acc2,pathnum,npaths2_primary,npaths2_altloc,
 			   path->absmq_score,first_absmq2,second_absmq2,
@@ -3061,7 +3219,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,
 			   mate,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			   /*artificial_mate_p*/true,/*npaths_mate*/npaths_max,
-			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			   worker_runtime,listpool);
 
 	  } else {
 	    Path_print_sam(fp,&(*fp_failedinput_2),abbrev,path,
@@ -3072,7 +3231,8 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 			   /*pairedlength*/0U,/*pair_relationship*/0,
 			   mate,resulttype,/*paired_read_p*/true,/*first_read_p*/false,
 			   /*artificial_mate_p*/false,/*npaths_mate*/npaths1_primary + npaths1_altloc,
-			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,listpool);
+			   quality_shift,sam_read_group_id,invert_second_p,invert_first_p,
+			   worker_runtime,listpool);
 	  }
 	}
       }
@@ -3080,6 +3240,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
     }
   }
 
+  current_cascade_timing = (const Cascade_Timing_T *) NULL;
   return;
 }
 
@@ -3093,7 +3254,7 @@ Path_print_sam_setup (bool add_paired_nomappers_p_in, bool paired_flag_means_con
 		      bool *circularp_in, bool clip_overlap_p_in, bool merge_overlap_p_in, bool merge_samechr_p_in,
 		      bool sam_multiple_primaries_p_in, bool sam_sparse_secondaries_p_in,
 		      Univ_IIT_T chromosome_iit_in, Univ_IIT_T transcript_iit_in,
-		      IIT_T snps_iit_in, bool maskedp_in) {
+		      IIT_T snps_iit_in, bool maskedp_in, bool timingp_in) {
 
   add_paired_nomappers_p = add_paired_nomappers_p_in;
   paired_flag_means_concordant_p = paired_flag_means_concordant_p_in;
@@ -3133,9 +3294,9 @@ Path_print_sam_setup (bool add_paired_nomappers_p_in, bool paired_flag_means_con
   snps_iit = snps_iit_in;
   maskedp = maskedp_in;
 
+  timingp = timingp_in;
+
   /* transcript_iit = transcript_iit_in; */
 
   return;
 }
-
-

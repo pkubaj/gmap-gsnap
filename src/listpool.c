@@ -150,6 +150,11 @@ Listpool_new (void) {
   return new;
 }
 
+int
+Listpool_nchunks (T this) {
+  return List_length(this->chunks);
+}
+
 
 #ifdef LISTPOOL_REUSE
 void
@@ -276,4 +281,3 @@ Listpool_init (T this) {
 
   return;
 }
-

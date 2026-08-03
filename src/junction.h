@@ -21,6 +21,7 @@ typedef struct Junction_T *Junction_T;
 struct T {
   Junctiontype_T type;
   int nindels;			/* Should be positive */
+  bool annotatedp;
   /* Univcoord_T deletionpos; -- Computed now at print time */
 
   Chrpos_T splice_distance;
@@ -54,6 +55,10 @@ extern T
 Junction_new_splice (Chrpos_T splice_distance, int sensedir, double donor_prob, double acceptor_prob,
 		     Pathpool_T pathpool);
 extern T
+Junction_new_splice_annotated (Chrpos_T splice_distance, int sensedir,
+			       double donor_prob, double acceptor_prob,
+			       Pathpool_T pathpool);
+extern T
 Junction_new_ambig_splice (int sensedir, double donor_prob, double acceptor_prob, Pathpool_T pathpool);
 
 extern T
@@ -77,6 +82,8 @@ Junction_copy_list (List_T old, Listpool_T listpool, Pathpool_T pathpool);
 
 extern Junctiontype_T
 Junction_type (T this);
+extern bool
+Junction_annotatedp (T this);
 extern char *
 Junction_typestring (T this);
 extern int
@@ -110,4 +117,3 @@ Junction_set_ambiguous (T this);
 
 #undef T
 #endif
-

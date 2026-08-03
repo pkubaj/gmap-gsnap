@@ -1,4 +1,3 @@
-/* $Id: 7ea41ff790b6eb8231731168c8e1ed931eeaffc9 $ */
 #ifndef SHORTREAD_INCLUDED
 #define SHORTREAD_INCLUDED
 #ifdef HAVE_CONFIG_H

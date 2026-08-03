@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 9b5e019498250861d74e87b48405b43377a23983 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -1115,7 +1114,7 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 
 
 static void
-process_seed (int *found_score, int sufficient_score,
+process_seed (int *found_score, int *end_score, int sufficient_score,
 	      List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 	      List_T *sense_trpaths, List_T *antisense_trpaths,
 
@@ -1370,7 +1369,7 @@ process_seed (int *found_score, int sufficient_score,
 
   if (tplusp == true) {
     chrnum = Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
-    if ((trpath = Trpath_solve_from_diagonals(&(*found_score),&partialp,sufficient_score,
+    if ((trpath = Trpath_solve_from_diagonals(&(*found_score),&(*end_score),&partialp,sufficient_score,
 					      middle_trdiagonal,middle_qstart,middle_qend,
 					      middle_nmismatches,qstart_trdiag,qend_trdiag,/*tplusp*/true,
 					      querylength,/*query_compress_tr*/query_compress_fwd,
@@ -1390,7 +1389,7 @@ process_seed (int *found_score, int sufficient_score,
 
   } else {
     chrnum = Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
-    if ((trpath = Trpath_solve_from_diagonals(&(*found_score),&partialp,sufficient_score,
+    if ((trpath = Trpath_solve_from_diagonals(&(*found_score),&(*end_score),&partialp,sufficient_score,
 					      middle_trdiagonal,middle_qstart,middle_qend,
 					      middle_nmismatches,qstart_trdiag,qend_trdiag,/*tplusp*/false,
 					      querylength,/*query_compress_tr*/query_compress_rev,
@@ -1423,7 +1422,7 @@ process_seed (int *found_score, int sufficient_score,
 
 
 static void
-extend_seeds_union (int *found_score, int sufficient_score,
+extend_seeds_union (int *found_score, int *end_score, int sufficient_score,
 		    List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 		    List_T *sense_trpaths, List_T *antisense_trpaths,
 		    
@@ -1615,7 +1614,7 @@ extend_seeds_union (int *found_score, int sufficient_score,
     }
 
     trdiag = trdiag_array[order[i]];
-    process_seed(&(*found_score),sufficient_score,
+    process_seed(&(*found_score),&(*end_score),sufficient_score,
 		 &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 		 &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1647,7 +1646,7 @@ extend_seeds_union (int *found_score, int sufficient_score,
 
 
 static void
-extend_seeds_queryfwd (int *found_score, int sufficient_score,
+extend_seeds_queryfwd (int *found_score, int *end_score, int sufficient_score,
 		       List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 		       List_T *sense_trpaths, List_T *antisense_trpaths,
 
@@ -1728,7 +1727,7 @@ extend_seeds_queryfwd (int *found_score, int sufficient_score,
     }
 
     trdiag = trdiag_array[order[i]];
-    process_seed(&(*found_score),sufficient_score,
+    process_seed(&(*found_score),&(*end_score),sufficient_score,
 		 &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 		 &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1759,7 +1758,7 @@ extend_seeds_queryfwd (int *found_score, int sufficient_score,
 
 
 static void
-extend_seeds_queryrev (int *found_score, int sufficient_score,
+extend_seeds_queryrev (int *found_score, int *end_score, int sufficient_score,
 		       List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 		       List_T *sense_trpaths, List_T *antisense_trpaths,
 		    
@@ -1841,7 +1840,7 @@ extend_seeds_queryrev (int *found_score, int sufficient_score,
     }
 
     trdiag = trdiag_array[order[i]];
-    process_seed(&(*found_score),sufficient_score,
+    process_seed(&(*found_score),&(*end_score),sufficient_score,
 		 &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 		 &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1872,7 +1871,7 @@ extend_seeds_queryrev (int *found_score, int sufficient_score,
 
 
 void
-Tr_extension_search (int *found_score, int sufficient_score,
+Tr_extension_search (int *found_score, int *end_score, int sufficient_score,
 		     List_T *partial_sense_trpaths, List_T *partial_antisense_trpaths,
 		     List_T *sense_trpaths, List_T *antisense_trpaths,
 
@@ -1902,7 +1901,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
   if (queryfwd_best_plus_elts == NULL && queryrev_best_plus_elts == NULL) {
     /* Skip */
   } else if (queryrev_best_plus_elts == NULL) {
-    extend_seeds_queryfwd(&(*found_score),sufficient_score,
+    extend_seeds_queryfwd(&(*found_score),&(*end_score),sufficient_score,
 			  &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 			  &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1913,7 +1912,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 			  trdiagpool,intlistpool,uintlistpool,listpool,
 			  trpathpool,pathpool,hitlistpool,method);
   } else if (queryfwd_best_plus_elts == NULL) {
-    extend_seeds_queryrev(&(*found_score),sufficient_score,
+    extend_seeds_queryrev(&(*found_score),&(*end_score),sufficient_score,
 			  &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 			  &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1924,7 +1923,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 			  trdiagpool,intlistpool,uintlistpool,listpool,
 			  trpathpool,pathpool,hitlistpool,method);
   } else {
-    extend_seeds_union(&(*found_score),sufficient_score,
+    extend_seeds_union(&(*found_score),&(*end_score),sufficient_score,
 		       &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 		       &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1940,7 +1939,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
   if (queryfwd_best_minus_elts == NULL && queryrev_best_minus_elts == NULL) {
     /* Skip */
   } else if (queryrev_best_minus_elts == NULL) {
-    extend_seeds_queryfwd(&(*found_score),sufficient_score,
+    extend_seeds_queryfwd(&(*found_score),&(*end_score),sufficient_score,
 			  &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 			  &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1951,7 +1950,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 			  trdiagpool,intlistpool,uintlistpool,listpool,
 			  trpathpool,pathpool,hitlistpool,method);
   } else if (queryfwd_best_minus_elts == NULL) {
-    extend_seeds_queryrev(&(*found_score),sufficient_score,
+    extend_seeds_queryrev(&(*found_score),&(*end_score),sufficient_score,
 			  &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 			  &(*sense_trpaths),&(*antisense_trpaths),
 
@@ -1962,7 +1961,7 @@ Tr_extension_search (int *found_score, int sufficient_score,
 			  trdiagpool,intlistpool,uintlistpool,listpool,
 			  trpathpool,pathpool,hitlistpool,method);
   } else {
-    extend_seeds_union(&(*found_score),sufficient_score,
+    extend_seeds_union(&(*found_score),&(*end_score),sufficient_score,
 		       &(*partial_sense_trpaths),&(*partial_antisense_trpaths),
 		       &(*sense_trpaths),&(*antisense_trpaths),
 

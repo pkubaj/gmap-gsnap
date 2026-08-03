@@ -1,4 +1,3 @@
-/* $Id: e7b440f9b937f73f5d6b5e1db1a3c38d30ddd816 $ */
 #ifndef SPLICE_INCLUDED
 #define SPLICE_INCLUDED
 
@@ -115,9 +114,8 @@ Splice_resolve_qstart (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, I
 		       Stage1_T stage1, Compress_T query_compress, char *queryptr,
 		       bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
 
-		       int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
-
 		       Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		       int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		       Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		       int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
@@ -126,7 +124,7 @@ Splice_resolve_qstart (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, I
 		       Listpool_T listpool, Pathpool_T pathpool,
 
 		       int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
-		       bool allow_indels_p, bool find_middle_p);
+		       bool allow_indels_p, bool find_middle_p, int middle_rank);
 
 extern int
 Splice_resolve_qend (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
@@ -136,8 +134,8 @@ Splice_resolve_qend (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Int
 		     Stage1_T stage1, Compress_T query_compress, char *queryptr,
 		     bool plusp, Univcoord_T chroffset, Univcoord_T chrhigh,
 		     
-		     int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		     Univdiag_T *univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		     Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		     int pos5, int pos3, int querylength, int cont_trimpos, int cont_nmismatches,
@@ -146,7 +144,7 @@ Splice_resolve_qend (Univcoordlist_T *univdiagonals, Intlist_T *nmismatches, Int
 		     Listpool_T listpool, Pathpool_T pathpool,
 
 		     int sensedir, int genestrand, bool trim5p, bool trim3p, bool innerp,
-		     bool allow_indels_p, bool find_middle_p);
+		     bool allow_indels_p, bool find_middle_p, int middle_rank);
 
 extern int
 Splice_nomiddle (int *best_type, int *trimpos5, int *trimpos3, int *supporti, int *supportj,

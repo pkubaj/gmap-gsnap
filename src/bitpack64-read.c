@@ -13797,909 +13797,8 @@ static Unpacker_T unpacker_table[17][17] =
 #define get_row(s) (s) >> 2 /* Not s / 4, which fails on negative values */
 
 
-#if 0
-/* Use Bitpack64_read_two instead */
-
-/* bitpackpages: A list of b-mers (12-mers by default), ending with -1U */
 UINT4
-Bitpack64_offsetptr (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
-  Oligospace_T bmer;
-  UINT4 *info, nwritten4, packsize_div2;
-  UINT8 nwritten8;
-  int delta, remainder0, remainder1, quarter_block_0, quarter_block_1, column, row;
-#ifdef HAVE_SSE2
-#ifdef BRANCH_FREE_ROW_SUM
-  __m128i diffs[3];
-#else
-  __m128i diffs[2];
-#endif
-#ifdef BRANCH_FREE_QTR_BLOCK
-  UINT4 psums[5];		/* Need 5 to handle case where remainder == 64 */
-#else
-#endif
-  __m128i *bitpack;
-  UINT4 *_diffs;
-#else
-  UINT4 ptr;
-  int k, i;
-  UINT4 diffs[BLOCKSIZE+1], *bitpack;
-#endif
-#ifdef DEBUG
-  UINT4 offsets[BLOCKSIZE+1];
-#endif
-
-
-  bmer = oligo/BLOCKSIZE;
-  info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
-
-  debug(printf("Entered Bitpack64_offsetptr with oligo %u => bmer %u\n",oligo,bmer));
-
-  nwritten4 = info[0];		     /* In 128-bit registers */
-  nwritten8 = 4 * (UINT8) nwritten4; /* In 32-bit words */
-#ifdef HAVE_SSE2  
-  bitpack = (__m128i *) &(bitpackcomp[nwritten8]);
-#else
-  bitpack = (UINT4 *) &(bitpackcomp[nwritten8]);
-#endif
-
-  /* packsize = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4)*2; */
-  packsize_div2 = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4);
-
-  remainder0 = oligo % BLOCKSIZE;
-  remainder1 = remainder0 + 1;
-  if (remainder1 == 32) {
-    /* For the case (31,32), treat 32 as being in the first half-block.  Otherwise, 32 is in the second half-block */
-    quarter_block_0 = quarter_block_1 = 1;
-  } else {
-    quarter_block_0 = remainder0 / 16;
-    quarter_block_1 = remainder1 / 16;
-  }
-
-  debug(Bitpack64_block_offsets(offsets,oligo,bitpackptrs,bitpackcomp));
-
-#ifdef HAVE_SSE2
-  _diffs = (UINT4 *) diffs;	/* Assumes a dummy register in diffs[0] */
-
-#ifdef BRANCH_FREE_QTR_BLOCK
-  psums[0] = psums[1] = info[1];
-  psums[2] = psums[3] = psums[4] = info[DIFFERENTIAL_METAINFO_SIZE+1];
-
-  delta = 31 - abs(remainder1 - 32);
-  column = get_column(delta);
-  row = get_row(delta);
-  debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-  
-  (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-  *end0 = psums[quarter_block_1] + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-
-
-  delta = 31 - abs(remainder0 - 32);
-  column = get_column(delta);
-  row = get_row(delta);
-  debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-  (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-  return psums[quarter_block_0] + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-
-#else
-
-  /* Don't have to handle remainder == 0 as a special case for obtaining
-     ascending[n], if we use " <= n" in Bitpack64_write_differential */
-
-  if (quarter_block_1 <= 1) {
-    delta = remainder1 - 1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    *end0 = info[1] + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-#else
-    assign_sum_fwd(*end0,info[1],_diffs,row);
-#endif
-
-  } else {
-    delta = 63 - remainder1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    *end0 = info[DIFFERENTIAL_METAINFO_SIZE+1] - _diffs[row+1] - _diffs[row+2] - _diffs[row+3] - _diffs[row+4];
-#else
-    assign_sum_rev(*end0,info[DIFFERENTIAL_METAINFO_SIZE+1],_diffs,row);
-#endif
-  }
-
-  if (quarter_block_0 <= 1) {
-    delta = remainder0 - 1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    return info[1] + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-#else
-    return_sum_fwd(info[1],_diffs,row);
-#endif
-
-  } else {
-    delta = 63 - remainder0;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    return info[DIFFERENTIAL_METAINFO_SIZE+1] - _diffs[row+1] - _diffs[row+2] - _diffs[row+3] - _diffs[row+4];
-#else
-    return_sum_rev(info[DIFFERENTIAL_METAINFO_SIZE+1],_diffs,row);
-#endif
-  }
-
-#endif
-
-#else  /* HAVE_SSE2 */
-
-  offset0 = info[1];
-  offset1 = info[DIFFERENTIAL_METAINFO_SIZE+1];
-
-  /* Unpack all 64 diffs for non-SIMD */
-  (unpacker_all_table[packsize_div2*2])(&(diffs[1]),bitpack);
-
-#ifdef DEBUG
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-	 oligo,oligo % BLOCKSIZE,info[1],info[DIFFERENTIAL_METAINFO_SIZE+1]);
-  printf("bitpack:\n");
-
-  for (i = 1; i <= BLOCKSIZE; i++) {
-    printf("%d ",diffs[i]);
-    if (i % (BLOCKSIZE/4) == 0) {
-      printf("\n");
-    } else if (i % (BLOCKSIZE/8) == 0) {
-      printf("| ");
-    }
-  }
-  printf("\n");
-  printf("end of diffs\n");
-#endif  
-
-  if ((remainder = oligo % BLOCKSIZE) == 0) {
-    ptr = offset0;
-
-  } else if (remainder <= 16) {
-    ptr = offset0;
-
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    ptr = offset0;
-
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-  } else {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-  }
-
-  remainder++;
-  if (remainder == 64) {
-    *end0 = offset1;
-
-  } else if (remainder <= 16) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-  } else {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-  }
-
-  return ptr;
-
-#endif	/* HAVE_SSE2 */
-
-}
-#endif
-
-
-#if 0
-/* Use Bitpack64_read_two_huge instead */
-
-/* bitpackpages: A list of b-mers (12-mers by default), ending with -1U */
-UINT8
-Bitpack64_offsetptr_huge (UINT8 *end0, Oligospace_T oligo,
-			  UINT4 *bitpackpages, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
-  Oligospace_T bmer;
-  UINT4 *info, nwritten4;
-  UINT8 nwritten8;
-  UINT8 offset0, offset1;
-  UINT4 packsize_div2;
-  int delta, remainder0, remainder1, quarter_block_0, quarter_block_1, column, row;
-#ifdef HAVE_SSE2
-#ifdef BRANCH_FREE_ROW_SUM
-  __m128i diffs[3];
-#else
-  __m128i diffs[2];
-#endif
-#ifdef BRANCH_FREE_QTR_BLOCK
-  UINT8 psums[5];		/* Need 5 to handle case where remainder == 64 */
-#endif
-  __m128i *bitpack;
-  UINT4 *_diffs;
-#else
-  UINT4 ptr;
-  int column, row, k, i;
-  UINT4 diffs[BLOCKSIZE+1], *bitpack;
-#endif
-  UINT4 *pageptr;
-#ifdef DEBUG
-  UINT4 offsets[BLOCKSIZE+1];
-#endif
-
-
-  bmer = oligo/BLOCKSIZE;
-  info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
-
-  debug(printf("Entered Bitpack64_offsetptr_huge with oligo %u => bmer %u\n",oligo,bmer));
-
-  nwritten4 = info[0];		     /* In 128-bit registers */
-  nwritten8 = 4 * (UINT8) nwritten4; /* In 32-bit words */
-#ifdef HAVE_SSE2  
-  bitpack = (__m128i *) &(bitpackcomp[nwritten8]);
-#else
-  bitpack = (UINT4 *) &(bitpackcomp[nwritten8]);
-#endif
-
-  if (bitpackpages == NULL) {
-    offset0 = info[1];
-    offset1 = info[DIFFERENTIAL_METAINFO_SIZE+1];
-  } else {
-    offset0 = 0UL;
-    pageptr = bitpackpages;
-    while (bmer >= *pageptr) {
-      offset0 += POSITIONS_PAGE;
-      pageptr++;
-    }
-
-    offset1 = offset0;
-    if (bmer + 1 >= *pageptr) {
-      offset1 += POSITIONS_PAGE;
-      /* pageptr++; */
-    }
-
-    offset0 += info[1];
-    offset1 += info[DIFFERENTIAL_METAINFO_SIZE+1];
-  }
-
-  /* packsize = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4)*2; */
-  packsize_div2 = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4);
-
-  remainder0 = oligo % BLOCKSIZE;
-  remainder1 = remainder0 + 1;
-  if (remainder1 == 32) {
-    /* For the case (31,32), treat 32 as being in the first half-block.  Otherwise, 32 is in the second half-block */
-    quarter_block_0 = quarter_block_1 = 1;
-  } else {
-    quarter_block_0 = remainder0 / 16;
-    quarter_block_1 = remainder1 / 16;
-  }
-
-  debug(Bitpack64_block_offsets(offsets,oligo,bitpackptrs,bitpackcomp));
-
-#ifdef HAVE_SSE2
-  _diffs = (UINT4 *) diffs;	/* Assumes a dummy register in diffs[0] */
-
-#ifdef BRANCH_FREE_QTR_BLOCK
-  psums[0] = psums[1] = offset0;
-  psums[2] = psums[3] = psums[4] = offset1;
-
-  delta = 31 - abs(remainder1 - 32);
-  column = get_column(delta);
-  row = get_row(delta);
-  debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-  
-  (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-  *end0 = psums[quarter_block_1] + (INT4) (_diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4]);
-
-
-  delta = 31 - abs(remainder0 - 32);
-  column = get_column(delta);
-  row = get_row(delta);
-  debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-  (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-  return psums[quarter_block_0] + (INT4) (_diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4]);
-
-#else
-
-  if (quarter_block_1 <= 1) {
-    delta = remainder1 - 1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    *end0 = offset0 + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-#else
-    assign_sum_fwd(*end0,offset0,_diffs,row);
-#endif
-
-  } else {
-    delta = 63 - remainder1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_1,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_1])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    *end0 = offset1 - _diffs[row+1] - _diffs[row+2] - _diffs[row+3] - _diffs[row+4];
-#else
-    assign_sum_rev(*end0,offset1,_diffs,row);
-#endif
-  }
-
-  if (quarter_block_0 <= 1) {
-    delta = remainder0 - 1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    return offset0 + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-#else
-    return_sum_fwd(offset0,_diffs,row);
-#endif
-
-  } else {
-    delta = 63 - remainder0;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block_0,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block_0])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    return offset1 - _diffs[row+1] - _diffs[row+2] - _diffs[row+3] - _diffs[row+4];
-#else
-    return_sum_rev(offset1,_diffs,row);
-#endif
-  }
-
-#endif
-
-
-#else  /* HAVE_SSE2 */
-
-  /* Unpack all 64 diffs for non-SIMD */
-  (unpacker_all_table[packsize_div2*2])(&(diffs[1]),bitpack);
-
-#ifdef DEBUG
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-	 oligo,oligo % BLOCKSIZE,info[1],info[DIFFERENTIAL_METAINFO_SIZE+1]);
-  printf("bitpack:\n");
-
-  for (i = 1; i <= BLOCKSIZE; i++) {
-    printf("%d ",diffs[i]);
-    if (i % (BLOCKSIZE/4) == 0) {
-      printf("\n");
-    } else if (i % (BLOCKSIZE/8) == 0) {
-      printf("| ");
-    }
-  }
-  printf("\n");
-  printf("end of diffs\n");
-#endif  
-
-  if ((remainder = oligo % BLOCKSIZE) == 0) {
-    ptr = offset0;
-
-  } else if (remainder <= 16) {
-    /* Compute necessary cumulative sums */
-    ptr = offset0 = info[1];
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    /* Compute necessary cumulative sums */
-    ptr = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-  } else {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-  }
-
-  remainder++;
-  if (remainder == 64) {
-    *end0 = offset1;
-
-  } else if (remainder <= 16) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-  } else {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-  }
-
-  return ptr;
-
-#endif	/* HAVE_SSE2 */
-}
-#endif
-
-
-#if 0
-/* bitpackpages: A list of b-mers (12-mers by default), ending with -1U */
-UINT4
-Bitpack64_offsetptr_paired (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
-  UINT4 ptr0;
-  Oligospace_T bmer;
-  UINT4 *info, nwritten4, packsize_div2;
-  UINT8 nwritten8;
-  int delta, remainder, quarter_block, column, row;
-#ifdef HAVE_SSE2
-#ifdef BRANCH_FREE_ROW_SUM
-  __m128i diffs[3];
-#else
-  __m128i diffs[2];
-#endif
-#ifdef BRANCH_FREE_QTR_BLOCK
-  UINT4 psums[5];		/* Need 5 to handle case where remainder == 64 */
-#else
-#endif
-  __m128i *bitpack;
-  UINT4 *_diffs;
-#else
-  UINT4 ptr;
-  int k, i;
-  UINT4 diffs[BLOCKSIZE+1], *bitpack;
-#endif
-#ifdef DEBUG
-  UINT4 offsets[BLOCKSIZE+1];
-#endif
-
-
-  bmer = oligo/BLOCKSIZE;
-  info = &(bitpackptrs[bmer * PAIRED_METAINFO_SIZE]);
-
-  debug(printf("Entered Bitpack64_offsetptr_paired with oligo %u => bmer %u\n",oligo,bmer));
-
-  nwritten4 = info[0];		/* In 128-bit registers */
-  nwritten8 = 4 * (UINT8) nwritten4;			/* In 32-bit words */
-#ifdef HAVE_SSE2  
-  bitpack = (__m128i *) &(bitpackcomp[nwritten8]);
-#else
-  bitpack = (UINT4 *) &(bitpackcomp[nwritten8]);
-#endif
-
-  /* packsize = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4)*2; */
-  packsize_div2 = (info[2] - nwritten4);
-
-  remainder = oligo % BLOCKSIZE;
-  if (remainder == 31) {
-    /* For the case (31,32), treat 32 as being in the first half-block.  Otherwise, 32 is in the second half-block */
-    quarter_block = 1;
-  } else {
-    quarter_block = remainder / 16;
-  }
-
-  debug(Bitpack64_block_offsets(offsets,oligo,bitpackptrs,bitpackcomp));
-
-#ifdef HAVE_SSE2
-  _diffs = (UINT4 *) diffs;	/* Assumes a dummy register in diffs[0] */
-
-  if (quarter_block <= 1) {
-    delta = remainder - 1;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    ptr0 = info[1] + _diffs[row+1] + _diffs[row+2] + _diffs[row+3] + _diffs[row+4];
-#else
-    assign_sum_fwd(ptr0,info[1],_diffs,row);
-#endif
-
-  } else {
-    delta = 63 - remainder;
-    column = get_column(delta);
-    row = get_row(delta);
-    debug(printf("quarter-block %d, delta %d, column %d, row %d\n",quarter_block,delta,column,row));
-
-    (unpacker_table[packsize_div2][column*4 + quarter_block])(diffs,bitpack);
-#ifdef BRANCH_FREE_ROW_SUM
-    ptr0 = info[PAIRED_METAINFO_SIZE+1] - _diffs[row+1] - _diffs[row+2] - _diffs[row+3] - _diffs[row+4];
-#else
-    assign_sum_rev(ptr0,info[PAIRED_METAINFO_SIZE+1],_diffs,row);
-#endif
-  }
-
-  *end0 = ptr0 + Bitpack64_access_dispatch(bitpack,/*nwritten*/info[PAIRED_METAINFO_SIZE]-info[2],
-					   remainder);
-
-  return ptr0;
-
-#else  /* HAVE_SSE2 */
-
-  offset0 = info[1];
-  offset1 = info[DIFFERENTIAL_METAINFO_SIZE+1];
-
-  /* Unpack all 64 diffs for non-SIMD */
-  (unpacker_all_table[packsize_div2*2])(&(diffs[1]),bitpack);
-
-#ifdef DEBUG
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-	 oligo,oligo % BLOCKSIZE,info[1],info[DIFFERENTIAL_METAINFO_SIZE+1]);
-  printf("bitpack:\n");
-
-  for (i = 1; i <= BLOCKSIZE; i++) {
-    printf("%d ",diffs[i]);
-    if (i % (BLOCKSIZE/4) == 0) {
-      printf("\n");
-    } else if (i % (BLOCKSIZE/8) == 0) {
-      printf("| ");
-    }
-  }
-  printf("\n");
-  printf("end of diffs\n");
-#endif  
-
-  if ((remainder = oligo % BLOCKSIZE) == 0) {
-    ptr = offset0;
-
-  } else if (remainder <= 16) {
-    ptr = offset0;
-
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    ptr = offset0;
-
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      ptr += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-
-  } else {
-    ptr = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      ptr -= diffs[k];
-    }
-  }
-
-  remainder++;
-  if (remainder == 64) {
-    *end0 = offset1;
-
-  } else if (remainder <= 16) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 32) {
-    /* Compute necessary cumulative sums */
-    *end0 = offset0;
-
-    /* Add 1 for start at diffs[1], and 1 to leave the first element intact */
-    diffs[0] = 0;
-    column = (remainder - 1) % 4; /* Goes from 0 to 3 */
-    row = (remainder - 1) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-    
-    for (k = column*2 + 1, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-    for (k = column*2 + 2; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Adding diffs[%d] = %u\n",k,diffs[k]));
-      *end0 += diffs[k];
-    }
-
-  } else if (remainder <= 48) {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i < 4; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-    for (k = column*2 + 10; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-
-  } else {
-    *end0 = offset1;
-
-    column = (63 - remainder) % 4; /* Goes from 0 to 3.  Assert remainder < 64 */
-    row = (63 - remainder) / 4;
-    debug(printf("column %d, row %d\n",column,row));
-
-    for (k = column*2 + 9, i = 0; i <= row; k += BLOCKSIZE/4, i++) {
-      debug(printf("Subtracting diffs[%d] = %u\n",k,diffs[k]));
-      *end0 -= diffs[k];
-    }
-  }
-
-  return ptr;
-
-#endif	/* HAVE_SSE2 */
-
-}
-#endif
-
-
-
-/* Needed for poly-T to avoid computing on metablock after the last
-   one to find end0 */
-UINT4
-Bitpack64_read_one (Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
+Bitpack64_read_one (Signature_T signature, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
   Oligospace_T bmer;
   UINT4 *info, nwritten4, packsize_div2;
   UINT8 nwritten8;
@@ -14726,10 +13825,11 @@ Bitpack64_read_one (Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) 
 #endif
 
 
-  bmer = oligo/BLOCKSIZE;
+  bmer = signature/BLOCKSIZE;
   info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
 
-  debug(printf("Entered Bitpack64_read_one with oligo %u => bmer %u\n",oligo,bmer));
+  debug(printf("Entered Bitpack64_read_one with signature %lu => bmer %u\n",
+	       signature,bmer));
 
 #if defined(WORDS_BIGENDIAN)
   nwritten4 = Bigendian_convert_uint(info[0]);		/* In 128-bit registers */
@@ -14751,7 +13851,7 @@ Bitpack64_read_one (Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) 
   packsize_div2 = (info[DIFFERENTIAL_METAINFO_SIZE] - nwritten4);
 #endif
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
 
 #if defined(WORDS_BIGENDIAN) || !defined(HAVE_SSE2)
 
@@ -14904,7 +14004,7 @@ Bitpack64_read_one (Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) 
 /* Needed for poly-T to avoid computing on metablock after the last
    one to find end0 */
 UINT8
-Bitpack64_read_one_huge (Oligospace_T oligo, UINT4 *bitpackpages,
+Bitpack64_read_one_huge (Signature_T signature, UINT4 *bitpackpages,
 			 UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
   /* UINT4 *pageptr; */
   Oligospace_T bmer;
@@ -14934,10 +14034,11 @@ Bitpack64_read_one_huge (Oligospace_T oligo, UINT4 *bitpackpages,
 #endif
 
 
-  bmer = oligo/BLOCKSIZE;
+  bmer = signature/BLOCKSIZE;
   info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
 
-  debug(printf("Entered Bitpack64_read_one_huge with oligo %llu => bmer %u\n",oligo,bmer));
+  debug(printf("Entered Bitpack64_read_one_huge with signature %llu => bmer %u\n",
+	       signature,bmer));
 
 #ifdef WORDS_BIGENDIAN
   nwritten4 = Bigendian_convert_uint(info[0]);		/* In 128-bit registers */
@@ -14968,7 +14069,7 @@ Bitpack64_read_one_huge (Oligospace_T oligo, UINT4 *bitpackpages,
   printf("\n");
 #endif  
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
 
 #if defined(WORDS_BIGENDIAN) || !defined(HAVE_SSE2)
 
@@ -15249,8 +14350,9 @@ Bitpack64_read_one_huge (Oligospace_T oligo, UINT4 *bitpackpages,
 
 /* Unpack all offsets.  Can treat offset0 as a special case */
 void
-Bitpack64_block_offsets (UINT4 *offsets, Oligospace_T oligo,
+Bitpack64_block_offsets (UINT4 *offsets, Signature_T signature,
 			 UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
+  Oligospace_T bmer;
   UINT4 *info, nwritten4;
   UINT8 nwritten8;
   UINT4 offset0, offset1, temp;
@@ -15267,7 +14369,9 @@ Bitpack64_block_offsets (UINT4 *offsets, Oligospace_T oligo,
 #endif
 
 
-  info = &(bitpackptrs[oligo/BLOCKSIZE * DIFFERENTIAL_METAINFO_SIZE]);
+  bmer = signature/BLOCKSIZE;
+  info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
+
 #ifdef WORDS_BIGENDIAN
   nwritten4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */
   nwritten8 = 4 * (UINT8) nwritten4; /* In 32-bit words */
@@ -15295,8 +14399,8 @@ Bitpack64_block_offsets (UINT4 *offsets, Oligospace_T oligo,
 
 
 #ifdef DEBUG
-  printf("oligo: %08X, nwritten %u, offset0 %u, offset1 %u, packsize %d\n",
-	 oligo,nwritten4,offset0,offset1,packsize);
+  printf("signature: %16lX, nwritten %u, offset0 %u, offset1 %u, packsize %d\n",
+	 signature,nwritten4,offset0,offset1,packsize);
 #endif
 
 
@@ -15408,7 +14512,7 @@ Bitpack64_block_offsets (UINT4 *offsets, Oligospace_T oligo,
 #if defined(HAVE_64_BIT) && (defined(UTILITYP) || defined(LARGE_GENOMES))
 /* Unpack all offsets.  Can treat offset0 as a special case */
 void
-Bitpack64_block_offsets_huge (UINT8 *offsets, Oligospace_T oligo,
+Bitpack64_block_offsets_huge (UINT8 *offsets, Signature_T signature,
 			      UINT4 *bitpackpages, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
   UINT4 *pageptr;
   UINT4 *info, nwritten4;
@@ -15427,8 +14531,7 @@ Bitpack64_block_offsets_huge (UINT8 *offsets, Oligospace_T oligo,
   int i;
 #endif
 
-  bmer = oligo/BLOCKSIZE;
-
+  bmer = signature/BLOCKSIZE;
   info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
@@ -15486,8 +14589,8 @@ Bitpack64_block_offsets_huge (UINT8 *offsets, Oligospace_T oligo,
 
 
 #ifdef DEBUG
-  printf("oligo: %08X, nwritten %u, offset0 %u, offset1 %u, packsize %d\n",
-	 oligo,nwritten4,offset0,offset1,packsize);
+  printf("signature: %16lX, nwritten %u, offset0 %u, offset1 %u, packsize %d\n",
+	 signature,nwritten4,offset0,offset1,packsize);
 #endif
 
 
@@ -15599,10 +14702,12 @@ Bitpack64_block_offsets_huge (UINT8 *offsets, Oligospace_T oligo,
 
 
 int
-Bitpack64_differential_packsize (Oligospace_T oligo, UINT4 *bitpackptrs) {
+Bitpack64_differential_packsize (Signature_T signature, UINT4 *bitpackptrs) {
   UINT4 *info, nwritten4;
-
-  info = &(bitpackptrs[oligo/BLOCKSIZE * DIFFERENTIAL_METAINFO_SIZE]);
+  Oligospace_T bmer;
+  
+  bmer = signature/BLOCKSIZE;
+  info = &(bitpackptrs[bmer * DIFFERENTIAL_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
   nwritten4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */

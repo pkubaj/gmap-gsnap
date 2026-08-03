@@ -71,8 +71,13 @@ Altsplice_best_nmatches (T this) {
 }
 
 static inline int
-Altsplice_found_score (T this) {
+Altsplice_distal_nmismatches (T this) {
   return this->distal_nmismatches[this->best_distali];
+}
+
+static inline int
+Altsplice_distal_trimpos (T this) {
+  return this->distal_trimpos[this->best_distali];
 }
 
 extern void

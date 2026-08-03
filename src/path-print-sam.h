@@ -23,7 +23,8 @@ Path_print_sam_nomapping (Filestring_T fp, char *abbrev, Shortread_T queryseq, S
 			  char *acc1, char *acc2, Univ_IIT_T chromosome_iit, Resulttype_T resulttype, bool first_read_p,
 			  int pathnum, int npaths_primary, int npaths_altloc, bool artificial_mate_p, int npaths_mate,
 
-			  T mate, int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p);
+			  T mate, int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
+			  double worker_runtime);
 
 void
 Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
@@ -33,7 +34,7 @@ Path_print_sam (Filestring_T fp, Filestring_T *fp_failedinput, char *abbrev,
 		int pairedlength, int pair_relationship, T mate, Resulttype_T resulttype,
 		bool paired_read_p, bool first_read_p, bool artificial_mate_p, int npaths_mate,
 		int quality_shift, char *sam_read_group_id, bool invertp, bool invert_mate_p,
-		Listpool_T listpool);
+		double worker_runtime, Listpool_T listpool);
 
 void
 Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
@@ -41,7 +42,7 @@ Path_print_sam_paired (Filestring_T fp, Filestring_T *fp_failedinput_1, Filestri
 		       Shortread_T queryseq1, Shortread_T queryseq2,
 		       bool invert_first_p, bool invert_second_p,
 		       bool nofailsp, bool failsonlyp, int quality_shift, char *sam_read_group_id,
-		       Listpool_T listpool);
+		       double worker_runtime, Listpool_T listpool);
 
 extern void
 Path_print_sam_setup (bool add_paired_nomappers_p_in, bool paired_flag_means_concordant_p_in, bool sam_insert_0M_p_in,
@@ -52,7 +53,7 @@ Path_print_sam_setup (bool add_paired_nomappers_p_in, bool paired_flag_means_con
 		      bool *circularp_in, bool clip_overlap_p_in, bool merge_overlap_p_in, bool merge_samechr_p_in,
 		      bool sam_multiple_primaries_p_in, bool sam_sparse_secondaries_p_in,
 		      Univ_IIT_T chromosome_iit_in, Univ_IIT_T transcript_iit_in,
-		      IIT_T snps_iit_in, bool maskedp_in);
+		      IIT_T snps_iit_in, bool maskedp_in, bool timingp_in);
 
 #undef T
 #endif

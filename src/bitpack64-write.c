@@ -5392,7 +5392,7 @@ Bitpack64_write_differential_huge (char *pagesfile, char *ptrsfile, char *compfi
 
     /* Value for start of block */
     while (ascending[positioni] >= nextpage) {
-      fprintf(stderr,"\nAt position %llu (block %llu), ascending %llu >= nextpage %llu",
+      fprintf(stderr,"\nAt position %lu (block %llu), ascending %llu >= nextpage %llu",
 	      positioni,positioni/BLOCKSIZE,ascending[positioni],nextpage);
       pages[pagei++] = positioni/BLOCKSIZE;
       currpage = nextpage;

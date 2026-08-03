@@ -159,6 +159,21 @@ Uint8list_to_array (T list, UINT8 end) {
 }
 
 UINT8 *
+Uint8list_to_array_aligned (T list, UINT8 end) {
+  UINT8 *array;
+  int n, i;
+
+  n = Uint8list_length(list);
+  array = (UINT8 *) MALLOC_ALIGN((n+1)*sizeof(UINT8));
+  for (i = 0; i < n; i++) {
+    array[i] = list->first;
+    list = list->rest;
+  }
+  array[i] = end;
+  return array;
+}
+
+UINT8 *
 Uint8list_to_array_n (int *n, T list) {
   UINT8 *array;
   int i;

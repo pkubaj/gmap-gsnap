@@ -1,11 +1,11 @@
-/* $Id: b84eac7ac6d6b2b5428096dd9d06f6f0dc701856 $ */
 #ifndef STAGE1HR_PAIRED_INCLUDED
 #define STAGE1HR_PAIRED_INCLUDED
 
-#include "stage1hr-paired.h"
-
+#include <stdint.h>
 #include "bool.h"
 #include "ef64.h"
+#include "align-cascade.h"
+#include "cascade-timing.h"
 
 #include "path.h"
 #include "pathpair.h"
@@ -29,6 +29,8 @@
 
 #include "pass.h"
 
+#define STAGE1HR_PAIRED_DEFAULT_SEGMENT_EXACT_MAX_MISMATCH_DIVISOR 20
+
 #define T Stage1_T
 
 extern Pathpair_T *
@@ -38,17 +40,18 @@ Stage1_paired_read (int *npaths_primary, int *npaths_altloc, int *first_absmq, i
 		    T this5, T this3, Shortread_T queryseq5, Shortread_T queryseq3, EF64_T repetitive_ef64,
 		    Knownsplicing_T knownsplicing, Knownindels_T knownindels, Chrpos_T pairmax_linear,
 
-		    int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		    Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		    int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		    int localdb_nmismatches_allowed,
 
-		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool,
+		    Trdiagpool_T trdiagpool, Univdiagpool_T univdiagpool, Segmenteltpool_T segmenteltpool,
 		    Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
 		    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		    Univcoordlistpool_T univcoordlistpool, Listpool_T listpool, 
 		    Trpathpool_T trpathpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 		    Hitlistpool_T hitlistpool, Transcriptpool_T transcriptpool,
-		    Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3, Pass_T pass);
+		    Spliceendsgen_T spliceendsgen5, Spliceendsgen_T spliceendsgen3,
+		    Cascade_Timing_T *cascade_timing, Pass_T pass);
 
 extern void
 Stage1hr_paired_setup (Mode_T mode_in, int index1part_in, int index1interval_in, int index1part_tr_in,
@@ -57,7 +60,25 @@ Stage1hr_paired_setup (Mode_T mode_in, int index1part_in, int index1interval_in,
 		       double user_nmismatches_filter_float_in, double user_mincoverage_filter_float_in,
 		       int max_deletionlen, int max_insertlength, Chrpos_T shortsplicedist_in, bool splicingp_in,
 		       int maxpaths_search_in, int maxpaths_report_in,
-		       bool *circularp_in, int pairmax_linear_in, int pairmax_circular_in);
+		       bool *circularp_in, int pairmax_linear_in, int pairmax_circular_in,
+		       int paired_segment_exact_max_mismatch_divisor_in,
+		       bool paired_mate_rescue_gapped_p_in,
+		       bool paired_preeval_ungapped_mate_p_in,
+		       bool paired_preeval_rescue_skip_p_in,
+		       bool paired_segment_stream_chains_p_in,
+		       bool paired_solve_all_anchor_first_p_in,
+		       bool paired_postsolve_reliable_anchors_first_p_in,
+		       bool paired_seg1_exhaustive_concordance_p_in,
+		       bool paired_duplicate_auxinfo_frontier_p_in,
+		       unsigned int paired_mate_minpure_floor_in,
+		       bool paired_transcript_completion_p_in,
+		       bool paired_tr_adjacent_indel_repair_p_in,
+		       bool tr_chain_search_p_in,
+		       double se_segment_min_kmer_avg_quality_in,
+		       int se_segment_max_kmer_bad_bases_in,
+		       int se_segment_bad_base_quality_in,
+		       int segment_max_avg_kmer_positions_in,
+		       Align_cascade_T align_cascade_in);
 
 extern void
 Stage1hr_paired_pass2_setup (int max_insertlength, Chrpos_T shortsplicedist);
@@ -68,4 +89,3 @@ Stage1hr_paired_localdb_setup (Localdb_T localdb_in);
 
 #undef T
 #endif
-

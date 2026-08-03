@@ -6,6 +6,7 @@
 #endif
 
 #include "pathpair.h"
+#include "debug_groups.h"
 #include "path-eval.h"
 #include "path-trim.h"
 #include "path-solve.h"
@@ -45,7 +46,7 @@ static Univcoord_T genomelength;
 #define subtract_bounded(x,minusterm,lowbound) ((x < lowbound + (minusterm)) ? lowbound : x - (minusterm))
 
 
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_FLOW)
 #define debug0(x) x
 #else
 #define debug0(x)
@@ -59,7 +60,7 @@ static Univcoord_T genomelength;
 #endif
 
 /* Pathpair_resolve */
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PAIRED_DEEP)
 #define debug3(x) x
 #else
 #define debug3(x)
@@ -101,7 +102,7 @@ void
 Pathpair_free (T *old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	       Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 	       Hitlistpool_T hitlistpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_FLOW)
   static int call_i = 0;
 #endif
 
@@ -265,7 +266,7 @@ Pathpair_new_concordant (List_T *unresolved_pathpairs,
 			 Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 			 Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool,
 			 bool check_inner_p, bool copyLp, bool copyHp) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_FLOW)
   static int call_i = 0;
 #endif
 
@@ -288,13 +289,6 @@ Pathpair_new_concordant (List_T *unresolved_pathpairs,
 		  Path_genomiclow(pathL),Path_genomichigh(pathH)));
     return (T) NULL;
 
-  } else if (pathH->main_univdiagonal < pathL->main_univdiagonal) {
-#ifdef CHECK_ASSERTIONS
-    fprintf(stderr,"Pathpair_new_concordant called with non-concordant main_univdiagonals.  Caller should have checked\n");
-    abort();
-#endif
-    return (T) NULL;
-    
   } else {
     if (copyLp == true) {
       newpathL = Path_copy(pathL,intlistpool,univcoordlistpool,listpool,
@@ -583,18 +577,35 @@ find_overlap_for_pathH (bool *extendH_p,Univcoord_T *segmentL_low, Univcoord_T s
 }
 
 
+static bool
+preserve_scored_local_mate_softclip_p (Path_T path) {
+  if (path->method != LOCAL_MATE) {
+    return false;
+  } else if (path->junctions != NULL) {
+    return false;
+  } else if (Path_softclippedp(path) == false) {
+    return false;
+  } else if (path->nmismatches == NULL || Intlist_head(path->nmismatches) < 0) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+
 
 /* TODO: Handle the case where both pathL and pathH need to be
    resolved.  Could get the results of Localdb_get on each end, and if
    multiple, then add an altsplice */
 void
-Pathpair_resolve (int *found_score_5, int *found_score_3,
+Pathpair_resolve (int *found_score_5, int *found_score_3, int *end_score_5, int *end_score_3,
 		  T this, bool plusp, int genestrand,
 		  Compress_T query_compress_L, Compress_T queryL_compress_fwd, Compress_T queryL_compress_rev,
 		  Compress_T query_compress_H, Compress_T queryH_compress_fwd, Compress_T queryH_compress_rev,
 		  Shortread_T queryseqL, Shortread_T queryseqH, char *queryptrL, char *queryptrH,
-		  int querylengthL, int querylengthH, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		  int querylengthL, int querylengthH, 
 		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		  int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		  int localdb_nmismatches_allowed,
 		  
 		  Stage1_T stage1L, Stage1_T stage1H, Knownsplicing_T knownsplicing,
@@ -608,7 +619,7 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
   Univcoord_T goal_univdiagonal;
 #endif
   Univcoord_T low_univdiagonal, high_univdiagonal;
-  int *found_score_ptr_L, *found_score_ptr_H;
+  int *found_score_ptr_L, *found_score_ptr_H, *end_score_ptr_L, *end_score_ptr_H;
 
   Univcoord_T univdiagonal_L, univdiagonal_H, distalL, distalH;
   Univcoord_T segmentL_low, segmentL_high, segmentH_low, segmentH_high, segment_length;
@@ -620,14 +631,26 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
   Junction_T junctionL, junctionH;
   int ninserts;
   bool sense_forward_p, extendL_p, extendH_p;
+  bool preserve_localL_p, preserve_localH_p;
 
 
   pathL = this->pathL;
   pathH = this->pathH;
+  preserve_localL_p = preserve_scored_local_mate_softclip_p(pathL);
+  preserve_localH_p = preserve_scored_local_mate_softclip_p(pathH);
   distalL = Path_genomiclow(pathL);
   distalH = Path_genomichigh(pathH);
-  found_score_ptr_L = (plusp == true) ? found_score_5 : found_score_3;
-  found_score_ptr_H = (plusp == true) ? found_score_3 : found_score_5;
+  if (plusp == true) {
+    found_score_ptr_L = found_score_5;
+    end_score_ptr_L = end_score_5;
+    found_score_ptr_H = found_score_3;
+    end_score_ptr_H = end_score_3;
+  } else {
+    found_score_ptr_L = found_score_3;
+    end_score_ptr_L = end_score_3;
+    found_score_ptr_H = found_score_5;
+    end_score_ptr_H = end_score_5;
+  }
 
   debug3(printf("\nEntering Pathpair_resolve with\n"));
   debug3(Path_print(pathL));
@@ -635,6 +658,9 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
   debug3(printf("insertlength %u\n",Pathpair_insertlength(this)));
 
   if (Intlist_last_value(pathL->endpoints) == querylengthL) {
+    extendL_p = false;
+    junctionH = (Junction_T) NULL;
+  } else if (preserve_localL_p == true || preserve_localH_p == true) {
     extendL_p = false;
     junctionH = (Junction_T) NULL;
   } else {
@@ -648,7 +674,7 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
     segmentL_high = univdiagonal_L - querylengthL + Intlist_last_value(pathL->endpoints);
 
     junctionH = find_overlap_for_pathL(&extendL_p,&cutpointH,segmentL_low,segmentL_high,pathH,querylengthH);
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PAIRED_DEEP)
     printf("Last segment of pathL: %u..%u\n",segmentL_low,segmentL_high);
     if (junctionH != NULL) {
       printf("junctionH: ");
@@ -661,13 +687,16 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
   if (Intlist_head(pathH->endpoints) == 0) {
     extendH_p = false;
     junctionL = (Junction_T) NULL;
+  } else if (preserve_localH_p == true || preserve_localL_p == true) {
+    extendH_p = false;
+    junctionL = (Junction_T) NULL;
   } else {
     univdiagonal_H = Univcoordlist_head(pathH->univdiagonals);
     segmentH_low = univdiagonal_H - querylengthH + Intlist_head(pathH->endpoints); 
     segmentH_high = univdiagonal_H - querylengthH + Intlist_second_value(pathH->endpoints); 
 
     junctionL = find_overlap_for_pathH(&extendH_p,&cutpointL,segmentH_low,segmentH_high,pathL,querylengthL);
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PAIRED_DEEP)
     printf("First segment of pathH: %u..%u\n",segmentH_low,segmentH_high);
     if (junctionL != NULL) {
       printf("junctionL: ");
@@ -765,10 +794,11 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 
 #if 0
     pathL->nmatches = -1;
-    Path_eval_nmatches(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
+    Path_eval_nmatches(&(*found_score_ptr_L),&(*end_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
 #else
     pathL->nmatches = -1;	/* Calls Path_eval_nmatches */
-    Path_trim_chrbounds(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev,
+    Path_trim_chrbounds(&(*found_score_ptr_L),&(*end_score_ptr_L),
+			pathL,queryL_compress_fwd,queryL_compress_rev,
 			intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif    
   }
@@ -840,10 +870,11 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 
 #if 0
     pathH->nmatches = -1;
-    Path_eval_nmatches(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
+    Path_eval_nmatches(&(*found_score_ptr_H),&(*end_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
 #else
     pathH->nmatches = -1;	/* Calls Path_eval_nmatches */
-    Path_trim_chrbounds(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev,
+    Path_trim_chrbounds(&(*found_score_ptr_H),&(*end_score_ptr_H),
+			pathH,queryH_compress_fwd,queryH_compress_rev,
 			intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
   }
@@ -929,7 +960,8 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
     /* Already have alts to consider */
     debug3(printf("Already have alts at qend of pathL\n"));
     
-  } else if (/*qend*/Intlist_last_value(pathL->endpoints) == pathL->querylength) {
+  } else if (/*qend*/Intlist_last_value(pathL->endpoints) == pathL->querylength ||
+	     preserve_localL_p == true || preserve_localH_p == true) {
     /* No need to resolve */
     debug3(printf("No need to resolve qend of pathL\n"));
 
@@ -961,10 +993,11 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 		  low_univdiagonal,high_univdiagonal,
 		  low_univdiagonal - pathH->chroffset,high_univdiagonal - pathH->chroffset));
 
-    Path_qend_resolve(&(*found_score_ptr_L),pathL,low_univdiagonal,high_univdiagonal,
-		      queryptrL,pathL->querylength,streamspace_max_alloc,streamspace_alloc,
+    Path_qend_resolve(&(*found_score_ptr_L),&(*end_score_ptr_L),
+		      pathL,low_univdiagonal,high_univdiagonal,
+		      queryptrL,pathL->querylength,
 		      novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-		      localdb_nmismatches_allowed,
+		      localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
 		      stage1L,knownsplicing,stage1L->indelinfo,
 		      query_compress_L,queryL_compress_fwd,queryL_compress_rev,genestrand,
@@ -979,7 +1012,8 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
     /* Already have alts to consider */
     debug3(printf("Already have alts at qstart of pathH\n"));
 
-  } else if (/*qstart*/Intlist_head(pathH->endpoints) == 0) {
+  } else if (/*qstart*/Intlist_head(pathH->endpoints) == 0 ||
+	     preserve_localH_p == true || preserve_localL_p == true) {
     /* No need to resolve */
     debug3(printf("No need to resolve qstart of pathH\n"));
 
@@ -1011,10 +1045,11 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 		  low_univdiagonal,high_univdiagonal,
 		  low_univdiagonal - pathL->chroffset,high_univdiagonal - pathL->chroffset));
       
-    Path_qstart_resolve(&(*found_score_ptr_H),pathH,low_univdiagonal,high_univdiagonal,
-			queryptrH,pathH->querylength,streamspace_max_alloc,streamspace_alloc,
+    Path_qstart_resolve(&(*found_score_ptr_H),&(*end_score_ptr_H),
+			pathH,low_univdiagonal,high_univdiagonal,
+			queryptrH,pathH->querylength,
 			novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-			localdb_nmismatches_allowed,
+			localdb_tally,localdb_overflowp,max_nblocks,localdb_nmismatches_allowed,
 
 			stage1H,knownsplicing,stage1H->indelinfo,
 			query_compress_H,queryH_compress_fwd,queryH_compress_rev,genestrand,
@@ -1154,23 +1189,27 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 
       if (medial_nmismatches_L < 0 || distal_nmismatches_L < 0) {
 	found_score_ptr_L = (plusp == true) ? found_score_5 : found_score_3;
+	end_score_ptr_L = (plusp == true) ? end_score_5 : end_score_3;
 #if 0
 	pathL->nmatches = -1;
-	Path_eval_nmatches(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
+	Path_eval_nmatches(&(*found_score_ptr_L),&(*end_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
 #else
 	pathL->nmatches = -1;	/* Calls Path_eval_nmatches */
-	Path_trim_chrbounds(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev,
+	Path_trim_chrbounds(&(*found_score_ptr_L),&(*end_score_ptr_L),
+			    pathL,queryL_compress_fwd,queryL_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
       }
       if (medial_nmismatches_H < 0 || distal_nmismatches_H < 0) {
 	found_score_ptr_H = (plusp == true) ? found_score_3 : found_score_5;
+	end_score_ptr_H = (plusp == true) ? end_score_3 : end_score_5;
 #if 0
 	pathH->nmatches = -1;
-	Path_eval_nmatches(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
+	Path_eval_nmatches(&(*found_score_ptr_H),&(*end_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
 #else
 	pathH->nmatches = -1;	/* Calls Path_eval_nmatches */
-	Path_trim_chrbounds(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev,
+	Path_trim_chrbounds(&(*found_score_ptr_H),&(*end_score_ptr_H),
+			    pathH,queryH_compress_fwd,queryH_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
       }
@@ -1246,12 +1285,14 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 
       if (medial_nmismatches_L < 0 || distal_nmismatches_L < 0) {
 	found_score_ptr_L = (plusp == true) ? found_score_5 : found_score_3;
+	end_score_ptr_L = (plusp == true) ? end_score_5 : end_score_3;
 #if 0
 	pathL->nmatches = -1;
-	Path_eval_nmatches(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
+	Path_eval_nmatches(&(*found_score_ptr_L),&(*end_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev);
 #else
 	pathL->nmatches = -1;	/* Calls Path_eval_nmatches */
-	Path_trim_chrbounds(&(*found_score_ptr_L),pathL,queryL_compress_fwd,queryL_compress_rev,
+	Path_trim_chrbounds(&(*found_score_ptr_L),&(*end_score_ptr_L),
+			    pathL,queryL_compress_fwd,queryL_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
       }
@@ -1321,12 +1362,14 @@ Pathpair_resolve (int *found_score_5, int *found_score_3,
 
       if (medial_nmismatches_H < 0 || distal_nmismatches_H < 0) {
 	found_score_ptr_H = (plusp == true) ? found_score_3 : found_score_5;
+	end_score_ptr_H = (plusp == true) ? end_score_3 : end_score_5;
 #if 0
 	pathH->nmatches = -1;
-	Path_eval_nmatches(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
+	Path_eval_nmatches(&(*found_score_ptr_H),&(*end_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev);
 #else
 	pathH->nmatches = -1;	/* Calls Path_eval_nmatches */
-	Path_trim_chrbounds(&(*found_score_ptr_H),pathH,queryH_compress_fwd,queryH_compress_rev,
+	Path_trim_chrbounds(&(*found_score_ptr_H),&(*end_score_ptr_H),
+			    pathH,queryH_compress_fwd,queryH_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool);
 #endif
       }
@@ -1469,7 +1512,7 @@ Pathpair_filter (List_T pathpairs, Intlistpool_T intlistpool, Univcoordlistpool_
   debug0(printf("Have max_splice_prob %f and max_nmatches %d\n",max_splice_prob,max_nmatches));
   for (p = pathpairs; p != NULL; p = List_next(p)) {
     pathpair = (T) List_head(p);
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_FLOW)
     printf("This path has %f+%f splice prob\n",
 	   pathpair->pathL->total_splice_prob,pathpair->pathH->total_splice_prob);
     printf("This path has %d+%d nmatches\n",
@@ -1511,7 +1554,7 @@ Pathpair_filter (List_T pathpairs, Intlistpool_T intlistpool, Univcoordlistpool_
     debug0(printf("Have min_insertlength %u\n",min_insertlength));
     for (p = pathpairs; p != NULL; p = List_next(p)) {
       pathpair = (T) List_head(p);
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_FLOW)
       printf("This path has %u insertlength\n",
 	     pathpair->pathH->main_univdiagonal - pathpair->pathL->main_univdiagonal);
       Path_print(pathpair->pathL);
@@ -3225,5 +3268,3 @@ Pathpair_pass2_setup (int expected_pairlength, int pairlength_deviation) {
   return;
 }
 #endif
-
-

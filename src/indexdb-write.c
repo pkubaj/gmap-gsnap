@@ -62,12 +62,14 @@
 #include "indexdbdef.h"
 #include "iit-read-univ.h"
 #include "indexdb.h"
+#include "minpure.h"
 
 #include "bitpack64-read.h"
 #include "bitpack64-write.h"
 #include "bitpack64-access.h"
 #include "bitpack64-incr.h"
 
+#include "signature.h"
 
 #define MAX_BITPACK_BLOCKSIZE 64
 
@@ -92,8 +94,6 @@
 #else
 #define debug1(x)
 #endif
-
-
 
 
 /************************************************************************
@@ -190,7 +190,7 @@ check_offsets_from_bitpack (char *offsetsmetafile, char *offsetsstrmfile, Positi
 #endif
 
   for (oligoi = 0UL; oligoi < oligospace; oligoi += blocksize) {
-    Bitpack64_block_offsets(offsets_decoded,oligoi,offsetsmeta,offsetsstrm);
+    Bitpack64_block_offsets(offsets_decoded,oligoi,offsetsmeta,offsetsstrm,index1part,msize);
     for (i = 0; i <= blocksize; i++) {
       if (offsets_decoded[i] != offsets[oligoi+i]) {
 	fprintf(stderr,"Problem with bitpack at oligo %llu+%llu = %llu: %llu != %llu.  Please inform twu@gene.com\n",
@@ -248,7 +248,7 @@ check_offsets_from_bitpack_huge (char *offsetspagesfile, char *offsetsmetafile, 
 #endif
 
   for (oligoi = 0UL; oligoi < oligospace; oligoi += blocksize) {
-    Bitpack64_block_offsets_huge(offsets64,oligoi,offsetspages,offsetsmeta,offsetsstrm);
+    Bitpack64_block_offsets_huge(offsets64,oligoi,offsetspages,offsetsmeta,offsetsstrm,index1part,msize);
     for (i = 0; i <= 64; i++) {
       if (offsets64[i] != offsets[oligoi+i]) {
 #ifdef OLIGOSPACE_NOT_LONG
@@ -470,7 +470,8 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 #else
 		       Width_T index1part,
 #endif
-		       Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p) {
+		       Width_T index1interval, Width_T msize,
+		       bool genome_lc_p, char *fileroot, bool mask_lowercase_p) {
   char *uppercaseCode;
   char *pointersfile, *offsetsfile;
   char *filesuffix;
@@ -480,6 +481,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 
   char *comma;
   int c, nchrs, chrnum;
+  Signature_T signature, signaturespace;
   Oligospace_T oligospace, bmerspace;
   Univcoord_T position = 0, next_chrbound, total_genomelength;
   Chrpos_T chrpos = 0U;
@@ -489,6 +491,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
   Shortoligomer_T high = 0U, low = 0U, carry;
 #endif
   Oligospace_T bmer;
+  int npos = index1part - msize + 1;
 
 #ifdef PMAP
   int alphabet_size;
@@ -496,7 +499,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
   Shortoligomer_T aaindex;
   int index1part_nt = 3*index1part_aa;
 #else
-  Oligospace_T masked, mask;
+  Signature_T masked, mask;
   int between_counter, in_counter;
 #endif
 #ifdef DEBUG1
@@ -514,6 +517,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 #ifdef PMAP
   alphabet_size = Alphabet_get_size(alphabet);
   oligospace = power(alphabet_size,index1part_aa);
+  signaturespace = npos * (Signature_T) oligospace;
   between_counter[0] = between_counter[1] = between_counter[2] = 0;
   in_counter[0] = in_counter[1] = in_counter[2] = 0;
 
@@ -524,10 +528,11 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
   mask = ~(~0U << 2*index1part);
 #endif
   oligospace = power(4,index1part);
+  signaturespace = npos * (Signature_T) oligospace;
   between_counter = in_counter = 0;
 #endif
 
-  bmerspace = oligospace/BLOCKSIZE;
+  bmerspace = signaturespace/BLOCKSIZE;
   fprintf(stderr,"Allocating %llu*%d bytes for packsizes\n",
 	  (unsigned long long) bmerspace,(int) sizeof(char));
   packsizes = (char *) CALLOC_NO_EXCEPTION(bmerspace,sizeof(char));
@@ -652,6 +657,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 #endif
 
 #ifdef PMAP
+    /* Amino acids */
     debug(printf("frame=%d char=%c bc=%d ic=%d high=%08X low=%08X\n",
 		 frame,c,between_counter[frame],in_counter[frame],high,low));
 
@@ -690,12 +696,13 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
 #endif
 
-	bmer = aaindex/BLOCKSIZE;
-	if (Bitpack64_access_filledp(aaindex,(int) packsizes[bmer],bitpacks[bmer]) == true) {
+	signature = Signature_get(aaindex);
+	bmer = signature/BLOCKSIZE;
+	if (Bitpack64_access_filledp(signature,(int) packsizes[bmer],bitpacks[bmer]) == true) {
 	  bitpacks[bmer] = Bitpack64_realloc_one((int) packsizes[bmer],bitpacks[bmer]);
 	  packsizes[bmer] += 2;
 	}
-	Bitpack64_incr_bitpack(aaindex,(int) packsizes[bmer],bitpacks[bmer]);
+	Bitpack64_incr_bitpack(signature,packsizes[bmer],bitpacks[bmer]);
 
 	between_counter[frame] = 0;
       }
@@ -703,6 +710,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
     }
 
 #else
+    /* Nucleotides */
     if (in_counter == index1part) {
       if (
 #ifdef NONMODULAR
@@ -712,13 +720,13 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 #endif
 	  ) {
 	masked = oligo & mask;
-	bmer = masked/BLOCKSIZE;
-
-	if (Bitpack64_access_filledp(masked,(int) packsizes[bmer],bitpacks[bmer]) == true) {
+	signature = Signature_get(masked);
+	bmer = signature/BLOCKSIZE;
+	if (Bitpack64_access_filledp(signature,(int) packsizes[bmer],bitpacks[bmer]) == true) {
 	  bitpacks[bmer] = Bitpack64_realloc_one((int) packsizes[bmer],bitpacks[bmer]);
 	  packsizes[bmer] += 2;
 	}
-	Bitpack64_incr_bitpack(masked,(int) packsizes[bmer],bitpacks[bmer]);
+	Bitpack64_incr_bitpack(signature,packsizes[bmer],bitpacks[bmer]);
 
 	between_counter = 0;
       }
@@ -759,32 +767,66 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
   filesuffix = IDX_FILESUFFIX;
 #endif
 
-  pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				 strlen(".")+strlen(filesuffix)+
-				 /*for kmer*/2+/*for interval char*/1+
-				 strlen("offsets64meta")+1,sizeof(char));
+  if (msize == index1part) {
+    pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				   strlen(".")+strlen(filesuffix)+
+				   /*for kmer*/2+/*for interval char*/1+
+				   strlen("offsets64meta")+1,sizeof(char));
+
 #ifdef PMAP
-  sprintf(pointersfile,"%s/%s.%s.%s%d%c%s",
-	  destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64meta");
+    sprintf(pointersfile,"%s/%s.%s.%s%d%c%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64meta");
 #else
-  sprintf(pointersfile,"%s/%s.%s%02d%c%s",
-	  destdir,fileroot,filesuffix,index1part,interval_char,"offsets64meta");
-#endif
-	
-  offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				strlen(".")+strlen(filesuffix)+
-				/*for kmer*/2+/*for interval char*/1+
-				strlen("offsets64strm")+1,sizeof(char));
-#ifdef PMAP
-  sprintf(offsetsfile,"%s/%s.%s.%s%d%c%s",
-	  destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64strm");
-#else
-  sprintf(offsetsfile,"%s/%s.%s%02d%c%s",
-	  destdir,fileroot,filesuffix,index1part,interval_char,"offsets64strm");
+    sprintf(pointersfile,"%s/%s.%s%02d%c%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,"offsets64meta");
 #endif
 
-  fprintf(stderr,"Writing %llu offsets compressed via bitpack64...",oligospace+1UL);
-  Bitpack64_write_differential_bitpacks(pointersfile,offsetsfile,packsizes,bitpacks,oligospace);
+    offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				  strlen(".")+strlen(filesuffix)+
+				  /*for kmer*/2+/*for interval char*/1+
+				  strlen("offsets64strm")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(offsetsfile,"%s/%s.%s.%s%d%c%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64strm");
+#else
+    sprintf(offsetsfile,"%s/%s.%s%02d%c%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,"offsets64strm");
+#endif
+
+  } else {
+    /* Using minimizers */
+    pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				   strlen(".")+strlen(filesuffix)+
+				   /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+				   strlen("offsets64meta")+1,sizeof(char));
+
+#ifdef PMAP
+    sprintf(pointersfile,"%s/%s.%s.%s%d%c%d%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,msize,
+	    "offsets64meta");
+#else
+    sprintf(pointersfile,"%s/%s.%s%02d%c%02d%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,msize,
+	    "offsets64meta");
+#endif
+
+    offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				  strlen(".")+strlen(filesuffix)+
+				  /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+				  strlen("offsets64strm")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(offsetsfile,"%s/%s.%s.%s%d%c%d%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,msize,
+	    "offsets64strm");
+#else
+    sprintf(offsetsfile,"%s/%s.%s%02d%c%02d%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,msize,
+	    "offsets64strm");
+#endif
+  }
+
+  fprintf(stderr,"Writing %llu offsets compressed via bitpack64...",signaturespace+1UL);
+  Bitpack64_write_differential_bitpacks(pointersfile,offsetsfile,packsizes,bitpacks,signaturespace);
   fprintf(stderr,"done\n");
 
   FREE(offsetsfile);
@@ -800,6 +842,112 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 }
 
 
+#ifndef PMAP
+void
+Indexdb_write_pure_minimizer_stats (char *destdir, FILE *sequence_fp, Univ_IIT_T chromosome_iit,
+				    Width_T index1part, Width_T index1interval,
+				    Width_T pure_minimizer_stats_m,
+				    bool genome_lc_p, char *fileroot, bool mask_lowercase_p) {
+  char *uppercaseCode;
+  char *comma;
+  int c, nchrs, chrnum;
+  Univcoord_T position = 0, next_chrbound, total_genomelength;
+  Chrpos_T chrpos = 0U;
+  Oligospace_T oligo = 0U, mask;
+  int in_counter = 0;
+  int circular_typeint;
+  Minpure_Stats_T minpure_stats;
+
+  if (pure_minimizer_stats_m <= 0) {
+    return;
+  } else if (pure_minimizer_stats_m > index1part) {
+    fprintf(stderr,"Selected pure minimizer stats size %d cannot exceed k-mer size %d\n",
+	    pure_minimizer_stats_m,index1part);
+    exit(9);
+  } else if (pure_minimizer_stats_m > MINPURE_MAX_M) {
+    fprintf(stderr,"Selected pure minimizer stats size %d is not allowed.  Maximum dense table size is m=%d\n",
+	    pure_minimizer_stats_m,MINPURE_MAX_M);
+    exit(9);
+  }
+
+  if (mask_lowercase_p == false) {
+    uppercaseCode = UPPERCASE_U2T; /* We are reading DNA sequence */
+  } else {
+    uppercaseCode = NO_UPPERCASE;
+  }
+
+  if (index1part >= (int) (8 * sizeof(Oligospace_T) / 2)) {
+    mask = (Oligospace_T) -1;
+  } else {
+    mask = ~((Oligospace_T) -1 << 2*index1part);
+  }
+
+  minpure_stats = Minpure_stats_new(index1part,pure_minimizer_stats_m);
+
+  total_genomelength = Univ_IIT_genomelength(chromosome_iit,/*with_circular_alias_p*/true);
+  circular_typeint = Univ_IIT_typeint(chromosome_iit,"circular");
+  chrnum = 1;
+  nchrs = Univ_IIT_total_nintervals(chromosome_iit);
+  next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint);
+
+  while (position < total_genomelength) {
+    c = Compress_get_char(sequence_fp,position,genome_lc_p);
+    assert(c != EOF);
+
+    in_counter++;
+
+    if (position % MONITOR_INTERVAL == 0) {
+      comma = Genomicpos_commafmt(position);
+      fprintf(stderr,"Counting pure minimizer stats in genome %s (%d bp contexts, m=%d), position %s\n",
+	      fileroot,index1part,pure_minimizer_stats_m,comma);
+      FREE(comma);
+    }
+
+    switch (uppercaseCode[c]) {
+    case 'A': oligo = (oligo << 2); break;
+    case 'C': oligo = (oligo << 2) | 1U; break;
+    case 'G': oligo = (oligo << 2) | 2U; break;
+    case 'T': oligo = (oligo << 2) | 3U; break;
+    case 'X': case 'N':
+      oligo = 0U;
+      in_counter = 0;
+      break;
+    default:
+      if (genome_lc_p == true) {
+	oligo = 0U;
+	in_counter = 0;
+      } else {
+	fprintf(stderr,"Bad character %c at position %llu\n",c,(unsigned long long) position);
+	abort();
+      }
+    }
+
+    if (in_counter == index1part) {
+      Minpure_stats_add_kmer(minpure_stats,oligo & mask);
+      in_counter--;
+    }
+
+    chrpos++;			/* Needs to go here, before we reset chrpos to 0 */
+    if (position >= next_chrbound) {
+      oligo = 0U;
+      in_counter = 0;
+
+      chrpos = 0U;
+      chrnum++;
+      while (chrnum <= nchrs && (next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint)) < position) {
+	chrnum++;
+      }
+    }
+    position++;
+  }
+
+  Minpure_stats_write(minpure_stats,destdir,fileroot,index1interval);
+  Minpure_stats_free(&minpure_stats);
+
+  return;
+}
+#endif
+
 
 #ifdef HAVE_64_BIT
 
@@ -810,7 +958,8 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 #else
 			    Width_T index1part,
 #endif
-			    Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p) {
+			    Width_T index1interval, Width_T msize,
+			    bool genome_lc_p, char *fileroot, bool mask_lowercase_p) {
   char *uppercaseCode;
   char *pagesfile, *pointersfile, *offsetsfile;
   char *filesuffix;
@@ -827,6 +976,7 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 
   char *comma;
   int c, nchrs, chrnum;
+  Signature_T signature, signaturespace;
   Oligospace_T oligospace, bmerspace;
   Univcoord_T position = 0, next_chrbound, total_genomelength;
   Chrpos_T chrpos = 0U;
@@ -836,6 +986,7 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
   Shortoligomer_T high = 0U, low = 0U, carry;
 #endif
   Oligospace_T bmer;
+  int npos = index1part - msize + 1;
 
 #ifdef PMAP
   int alphabet_size;
@@ -861,6 +1012,7 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 #ifdef PMAP
   alphabet_size = Alphabet_get_size(alphabet);
   oligospace = power(alphabet_size,index1part_aa);
+  signaturespace = npos * (Signature_T) oligospace;
   between_counter[0] = between_counter[1] = between_counter[2] = 0;
   in_counter[0] = in_counter[1] = in_counter[2] = 0;
 
@@ -871,6 +1023,7 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
   mask = ~(~0U << 2*index1part);
 #endif
   oligospace = power(4,index1part);
+  signaturespace = npos * (Signature_T) oligospace;
   between_counter = in_counter = 0;
 #endif
 
@@ -879,17 +1032,18 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
      packsizes and bitpacks */
 
 #ifdef COUNTS_WITHOUT_COMPRESSION
-  fprintf(stderr,"Allocating %llu*%d bytes for counts\n",(unsigned long long) oligospace+1,(int) sizeof(UINT4));
+  fprintf(stderr,"Allocating %llu*%d bytes for counts\n",
+	  signaturespace+1,(int) sizeof(UINT4));
   counts = (UINT4 *) CALLOC_NO_EXCEPTION(oligospace + 1,sizeof(UINT4));
   if (counts == NULL) {
     fprintf(stderr,"Unable to allocate %llu bytes of memory, needed to build offsets with %d-mers\n",
-	    (unsigned long long) (oligospace+1UL)*sizeof(UINT4),index1part);
+	    (signaturespace+1UL)*sizeof(UINT4),index1part);
     fprintf(stderr,"Either find a computer with more RAM, or lower your value for the k-mer size\n");
     exit(9);
   }
 #endif
 
-  bmerspace = oligospace/BLOCKSIZE;
+  bmerspace = signaturespace/BLOCKSIZE;
 
   fprintf(stderr,"Allocating %llu*%d bytes for packsizes\n",
 	  (unsigned long long) bmerspace,(int) sizeof(char));
@@ -1052,13 +1206,14 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 #else
 	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
 #endif
-	bmer = aaindex/BLOCKSIZE;
 
-	if (Bitpack64_access_filledp(aaindex,(int) packsizes[bmer],bitpacks[bmer]) == true) {
+	signature = Signature_get(aaindex);
+	bmer = signature/BLOCKSIZE;
+	if (Bitpack64_access_filledp(signature,(int) packsizes[bmer],bitpacks[bmer]) == true) {
 	  bitpacks[bmer] = Bitpack64_realloc_one((int) packsizes[bmer],bitpacks[bmer]);
 	  packsizes[bmer] += 2;
 	}
-	Bitpack64_incr_bitpack(aaindex,(int) packsizes[bmer],bitpacks[bmer]);
+	Bitpack64_incr_bitpack(signature,packsizes[bmer],bitpacks[bmer]);
 
 	between_counter[frame] = 0;
       }
@@ -1066,6 +1221,7 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
     }
 
 #else
+    /* Nucleotides */
     if (in_counter == index1part) {
       if (
 #ifdef NONMODULAR
@@ -1078,24 +1234,25 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 
 #ifdef COUNTS_WITHOUT_COMPRESSION
 	/* Computation without compression */
-	oligoi = masked + 1;
-	counts[oligoi] += 1;
+	signaturei = masked + 1;
+	counts[signaturei] += 1;
 	debug(printf("Found oligo %06X.  Incremented counts for %llu to be %llu\n",
-		     masked,(unsigned long long) oligoi,(unsigned long long) counts[oligoi]));
+		     masked,(unsigned long long) signaturei,(unsigned long long) counts[oligoi]));
 #endif
 
 	/* Computation with compression */
-	bmer = masked/BLOCKSIZE;
-	if (Bitpack64_access_filledp(masked,(int) packsizes[bmer],bitpacks[bmer]) == true) {
+	signature = Signature_get(masked);
+	bmer = signature/BLOCKSIZE;
+	if (Bitpack64_access_filledp(signature,(int) packsizes[bmer],bitpacks[bmer]) == true) {
 	  bitpacks[bmer] = Bitpack64_realloc_one((int) packsizes[bmer],bitpacks[bmer]);
 	  packsizes[bmer] += 2;
 	}
-	Bitpack64_incr_bitpack(masked,(int) packsizes[bmer],bitpacks[bmer]);
+	Bitpack64_incr_bitpack(signature,packsizes[bmer],bitpacks[bmer]);
 
 #ifdef COUNTS_WITHOUT_COMPRESSION
-	if (counts[oligoi] != Bitpack64_access_bitpack(masked,packsizes[bmer],bitpacks[bmer])) {
-	  fprintf(stderr,"Failed to compute with compression for masked %llu, packsize %d\n",
-		  masked,packsizes[bmer]);
+	if (counts[oligoi] != Bitpack64_access_bitpack(signature,packsizes,bitpacks)) {
+	  fprintf(stderr,"Failed to compute with compression for masked %llu, signature %llu\n",
+		  masked,signature);
 	  abort();
 	}
 #endif
@@ -1139,41 +1296,91 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
   filesuffix = IDX_FILESUFFIX;
 #endif
 
-  pagesfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-			      strlen(".")+strlen(filesuffix)+
-			      /*for kmer*/2+/*for interval char*/1+
-			      strlen("offsets64pages")+1,sizeof(char));
-#ifdef PMAP
-  sprintf(pagesfile,"%s/%s.%s.%s%d%c%s",
-	  destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64pages");
-#else
-  sprintf(pagesfile,"%s/%s.%s%02d%c%s",
-	  destdir,fileroot,filesuffix,index1part,interval_char,"offsets64pages");
-#endif
-
-  pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-				 strlen(".")+strlen(filesuffix)+
-				 /*for kmer*/2+/*for interval char*/1+
-				 strlen("offsets64meta")+1,sizeof(char));
-#ifdef PMAP
-  sprintf(pointersfile,"%s/%s.%s.%s%d%c%s",
-	  destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64meta");
-#else
-  sprintf(pointersfile,"%s/%s.%s%02d%c%s",
-	  destdir,fileroot,filesuffix,index1part,interval_char,"offsets64meta");
-#endif
-	
-  offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+  if (msize == index1part) {
+    pagesfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
 				strlen(".")+strlen(filesuffix)+
 				/*for kmer*/2+/*for interval char*/1+
-				strlen("offsets64strm")+1,sizeof(char));
+				strlen("offsets64pages")+1,sizeof(char));
 #ifdef PMAP
-  sprintf(offsetsfile,"%s/%s.%s.%s%d%c%s",
-	  destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64strm");
+    sprintf(pagesfile,"%s/%s.%s.%s%d%c%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,
+	    "offsets64pages");
 #else
-  sprintf(offsetsfile,"%s/%s.%s%02d%c%s",
-	  destdir,fileroot,filesuffix,index1part,interval_char,"offsets64strm");
+    sprintf(pagesfile,"%s/%s.%s%02d%c%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,
+	    "offsets64pages");
 #endif
+
+    pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				   strlen(".")+strlen(filesuffix)+
+				   /*for kmer*/2+/*for interval char*/1+
+				   strlen("offsets64meta")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(pointersfile,"%s/%s.%s.%s%d%c%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,
+	    "offsets64meta");
+#else
+    sprintf(pointersfile,"%s/%s.%s%02d%c%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,
+	    "offsets64meta");
+#endif
+	
+    offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				  strlen(".")+strlen(filesuffix)+
+				  /*for kmer*/2+/*for interval char*/1+
+				  strlen("offsets64strm")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(offsetsfile,"%s/%s.%s.%s%d%c%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,"offsets64strm");
+#else
+    sprintf(offsetsfile,"%s/%s.%s%02d%c%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,"offsets64strm");
+#endif
+
+  } else {
+    /* Using minimizers */
+    pagesfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				strlen(".")+strlen(filesuffix)+
+				/*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+				strlen("offsets64pages")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(pagesfile,"%s/%s.%s.%s%d%c%d%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,msize,
+	    "offsets64pages");
+#else
+    sprintf(pagesfile,"%s/%s.%s%02d%c%d%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,msize,
+	    "offsets64pages");
+#endif
+
+    pointersfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				   strlen(".")+strlen(filesuffix)+
+				   /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+				   strlen("offsets64meta")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(pointersfile,"%s/%s.%s.%s%d%c%d%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,msize,
+	    "offsets64meta");
+#else
+    sprintf(pointersfile,"%s/%s.%s%02d%c%02d%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,msize,
+	    "offsets64meta");
+#endif
+	
+    offsetsfile = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+				  strlen(".")+strlen(filesuffix)+
+				  /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+				  strlen("offsets64strm")+1,sizeof(char));
+#ifdef PMAP
+    sprintf(offsetsfile,"%s/%s.%s.%s%d%c%d%s",
+	    destdir,fileroot,Alphabet_string(alphabet),filesuffix,index1part_aa,interval_char,msize,
+	    "offsets64strm");
+#else
+    sprintf(offsetsfile,"%s/%s.%s%02d%c%02d%s",
+	    destdir,fileroot,filesuffix,index1part,interval_char,msize,
+	    "offsets64strm");
+#endif
+  }
 
   fprintf(stderr,"Writing %llu offsets compressed via bitpack64...",oligospace+1UL);
 #ifdef COUNTS_WITHOUT_COMPRESSION
@@ -1206,13 +1413,14 @@ Indexdb_bitpack_counter (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #ifdef PMAP
 			 int alphabet_size, Width_T index1part_aa
 #else
-			 Width_T index1part
+			 Width_T index1part,
 #endif
-			 ) {
+			 Width_T msize) {
   UINT4 *countermeta;
   UINT4 nvectors;
   UINT4 *offsets = NULL, k;
-  Oligospace_T oligospace, oligoi;
+  Signature_T signaturespace, signaturei, npos = index1part - msize + 1;
+  Oligospace_T oligospace;
   Blocksize_T packsize;
 #ifdef HAVE_BUILTIN_CLZ
 #elif defined(HAVE_ASM_BSR)
@@ -1225,10 +1433,11 @@ Indexdb_bitpack_counter (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #else
   oligospace = power(4,index1part);
 #endif
+  signaturespace = npos * (Signature_T) oligospace;
+
   offsets = (UINT4 *) MALLOC((BLOCKSIZE + 1) * sizeof(UINT4));
 
-
-  countermeta = (UINT4 *) MALLOC((oligospace/BLOCKSIZE + 1) * sizeof(UINT4));
+  countermeta = (UINT4 *) MALLOC((signaturespace/BLOCKSIZE + 1) * sizeof(UINT4));
 
   fprintf(stderr,"Expanding offsetsstrm into counters...");
 #if defined(LARGE_GENOMES)
@@ -1237,9 +1446,9 @@ Indexdb_bitpack_counter (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #else
   k = 0;
   nvectors = 0;
-  for (oligoi = 0ULL; oligoi < oligospace; oligoi += BLOCKSIZE) {
+  for (signaturei = 0ULL; signaturei < signaturespace; signaturei += BLOCKSIZE) {
     countermeta[k++] = nvectors;
-    packsize = Bitpack64_differential_packsize(oligoi,offsetsmeta);
+    packsize = Bitpack64_differential_packsize(signaturei,offsetsmeta);
 
     /* nvectors += (packsize * blocksize)/128; */
     nvectors += packsize / 2;	/* For blocksize of 64 => *64/128 */
@@ -1263,14 +1472,15 @@ Indexdb_bitpack_counter_huge (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #ifdef PMAP
 			      int alphabet_size, Width_T index1part_aa
 #else
-			      Width_T index1part
+			      Width_T index1part,
 #endif
-			      ) {
+			      Width_T msize) {
   UINT4 *countermeta;
   UINT4 nvectors;
   UINT8 *offsets = NULL;
   UINT4 k;
-  Oligospace_T oligospace, oligoi;
+  Signature_T signaturespace, signaturei, npos = index1part - msize + 1;
+  Oligospace_T oligospace;
   /* Oligospace_T bmerspace; */
   /* UINT4 *pageptr; */
   /* int npages; */
@@ -1286,18 +1496,19 @@ Indexdb_bitpack_counter_huge (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #else
   oligospace = power(4,index1part);
 #endif
-  /* bmerspace = oligospace/BLOCKSIZE; */
+  signaturespace = npos * (Signature_T) oligospace;
+  /* bmerspace = signaturespace/BLOCKSIZE; */
   offsets = (UINT8 *) MALLOC((BLOCKSIZE + 1) * sizeof(UINT8));
 
 
-  countermeta = (UINT4 *) MALLOC((oligospace/BLOCKSIZE + 1) * sizeof(UINT4));
+  countermeta = (UINT4 *) MALLOC((signaturespace/BLOCKSIZE + 1) * sizeof(UINT4));
 
   fprintf(stderr,"Expanding offsetsstrm into counters...");
   k = 0;
   nvectors = 0;
-  for (oligoi = 0ULL; oligoi < oligospace; oligoi += BLOCKSIZE) {
+  for (signaturei = 0ULL; signaturei < signaturespace; signaturei += BLOCKSIZE) {
     countermeta[k++] = nvectors;
-    packsize = Bitpack64_differential_packsize(oligoi,offsetsmeta);
+    packsize = Bitpack64_differential_packsize(signaturei,offsetsmeta);
 
     /* nvectors += (packsize * blocksize)/128; */
     nvectors += packsize / 2;	/* For blocksize of 64 => *64/128 */
@@ -1316,596 +1527,6 @@ Indexdb_bitpack_counter_huge (UINT4 **counterstrm, UINT4 *offsetsmeta,
 
 
 
-#if 0
-static bool
-need_to_sort_p (Univcoord_T *positions, int length) {
-  Univcoord_T prevpos;
-  int j;
-
-  prevpos = positions[0];
-  for (j = 1; j < length; j++) {
-    if (positions[j] <= prevpos) {
-      return true;
-    } else {
-      prevpos = positions[j];
-    }
-  }
-  return false;
-}
-#endif
-
-
-#if 0
-static void
-positions_move_absolute_1 (int positions_fd, Positionsptr_T ptr) {
-  off_t offset = ptr*sizeof(unsigned char);
-
-  if (lseek(positions_fd,offset,SEEK_SET) < 0) {
-    fprintf(stderr,"Attempted to do lseek on offset %zu*%zu=%zu\n",
-	    (size_t) ptr,sizeof(unsigned char),(size_t) offset);
-    perror("Error in indexdb.c, positions_move_absolute_1");
-    exit(9);
-  }
-  return;
-}
-#endif
-
-#if 0
-static void
-positions_move_absolute_4 (int positions_fd, Positionsptr_T ptr) {
-  off_t offset = ptr*sizeof(UINT4);
-
-  if (lseek(positions_fd,offset,SEEK_SET) < 0) {
-    fprintf(stderr,"Attempted to do lseek on offset %zu*%zu=%zu\n",
-	    (size_t) ptr,sizeof(UINT4),(size_t) offset);
-    perror("Error in indexdb.c, positions_move_absolute_4");
-    exit(9);
-  }
-  return;
-}
-#endif
-
-#if 0
-/* Replaced by positions_move_absolute_1 and positions_move_absolute_4 */
-static void
-positions_move_absolute_8 (int positions_fd, Positionsptr_T ptr) {
-  off_t offset = ptr*((off_t) sizeof(UINT8));
-
-  if (lseek(positions_fd,offset,SEEK_SET) < 0) {
-    fprintf(stderr,"Attempted to do lseek on offset %zu*%zu=%zu\n",
-	    (size_t) ptr,sizeof(UINT8),(size_t) offset);
-    perror("Error in indexdb.c, positions_move_absolute_8");
-    exit(9);
-  }
-  return;
-}
-#endif
-
-
-#if 0
-/* Old method */
-
-/* Works directly in file, so we don't need to allocate memory */
-static void
-compute_positions_in_file (int positions_high_fd, int positions_low_fd, Positionsptr_T *offsets,
-			   FILE *sequence_fp, Univ_IIT_T chromosome_iit,
-#ifdef PMAP
-			   Width_T index1part_aa, bool watsonp,
-#else
-			   Width_T index1part,
-#endif
-			   Width_T index1interval, bool genome_lc_p, char *fileroot,
-			   bool mask_lowercase_p, bool coord_values_8p) {
-  char *uppercaseCode;
-  Univcoord_T position = 0, next_chrbound, total_genomelength;
-  UINT8 adjposition8;
-  UINT4 adjposition4;
-  Chrpos_T chrpos = 0U;
-  char *comma;
-  int c, nchrs, chrnum;
-#ifdef PMAP
-  int frame = -1, between_counter[3], in_counter[3];
-  Storedoligomer_T high = 0U, low = 0U, carry;
-  Storedoligomer_T aaindex;
-  Width_T index1part_nt = 3*index1part_aa;
-#else
-  Oligospace_T oligo = 0U, masked, mask;
-  int between_counter = 0, in_counter = 0;
-#endif
-  int circular_typeint;
-
-#ifdef ADDSENTINEL
-  Oligospace_T oligospace, oligoi;
-  oligospace = power(4,index1part);
-#endif
-
-  if (mask_lowercase_p == false) {
-    uppercaseCode = UPPERCASE_U2T; /* We are reading DNA sequence */
-  } else {
-    uppercaseCode = NO_UPPERCASE;
-  }
-
-#ifdef PMAP
-  /* oligospace = power(alphabet_size,index1part_aa); */
-#else
-#ifdef HAVE_64_BIT
-  mask = ~(~0ULL << 2*index1part);
-#else
-  mask = ~(~0U << 2*index1part);
-#endif
-  /* oligospace = power(4,index1part); */
-#endif
-
-  /* Handle reference strain */
-  total_genomelength = Univ_IIT_genomelength(chromosome_iit,/*with_circular_alias_p*/true);
-  circular_typeint = Univ_IIT_typeint(chromosome_iit,"circular");
-  chrnum = 1;
-  nchrs = Univ_IIT_total_nintervals(chromosome_iit);
-  next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint);
-
-  while (position < total_genomelength) {
-    c = Compress_get_char(sequence_fp,position,genome_lc_p);
-    assert(c != EOF);
-
-#ifdef PMAP
-    if (++frame == 3) {
-      frame = 0;
-    }
-    between_counter[frame] += 1;
-    in_counter[frame] += 1;
-#else
-    between_counter++;
-    in_counter++;
-#endif
-
-    if (position % MONITOR_INTERVAL == 0) {
-      comma = Genomicpos_commafmt(position);
-#ifdef PMAP
-      fprintf(stderr,"Indexing positions of oligomers in genome %s (%d aa every %d aa), position %s",
-	      fileroot,index1part_aa,index1interval,comma);
-#else
-      fprintf(stderr,"Indexing positions of oligomers in genome %s (%d bp every %d bp), position %s",
-	      fileroot,index1part,index1interval,comma);
-#endif
-      FREE(comma);
-#ifdef PMAP
-      if (watsonp == true) {
-	fprintf(stderr," (fwd)");
-      } else {
-	fprintf(stderr," (rev)");
-      }
-#endif
-      fprintf(stderr,"\n");
-    }
-
-#ifdef PMAP
-    carry = (low >> 30);
-    switch (uppercaseCode[c]) {
-    case 'A': low = (low << 2); break;
-    case 'C': low = (low << 2) | 1; break;
-    case 'G': low = (low << 2) | 2; break;
-    case 'T': low = (low << 2) | 3; break;
-    case 'X': case 'N': 
-      high = low = carry = 0U;
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-      break;
-    default: 
-      if (genome_lc_p == true) {
-	high = low = carry = 0U;
-	in_counter[0] = in_counter[1] = in_counter[2] = 0;
-      } else {
-	fprintf(stderr,"Bad character %c at position %u\n",c,position);
-	abort();
-      }
-    }
-    high = (high << 2) | carry; 
-#else
-    switch (uppercaseCode[c]) {
-    case 'A': oligo = (oligo << 2); break;
-    case 'C': oligo = (oligo << 2) | 1; break;
-    case 'G': oligo = (oligo << 2) | 2; break;
-    case 'T': oligo = (oligo << 2) | 3; break;
-    case 'X': case 'N': oligo = 0U; in_counter = 0; break;
-    default: 
-      if (genome_lc_p == true) {
-	oligo = 0U; in_counter = 0;
-      } else {
-	fprintf(stderr,"Bad character %c at position %llu\n",c,(unsigned long long) position);
-	abort();
-      }
-    }
-#endif
-
-    /*
-    debug(printf("char=%c bc=%d ic=%d oligo=%016lX\n",
-		 c,between_counter,in_counter,oligo));
-    */
-    
-#ifdef PMAP
-    if (in_counter[frame] > 0) {
-      if (watsonp == true) {
-	if (Alphabet_get_codon_fwd(low) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-      } else {
-	if (Alphabet_get_codon_rev(low) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-      }
-    }
-    if (in_counter[frame] == index1part_aa + 1) {
-      if (between_counter[frame] >= index1interval) {
-	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
-	if (coord_values_8p == true) {
-	  positions_move_absolute_1(positions_high_fd,offsets[aaindex]);
-	  positions_move_absolute_4(positions_low_fd,offsets[aaindex]);
-	  offsets[aaindex] += 1;
-	  if (watsonp == true) {
-	    adjposition8 =  position - index1part_nt + 1;
-	  } else {
-	    adjposition8 = position;
-	  }
-	  WRITE_CHAR((unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT),positions_high_fd);
-	  WRITE_UINT((UINT4) (adjposition8 & POSITIONS8_LOW_MASK),positions_low_fd);
-	} else {
-	  positions_move_absolute_4(positions_low_fd,offsets[aaindex]);
-	  offsets[aaindex] += 1;
-	  if (watsonp == true) {
-	    adjposition4 = (UINT4) (position - index1part_nt + 1);
-	  } else {
-	    adjposition4 = (UINT4) position;
-	  }
-	  WRITE_UINT(adjposition4,positions_low_fd);
-	}
-	between_counter[frame] = 0;
-      }
-      in_counter[frame] -= 1;
-    }
-#else
-    if (in_counter == index1part) {
-      if (
-#ifdef NONMODULAR
-	  between_counter >= index1interval
-#else
-	  (chrpos-index1part+1U) % index1interval == 0
-#endif
-	  ) {
-	masked = oligo & mask;
-	if (coord_values_8p == true) {
-	  positions_move_absolute_1(positions_high_fd,offsets[masked]);
-	  positions_move_absolute_4(positions_low_fd,offsets[masked]);
-	  offsets[masked] += 1;
-	  adjposition8 = position - index1part + 1;
-	  WRITE_CHAR((unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT),positions_high_fd);
-	  WRITE_UINT((UINT4) (adjposition8 & POSITIONS8_LOW_MASK),positions_low_fd);
-	} else {
-	  positions_move_absolute_4(positions_low_fd,offsets[masked]);
-	  offsets[masked] += 1;
-	  adjposition4 = (UINT4) (position - index1part + 1);
-	  WRITE_UINT(adjposition4,positions_low_fd);
-	}
-	between_counter = 0;
-      }
-      in_counter--;
-    }
-#endif
-    
-    chrpos++;			/* Needs to go here, before we reset chrpos to 0 */
-    if (position >= next_chrbound) {
-#ifdef PMAP
-      high = low = carry = 0U;
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-      oligo = 0U; in_counter = 0;
-#endif
-      chrpos = 0U;
-      chrnum++;
-      while (chrnum <= nchrs && (next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint)) < position) {
-	chrnum++;
-      }
-    }
-    position++;
-  }
-
-#ifdef ADDSENTINEL
-  if (coord_values_8p == true) {
-    for (oligoi = 0; oligoi < oligospace; oligoi++) {
-      positions_move_absolute_1(positions_high_fd,offsets[oligoi]);
-      positions_move_absolute_4(positions_low_fd,offsets[oligoi]);
-      WRITE_CHAR((unsigned char) (((UINT8) -1) >> POSITIONS8_HIGH_SHIFT),positions_high_fd);
-      WRITE_UINT((UINT4) (((UINT8) -1) & POSITIONS8_LOW_SHIFT),positions_low_fd);
-    }
-  } else {
-    for (oligoi = 0; oligoi < oligospace; oligoi++) {
-      positions_move_absolute_4(positions_low_fd,offsets[oligoi]);
-      WRITE_UINT((UINT4) -1,positions_low_fd);
-    }
-  }
-#endif
-
-  return;
-}
-#endif
-
-
-#if 0
-/* Old method */
-
-/* Requires sufficient memory to hold all positions */
-static void
-compute_positions_in_memory (UINT4 *positions4, unsigned char *positions8_high, UINT4 *positions8_low,
-			     Positionsptr_T *offsets, FILE *sequence_fp, Univ_IIT_T chromosome_iit,
-#ifdef PMAP
-			     Width_T index1part_aa, bool watsonp,
-#else
-			     Width_T index1part,
-#endif
-			     Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p,
-			     bool coord_values_8p) {
-  char *uppercaseCode;
-  Univcoord_T position = 0, next_chrbound, total_genomelength;
-  Chrpos_T chrpos = 0U;
-  char *comma;
-  int c, nchrs, chrnum;
-  UINT8 adjposition8;
-  Positionsptr_T offset;
-
-#ifdef HAVE_64_BIT
-  Oligospace_T oligo = 0ULL;
-#else
-  Shortoligomer_T high = 0U, low = 0U, carry;
-#endif
-
-#ifdef PMAP
-  int frame = -1, between_counter[3], in_counter[3];
-  Oligospace_T aaindex;
-  Width_T index1part_nt = 3*index1part_aa;
-  debug1(char *aa);
-#else
-  Oligospace_T masked, mask;
-  int between_counter, in_counter;
-  debug1(char *nt);
-#endif
-
-  int circular_typeint;
-
-  if (mask_lowercase_p == false) {
-    uppercaseCode = UPPERCASE_U2T; /* We are reading DNA sequence */
-  } else {
-    uppercaseCode = NO_UPPERCASE;
-  }
-
-#ifdef PMAP
-  between_counter[0] = between_counter[1] = between_counter[2] = 0;
-  in_counter[0] = in_counter[1] = in_counter[2] = 0;
-
-#else
-#ifdef HAVE_64_BIT
-  mask = ~(~0ULL << 2*index1part);
-#else
-  mask = ~(~0U << 2*index1part);
-#endif
-  between_counter = in_counter = 0;
-#endif
-
-
-  /* Handle reference strain */
-  total_genomelength = Univ_IIT_genomelength(chromosome_iit,/*with_circular_alias_p*/true);
-  circular_typeint = Univ_IIT_typeint(chromosome_iit,"circular");
-  chrnum = 1;
-  nchrs = Univ_IIT_total_nintervals(chromosome_iit);
-  next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint);
-
-  while (position < total_genomelength) {
-    c = Compress_get_char(sequence_fp,position,genome_lc_p);
-    assert(c != EOF);
-
-#ifdef PMAP
-    if (++frame == 3) {
-      frame = 0;
-    }
-    between_counter[frame] += 1;
-    in_counter[frame] += 1;
-#else
-    between_counter++;
-    in_counter++;
-#endif
-
-    if (position % MONITOR_INTERVAL == 0) {
-      comma = Genomicpos_commafmt(position);
-#ifdef PMAP
-      fprintf(stderr,"Indexing positions of oligomers in genome %s (%d aa every %d aa), position %s",
-	      fileroot,index1part_aa,index1interval,comma);
-#else
-      fprintf(stderr,"Indexing positions of oligomers in genome %s (%d bp every %d bp), position %s",
-	      fileroot,index1part,index1interval,comma);
-#endif
-      FREE(comma);
-#ifdef PMAP
-      if (watsonp == true) {
-	fprintf(stderr," (fwd)");
-      } else {
-	fprintf(stderr," (rev)");
-      }
-#endif
-      fprintf(stderr,"\n");
-    }
-
-#ifdef HAVE_64_BIT
-    switch (uppercaseCode[c]) {
-    case 'A': oligo = (oligo << 2); break;
-    case 'C': oligo = (oligo << 2) | 1U; break;
-    case 'G': oligo = (oligo << 2) | 2U; break;
-    case 'T': oligo = (oligo << 2) | 3U; break;
-    case 'X': case 'N':
-      oligo = 0U;
-#ifdef PMAP
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-      in_counter = 0;
-#endif
-      break;
-    default: 
-      if (genome_lc_p == true) {
-	oligo = 0U;
-#ifdef PMAP
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-      in_counter = 0;
-#endif
-      } else {
-	fprintf(stderr,"Bad character %c at position %llu\n",c,(unsigned long long) position);
-	abort();
-      }
-    }
-
-#else
-    carry = (low >> 30);
-    switch (uppercaseCode[c]) {
-    case 'A': low = (low << 2); break;
-    case 'C': low = (low << 2) | 1U; break;
-    case 'G': low = (low << 2) | 2U; break;
-    case 'T': low = (low << 2) | 3U; break;
-    case 'X': case 'N': 
-      high = low = carry = 0U; 
-#ifdef PMAP
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-      in_counter = 0;
-#endif
-      break;
-    default: 
-      if (genome_lc_p == true) {
-	high = low = carry = 0U;
-#ifdef PMAP
-	in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-	in_counter = 0;
-#endif
-      } else {
-	fprintf(stderr,"Bad character %c at position %u\n",c,position);
-	abort();
-      }
-    }
-    high = (high << 2) | carry; 
-#endif
-
-#ifdef PMAP
-    debug(printf("frame=%d char=%c bc=%d ic=%d high=%08X low=%08X\n",
-		 frame,c,between_counter[frame],in_counter[frame],high,low));
-    
-    if (in_counter[frame] > 0) {
-      if (watsonp == true) {
-#ifdef HAVE_64_BIT
-	if (Alphabet_get_codon_fwd(oligo) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-#else
-	if (Alphabet_get_codon_fwd(low) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-#endif
-      } else {
-#ifdef HAVE_64_BIT
-	if (Alphabet_get_codon_rev(oligo) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-#else
-	if (Alphabet_get_codon_rev(low) == AA_STOP) {
-	  in_counter[frame] = 0; 
-	}
-#endif
-      }
-    }
-    if (in_counter[frame] == index1part_aa + 1) {
-      if (between_counter[frame] >= index1interval) {
-#ifdef HAVE_64_BIT
-	aaindex = Alphabet_get_aa_index(oligo,watsonp,index1part_nt);
-#else
-	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
-#endif
-	offset = Bitpack64_read_one(aaindex,offsetsmeta,offsetsstrm) + Bitpack64_incr(aaindex,countermeta,counterstrm);
-	if (coord_values_8p == true) {
-	  if (watsonp == true) {
-	    adjposition8 = position - index1part_nt + 1;
-	    positions8_high[offset] = (unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT);
-	    positions8_low[offset] = (UINT4) (adjposition8 & POSITIONS8_LOW_MASK);
-	    debug1(adjposition = position-index1part_nt+1UL);
-	  } else {
-	    positions8_high[offset] = (unsigned char) (position >> POSITIONS8_HIGH_SHIFT);
-	    positions8_low[offset] = (UINT4) (position & POSITIONS8_LOW_MASK);
-	    debug1(adjposition = position);
-	  }
-	} else {
-	  if (watsonp == true) {
-	    positions4[offset] = (UINT4) (position - index1part_nt + 1);
-	    debug1(adjposition = position - index1part_nt + 1);
-	  } else {
-	    positions4[offset] = (UINT4) position;
-	    debug1(adjposition = position);
-	  }
-	}
-
-	between_counter[frame] = 0;
-      }
-      in_counter[frame] -= 1;
-    }
-
-#else
-    if (in_counter == index1part) {
-      if (
-#ifdef NONMODULAR
-	  between_counter >= index1interval
-#else
-	  (chrpos-index1part+1U) % index1interval == 0
-#endif
-	  ) {
-	masked = oligo & mask;
-	offset = Bitpack64_read_one(masked,offsetsmeta,offsetsstrm) + Bitpack64_incr(masked,countermeta,counterstrm);
-	if (coord_values_8p == true) {
-	  adjposition8 = position - index1part + 1;
-	  positions8_high[offset] = (unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT);
-	  positions8_low[offset] = (UINT4) (adjposition8 & POSITIONS8_LOW_MASK);
-	} else {
-	  positions4[offset] = (UINT4) (position - index1part + 1);
-	}
-	debug1(nt = shortoligo_nt(masked,index1part);
-	       printf("Storing %s at %llu, chrpos %u\n",nt,(unsigned long long) (position-index1part+1U),chrpos-index1part+1U);
-	       FREE(nt));
-
-	between_counter = 0;
-      }
-      in_counter--;
-    }
-#endif
-    
-    chrpos++;			/* Needs to go here, before we reset chrpos to 0 */
-    if (position >= next_chrbound) {
-      debug1(printf("Skipping because position %u is at chrbound\n",position));
-#ifndef PMAP
-      oligo = 0;
-      in_counter = 0;
-#elif defined(HAVE_64_BIT)
-      oligo = 0ULL;
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#else
-      high = low = carry = 0U;
-      in_counter[0] = in_counter[1] = in_counter[2] = 0;
-#endif
-
-      chrpos = 0U;
-      chrnum++;
-      while (chrnum <= nchrs && (next_chrbound = Univ_IIT_next_chrbound(chromosome_iit,chrnum,circular_typeint)) < position) {
-	chrnum++;
-      }
-    }
-    position++;
-  }
-
-  return;
-}
-#endif
-
 
 /* Requires sufficient memory to hold all positions */
 static void
@@ -1913,9 +1534,9 @@ compute_positions (UINT4 *positions4, unsigned char *positions8_high, UINT4 *pos
 		   UINT4 *offsetsmeta, UINT4 *offsetsstrm, UINT4 *countermeta, UINT4 *counterstrm,
 		   FILE *sequence_fp, Univ_IIT_T chromosome_iit,
 #ifdef PMAP
-		   Width_T index1part_aa, bool watsonp,
+		   Width_T index1part_aa, Width_T msize, bool watsonp,
 #else
-		   Width_T index1part,
+		   Width_T index1part, Width_T msize,
 #endif
 		   Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p,
 		   bool coord_values_8p) {
@@ -1932,6 +1553,7 @@ compute_positions (UINT4 *positions4, unsigned char *positions8_high, UINT4 *pos
 #else
   Shortoligomer_T high = 0U, low = 0U, carry;
 #endif
+  Signature_T signature;
 
 #ifdef PMAP
   int frame = -1, between_counter[3], in_counter[3];
@@ -2096,7 +1718,8 @@ compute_positions (UINT4 *positions4, unsigned char *positions8_high, UINT4 *pos
 #else
 	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
 #endif
-	offset = Bitpack64_read_one(aaindex,offsetsmeta,offsetsstrm) + Bitpack64_incr(aaindex,countermeta,counterstrm);
+	signature = Signature_get(aaindex);
+	offset = Bitpack64_read_one(signature,offsetsmeta,offsetsstrm) + Bitpack64_incr(signature,countermeta,counterstrm);
 	if (coord_values_8p == true) {
 	  if (watsonp == true) {
 	    adjposition8 = position - index1part_nt + 1;
@@ -2133,7 +1756,10 @@ compute_positions (UINT4 *positions4, unsigned char *positions8_high, UINT4 *pos
 #endif
 	  ) {
 	masked = oligo & mask;
-	offset = Bitpack64_read_one(masked,offsetsmeta,offsetsstrm) + Bitpack64_incr(masked,countermeta,counterstrm);
+	signature = Signature_get(masked);
+	offset = Bitpack64_read_one(signature,offsetsmeta,offsetsstrm) + Bitpack64_incr(signature,countermeta,counterstrm);
+	debug1(printf("Storing position %u at offset %lu\n",
+		      position - index1part + 1,offset));
 	if (coord_values_8p == true) {
 	  adjposition8 = position - index1part + 1;
 	  positions8_high[offset] = (unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT);
@@ -2185,9 +1811,9 @@ compute_positions_huge_offsets (UINT4 *positions4, unsigned char *positions8_hig
 				UINT4 *countermeta, UINT4 *counterstrm,
 				FILE *sequence_fp, Univ_IIT_T chromosome_iit,
 #ifdef PMAP
-				Width_T index1part_aa, bool watsonp,
+				Width_T index1part_aa, Width_T msize, bool watsonp,
 #else
-				Width_T index1part,
+				Width_T index1part, Width_T msize,
 #endif
 				Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p,
 				bool coord_values_8p) {
@@ -2204,6 +1830,7 @@ compute_positions_huge_offsets (UINT4 *positions4, unsigned char *positions8_hig
 #else
   Shortoligomer_T high = 0U, low = 0U, carry;
 #endif
+  Signature_T signature;
 
 #ifdef PMAP
   int frame = -1, between_counter[3], in_counter[3];
@@ -2369,8 +1996,9 @@ compute_positions_huge_offsets (UINT4 *positions4, unsigned char *positions8_hig
 #else
 	aaindex = Alphabet_get_aa_index(high,low,watsonp,index1part_nt);
 #endif
-	offset = Bitpack64_read_one_huge(aaindex,offsetspages,offsetsmeta,offsetsstrm) +
-	  Bitpack64_incr(aaindex,countermeta,counterstrm);
+	signature = Signature_get(aaindex);
+	offset = Bitpack64_read_one_huge(signature,offsetspages,offsetsmeta,offsetsstrm) +
+	  Bitpack64_incr(signature,countermeta,counterstrm);
 	if (coord_values_8p == true) {
 	  if (watsonp == true) {
 	    adjposition8 = position - index1part_nt + 1;
@@ -2407,8 +2035,9 @@ compute_positions_huge_offsets (UINT4 *positions4, unsigned char *positions8_hig
 #endif
 	  ) {
 	masked = oligo & mask;
-	offset = Bitpack64_read_one_huge(masked,offsetspages,offsetsmeta,offsetsstrm) +
-	  Bitpack64_incr(masked,countermeta,counterstrm);
+	signature = Signature_get(masked);
+	offset = Bitpack64_read_one_huge(signature,offsetspages,offsetsmeta,offsetsstrm) +
+	  Bitpack64_incr(signature,countermeta,counterstrm);
 	if (coord_values_8p == true) {
 	  adjposition8 = position - index1part + 1;
 	  positions8_high[offset] = (unsigned char) (adjposition8 >> POSITIONS8_HIGH_SHIFT);
@@ -2459,15 +2088,18 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
 #ifdef PMAP
 			 Alphabet_T alphabet, int index1part_aa, bool watsonp,
 #else
-			 int index1part,
+			 Width_T index1part,
 #endif
-			 int index1interval, Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
+			 int index1interval, Width_T msize,
+			 Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
 			 char *fileroot, bool mask_lowercase_p, bool coord_values_8p) {
   FILE *positions_high_fp, *positions_low_fp; /* For building positions in memory */
   /* int positions_high_fd, positions_low_fd; */ /* For building positions in file */
   int offsetsmeta_fd, offsetsstrm_fd;
   size_t offsetsmeta_len, offsetsstrm_len;
   UINT4 *offsetsmeta, *offsetsstrm, *countermeta, *counterstrm;
+
+  Signature_T signaturespace, npos = index1part - msize + 1;
   Oligospace_T oligospace;
   Positionsptr_T totalcounts, count;
   UINT4 *positions4;
@@ -2497,8 +2129,9 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
 #else
   oligospace = power(4,index1part);
 #endif
+  signaturespace = npos * (Signature_T) oligospace;
 
-  totalcounts = Bitpack64_read_one(oligospace,offsetsmeta,offsetsstrm);
+  totalcounts = Bitpack64_read_one(signaturespace,offsetsmeta,offsetsstrm);
   if (totalcounts == 0) {
     if (
 #ifdef PMAP
@@ -2532,9 +2165,9 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
     }
   } else {
 #ifdef PMAP
-    countermeta = Indexdb_bitpack_counter(&counterstrm,offsetsmeta,alphabet_size,index1part_aa);
+    countermeta = Indexdb_bitpack_counter(&counterstrm,offsetsmeta,alphabet_size,index1part_aa,msize);
 #else
-    countermeta = Indexdb_bitpack_counter(&counterstrm,offsetsmeta,index1part);
+    countermeta = Indexdb_bitpack_counter(&counterstrm,offsetsmeta,index1part,msize);
 #endif
   }
 
@@ -2602,13 +2235,13 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
 #ifdef PMAP
       compute_positions(/*positions4*/NULL,positions8_high,positions8_low,
 			offsetsmeta,offsetsstrm,countermeta,counterstrm,
-			sequence_fp,chromosome_iit,index1part_aa,watsonp,
+			sequence_fp,chromosome_iit,index1part_aa,msize,watsonp,
 			index1interval,genome_lc_p,fileroot,
 			mask_lowercase_p,/*coord_values_8p*/true);
 #else
       compute_positions(/*positions4*/NULL,positions8_high,positions8_low,
 			offsetsmeta,offsetsstrm,countermeta,counterstrm,
-			sequence_fp,chromosome_iit,index1part,
+			sequence_fp,chromosome_iit,index1part,msize,
 			index1interval,genome_lc_p,fileroot,
 			mask_lowercase_p,/*coord_values_8p*/true);
 #endif
@@ -2704,13 +2337,13 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
       compute_positions(positions4,/*positions8_high*/NULL,/*positions8_low*/NULL,
 			offsetsmeta,offsetsstrm,countermeta,counterstrm,
 			sequence_fp,chromosome_iit,
-			index1part_aa,watsonp,index1interval,genome_lc_p,fileroot,
+			index1part_aa,msize,watsonp,index1interval,genome_lc_p,fileroot,
 			mask_lowercase_p,/*coord_values_8p*/false);
 #else
       compute_positions(positions4,/*positions8_high*/NULL,/*positions8_low*/NULL,
 			offsetsmeta,offsetsstrm,countermeta,counterstrm,
 			sequence_fp,chromosome_iit,
-			index1part,index1interval,genome_lc_p,fileroot,
+			index1part,msize,index1interval,genome_lc_p,fileroot,
 			mask_lowercase_p,/*coord_values_8p*/false);
 #endif
       fprintf(stderr,"Writing %u genomic positions to file %s ...\n",
@@ -2769,14 +2402,18 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
 #ifdef PMAP
 				      Alphabet_T alphabet, int index1part_aa, bool watsonp,
 #else
-				      int index1part,
+				      Width_T index1part,
 #endif
-				      int index1interval, Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
+				      int index1interval, Width_T msize,
+				      Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
 				      char *fileroot, bool mask_lowercase_p, bool coord_values_8p) {
   FILE *positions_high_fp, *positions_low_fp; /* For building positions in memory */
   int offsetspages_fd, offsetsmeta_fd, offsetsstrm_fd;
   size_t offsetspages_len, offsetsmeta_len, offsetsstrm_len;
   UINT4 *offsetspages, *offsetsmeta, *offsetsstrm, *countermeta, *counterstrm;
+
+  int npos = index1part - msize + 1;
+  Signature_T signaturespace;
   Oligospace_T oligospace;
   Hugepositionsptr_T totalcounts;
   UINT4 *positions4;
@@ -2814,8 +2451,9 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
   oligospace = power(4,index1part);
   oligospace = power(4,index1part);
 #endif
+  signaturespace = npos * (Signature_T) oligospace;
 
-  totalcounts = Bitpack64_read_one_huge(oligospace,offsetspages,offsetsmeta,offsetsstrm);
+  totalcounts = Bitpack64_read_one_huge(signaturespace,offsetspages,offsetsmeta,offsetsstrm);
   if (totalcounts == 0) {
     if (
 #ifdef PMAP
@@ -2852,9 +2490,9 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
 
   } else {
 #ifdef PMAP
-    countermeta = Indexdb_bitpack_counter_huge(&counterstrm,offsetsmeta,alphabet_size,index1part_aa);
+    countermeta = Indexdb_bitpack_counter_huge(&counterstrm,offsetsmeta,alphabet_size,index1part_aa,msize);
 #else
-    countermeta = Indexdb_bitpack_counter_huge(&counterstrm,offsetsmeta,index1part);
+    countermeta = Indexdb_bitpack_counter_huge(&counterstrm,offsetsmeta,index1part,msize);
 #endif
   }
 
@@ -2883,13 +2521,13 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
 #ifdef PMAP
       compute_positions_huge_offsets(/*positions4*/NULL,positions8_high,positions8_low,
 				     offsetspages,offsetsmeta,offsetsstrm,countermeta,counterstrm,
-				     sequence_fp,chromosome_iit,index1part_aa,watsonp,
+				     sequence_fp,chromosome_iit,index1part_aa,msize,watsonp,
 				     index1interval,genome_lc_p,fileroot,
 				     mask_lowercase_p,/*coord_values_8p*/true);
 #else
       compute_positions_huge_offsets(/*positions4*/NULL,positions8_high,positions8_low,
 				     offsetspages,offsetsmeta,offsetsstrm,countermeta,counterstrm,
-				     sequence_fp,chromosome_iit,index1part,index1interval,
+				     sequence_fp,chromosome_iit,index1part,msize,index1interval,
 				     genome_lc_p,fileroot,mask_lowercase_p,/*coord_values_8p*/true);
 #endif
       fprintf(stderr,"Writing %llu genomic positions to files %s and %s...\n",
@@ -2969,12 +2607,12 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
 #ifdef PMAP
       compute_positions_huge_offsets(positions4,/*positions8_high*/NULL,/*positions8_low*/NULL,
 				     offsetspages,offsetsmeta,offsetsstrm,countermeta,counterstrm,
-				     sequence_fp,chromosome_iit,index1part_aa,watsonp,index1interval,
+				     sequence_fp,chromosome_iit,index1part_aa,msize,watsonp,index1interval,
 				     genome_lc_p,fileroot,mask_lowercase_p,/*coord_values_8p*/false);
 #else
       compute_positions_huge_offsets(positions4,/*positions8_high*/NULL,/*positions8_low*/NULL,
 				     offsetspages,offsetsmeta,offsetsstrm,countermeta,counterstrm,
-				     sequence_fp,chromosome_iit,index1part,index1interval,
+				     sequence_fp,chromosome_iit,index1part,msize,index1interval,
 				     genome_lc_p,fileroot,mask_lowercase_p,/*coord_values_8p*/false);
 #endif
       fprintf(stderr,"Writing %llu genomic positions to file %s ...\n",
@@ -3025,5 +2663,4 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
   return;
 }
 #endif
-
 

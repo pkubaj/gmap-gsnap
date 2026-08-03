@@ -1,5 +1,3 @@
-#define DEBUG1 1
-static char rcsid[] = "$Id: 961a451cb8493b9829c9f730ab4c030ea448c65d $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -132,6 +130,7 @@ Junction_new_insertion (int nindels, Pathpool_T pathpool) {
 
   new->type = INS_JUNCTION;
   new->nindels = nindels;
+  new->annotatedp = false;
 
   new->splice_distance = 0;
   new->sensedir = 0;
@@ -150,6 +149,7 @@ Junction_new_deletion (int nindels, Pathpool_T pathpool) {
 
   new->type = DEL_JUNCTION;
   new->nindels = nindels;
+  new->annotatedp = false;
 
   new->splice_distance = 0;
   new->sensedir = 0;
@@ -174,6 +174,7 @@ Junction_new_splice (Chrpos_T splice_distance, int sensedir, double donor_prob, 
   } else {
     new->type = SPLICE_JUNCTION;
     new->nindels = 0;
+    new->annotatedp = false;
 
     new->splice_distance = splice_distance;
     new->sensedir = sensedir;
@@ -188,6 +189,20 @@ Junction_new_splice (Chrpos_T splice_distance, int sensedir, double donor_prob, 
 
 
 T
+Junction_new_splice_annotated (Chrpos_T splice_distance, int sensedir,
+			       double donor_prob, double acceptor_prob,
+			       Pathpool_T pathpool) {
+  T new = Junction_new_splice(splice_distance,sensedir,donor_prob,acceptor_prob,pathpool);
+
+  if (Junction_type(new) == SPLICE_JUNCTION) {
+    new->annotatedp = true;
+  }
+
+  return new;
+}
+
+
+T
 Junction_new_ambig_splice (int sensedir, double donor_prob, double acceptor_prob,
 			   Pathpool_T pathpool) {
   T new = Pathpool_new_junction(pathpool
@@ -195,6 +210,7 @@ Junction_new_ambig_splice (int sensedir, double donor_prob, double acceptor_prob
 
   new->type = SPLICE_JUNCTION;
   new->nindels = 0;
+  new->annotatedp = false;
 
   new->splice_distance = 0;    /* A zero splice distance is created for ambiguous splices */
   new->sensedir = sensedir;
@@ -213,6 +229,7 @@ Junction_new_chimera (char donor1, char donor2, char acceptor1, char acceptor2,
 
   new->type = CHIMERA_JUNCTION;
   new->nindels = 0;
+  new->annotatedp = false;
 
   new->splice_distance = 0;
   new->sensedir = 0;
@@ -235,6 +252,7 @@ Junction_new_unsolved (Pathpool_T pathpool) {
 
   new->type = UNSOLVED_JUNCTION;
   new->nindels = 0;
+  new->annotatedp = false;
 
   new->splice_distance = 0;
   new->sensedir = 0;
@@ -256,6 +274,7 @@ Junction_copy (T old, Pathpool_T pathpool) {
 
     new->type = old->type;
     new->nindels = old->nindels;
+    new->annotatedp = old->annotatedp;
 
     new->splice_distance = old->splice_distance;
     new->sensedir = old->sensedir;
@@ -289,6 +308,15 @@ Junction_type (T this) {
     return UNSOLVED_JUNCTION;
   } else {
     return this->type;
+  }
+}
+
+bool
+Junction_annotatedp (T this) {
+  if (this == JUNCTION_UNSOLVED) {
+    return false;
+  } else {
+    return this->annotatedp;
   }
 }
 
@@ -463,6 +491,7 @@ Junction_set_unambiguous (T this, Chrpos_T distance, double donor_prob, double a
   this->splice_distance = distance;
   this->donor_prob = donor_prob;
   this->acceptor_prob = acceptor_prob;
+  this->annotatedp = false;
 
   return;
 }
@@ -470,8 +499,7 @@ Junction_set_unambiguous (T this, Chrpos_T distance, double donor_prob, double a
 void
 Junction_set_ambiguous (T this) {
   this->splice_distance = 0;
+  this->annotatedp = false;
 
   return;
 }
-
-

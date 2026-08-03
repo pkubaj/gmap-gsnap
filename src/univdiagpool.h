@@ -1,7 +1,7 @@
 #ifndef UNIVDIAGPOOL_INCLUDED
 #define UNIVDIAGPOOL_INCLUDED
 
-/* #define UNIVDIAGPOOL_REUSE 1 */
+#define UNIVDIAGPOOL_REUSE 1
 /* #define UNIVDIAGPOOL_TRACE 1 */
 
 #ifdef UNIVDIAGPOOL_TRACE
@@ -24,6 +24,8 @@ extern void
 Univdiagpool_free (T *old);
 extern T
 Univdiagpool_new (void);
+extern void
+Univdiagpool_nchunks (int *univdiag_chunks, int *list_chunks, T this);
 extern Univdiag_T
 Univdiag_new (T this, int qstart, int qend, int nmismatches, Univcoord_T univdiagonal);
 

@@ -138,7 +138,7 @@ Repair_make_unique (List_T repairs, Listpool_T listpool, Transcriptpool_T transc
 
 
 Path_T
-Repair_path (int *found_score, T this, Path_T oldpath, int sensedir,
+Repair_path (int *found_score, int *end_score, T this, Path_T oldpath, int sensedir,
 	     Compress_T query_compress,
 	     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 	     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -442,7 +442,7 @@ Repair_path (int *found_score, T this, Path_T oldpath, int sensedir,
     }
   }
     
-  Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+  Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
 #if 0
   if (path->score_within_trims > nmismatches_allowed) {
     Path_free(&path,intlistpool,univcoordlistpool,

@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: da92f1329fbcb7b869551192e3a9aa47bb778362 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -14219,7 +14218,8 @@ static Unpacker_T unpacker_table[17][17] =
 
 /* bitpackpages: A list of b-mers (12-mers by default), ending with -1U */
 UINT4
-Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
+Bitpack64_read_two (UINT4 *end0, Signature_T signature, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
+
   Oligospace_T bmer;
   UINT4 *info, nwritten4, packsize_div2;
   UINT8 nwritten8;
@@ -14244,10 +14244,11 @@ Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *
 #endif
 
 
-  bmer = oligo/BLOCKSIZE;
+  bmer = signature/BLOCKSIZE;
   info = &(bitpackptrs[bmer * METAINFO_SIZE]);
 
-  debug(printf("Entered Bitpack64_read_two with oligo %llu => bmer %u\n",oligo,bmer));
+  debug(printf("Entered Bitpack64_read_two with signature %llu => bmer %u\n",
+	       signature,bmer));
 
 #ifdef WORDS_BIGENDIAN
   nwritten4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */
@@ -14287,11 +14288,11 @@ Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *
 
 #ifdef DEBUG
 #ifdef WORDS_BIGENDIAN
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-         oligo,oligo % BLOCKSIZE,Bigendian_convert_uint(info[1]),Bigendian_convert_uint(info[METAINFO_SIZE+1]));
+  printf("signature: %16lX, remainder %d, offset0 %u, offset1 %u\n",
+         signature,signature % BLOCKSIZE,Bigendian_convert_uint(info[1]),Bigendian_convert_uint(info[METAINFO_SIZE+1]));
 #else
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-	 oligo,oligo % BLOCKSIZE,info[1],info[METAINFO_SIZE+1]);
+  printf("signature: %16lX, remainder %d, offset0 %u, offset1 %u\n",
+	 signature,signature % BLOCKSIZE,info[1],info[METAINFO_SIZE+1]);
 #endif
   printf("bitpack:\n");
 
@@ -14308,7 +14309,7 @@ Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *
   printf("end of diffs\n");
 #endif  
 
-  if ((remainder = oligo % BLOCKSIZE) == 0) {
+  if ((remainder = signature % BLOCKSIZE) == 0) {
     ptr = offset0;
 
   } else if (remainder <= 16) {
@@ -14442,7 +14443,7 @@ Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *
   return ptr;
 
 #else			    /* littleendian and SSE2 */
-  remainder0 = oligo % BLOCKSIZE;
+  remainder0 = signature % BLOCKSIZE;
   remainder1 = remainder0 + 1;
   _diffs = (UINT4 *) diffs;	/* Assumes a dummy register in diffs[0] */
 
@@ -14535,7 +14536,7 @@ Bitpack64_read_two (UINT4 *end0, Oligospace_T oligo, UINT4 *bitpackptrs, UINT4 *
 #ifdef LARGE_GENOMES
 /* bitpackpages: A list of b-mers (12-mers by default), ending with -1U */
 UINT8
-Bitpack64_read_two_huge (UINT8 *end0, Oligospace_T oligo,
+Bitpack64_read_two_huge (UINT8 *end0, Signature_T signature,
 			 UINT4 *bitpackpages, UINT4 *bitpackptrs, UINT4 *bitpackcomp) {
   Oligospace_T bmer;
   UINT4 *info, nwritten4;
@@ -14567,10 +14568,11 @@ Bitpack64_read_two_huge (UINT8 *end0, Oligospace_T oligo,
 #endif
 
 
-  bmer = oligo/BLOCKSIZE;
+  bmer = signature/BLOCKSIZE;
   info = &(bitpackptrs[bmer * METAINFO_SIZE]);
 
-  debug(printf("Entered Bitpack64_read_two_huge with oligo %u => bmer %u\n",oligo,bmer));
+  debug(printf("Entered Bitpack64_read_two_huge with signature %lu => bmer %u\n",
+	       signature,bmer));
 
 #ifdef WORDS_BIGENDIAN
   nwritten4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */
@@ -14633,7 +14635,7 @@ Bitpack64_read_two_huge (UINT8 *end0, Oligospace_T oligo,
   packsize_div2 = (info[METAINFO_SIZE] - nwritten4);
 #endif
 
-  remainder0 = oligo % BLOCKSIZE;
+  remainder0 = signature % BLOCKSIZE;
 
   /* debug(Bitpack64_block_offsets_huge(offsets,oligo,bitpackpages,bitpackptrs,bitpackcomp)); */
 
@@ -14643,8 +14645,8 @@ Bitpack64_read_two_huge (UINT8 *end0, Oligospace_T oligo,
   (unpacker_all_table[packsize_div2*2])(&(diffs[1]),bitpack);
 
 #ifdef DEBUG
-  printf("oligo: %08X, remainder %d, offset0 %u, offset1 %u\n",
-	 oligo,oligo % BLOCKSIZE,info[1],info[METAINFO_SIZE+1]);
+  printf("signature: %16lX, remainder %d, offset0 %u, offset1 %u\n",
+	 signature,signature % BLOCKSIZE,info[1],info[METAINFO_SIZE+1]);
   printf("bitpack:\n");
 
   for (i = 1; i <= BLOCKSIZE; i++) {
@@ -14659,7 +14661,7 @@ Bitpack64_read_two_huge (UINT8 *end0, Oligospace_T oligo,
   printf("end of diffs\n");
 #endif  
 
-  if ((remainder = oligo % BLOCKSIZE) == 0) {
+  if ((remainder = signature % BLOCKSIZE) == 0) {
     ptr = offset0;
 
   } else if (remainder <= 16) {

@@ -1,4 +1,3 @@
-/* $Id: 6519d258556b3c6ee31ded26454d440fafa4602c $ */
 #ifndef EXTENSION_SEARCH_INCLUDED
 #define EXTENSION_SEARCH_INCLUDED
 
@@ -23,11 +22,13 @@
 #include "knownsplicing.h"
 #include "knownindels.h"
 
+#include "segmentelt.h"
+
 #include "univdiagpool.h"
 #include "auxinfopool.h"
 #include "pathstorepool.h"
-#include "intlistpool.h"
 #include "univcoord.h"
+#include "intlistpool.h"
 #include "listpool.h"
 
 
@@ -62,18 +63,23 @@ extern void
 Elt_gc (List_T *set, Listpool_T listpool);
 
 extern void
-Extension_search (Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,
+Extension_search (int ***indices_by_nsplices_gplus, int **nindices_by_nsplices_gplus,
+		  int ***indices_by_nsplices_gminus, int **nindices_by_nsplices_gminus,
+
+		  Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,
 		  Pathstore_T **pathstores_gplus, int *nunivdiagonals_gplus,
 		  Univcoord_T **_univdiagonals_gminus, Auxinfo_T **auxinfo_gminus,
 		  Pathstore_T **pathstores_gminus, int *nunivdiagonals_gminus,
 
 		  Stage1_T stage1, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+		  int querylength, int max_nsplices, bool first_read_p, bool retain_terminal_p,
+		  bool prune_equal_score_p,
 
-		  int querylength, Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
-		  Univdiagpool_T univdiagpool, Univcoordlistpool_T univcoordlistpool,
-		  Listpool_T listpool);
+		  Segmenteltpool_T segmenteltpool,
+		  Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
+		  Univcoordlistpool_T univcoordlistpool, Univdiagpool_T univdiagpool,
+		  Intlistpool_T intlistpool, Listpool_T listpool);
 
 #undef T
 #endif
-
 

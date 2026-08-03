@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 4047bc27bf2478e61b9c51b76ce52350fc72f3a8 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif

@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "signature.h"
 
 #ifdef WORDS_BIGENDIAN
 #include "bigendian.h"
@@ -2073,7 +2074,8 @@ static Accessor_T accessor_table[272] =
 #ifdef HORIZONTAL
 
 UINT4
-Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
+Bitpack64_access (Signature_T signature, UINT4 *ptrs, UINT4 *comp) {
+  Oligospace_T bmer;
   UINT4 *info, start4;
   UINT8 start8;
   int nwritten, remainder;
@@ -2083,7 +2085,8 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   int packsize, i;
 #endif
 
-  info = &(ptrs[oligo/BLOCKSIZE * DIRECT_METAINFO_SIZE]);
+  bmer = signature/BLOCKSIZE;
+  info = &(ptrs[bmer * DIRECT_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
   start4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */
@@ -2097,14 +2100,14 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   nwritten = info[1] - start4;
 #endif
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nwritten*16 + remainder % 16;
   row = (remainder / 16) * (packsize / 2);   /* Complexity of this calculation makes horizontal format slower */
 
 #ifdef DEBUG
   packsize = nwritten*2;
-  printf("Entered Bitpack64_access with oligo %u, packsize %d, remainder %d, row %d, index %d\n",
-	 oligo,packsize,remainder,row,index);
+  printf("Entered Bitpack64_access with signature %lu, packsize %d, remainder %d, row %d, index %d\n",
+	 signature,packsize,remainder,row,index);
   printf("bitpack:\n");
   for (i = 0; i < nwritten*4; i += 4) {
     printf("%08X %08X %08X %08X\n",bitpack[i],bitpack[i+1],bitpack[i+2],bitpack[i+3]);
@@ -2118,7 +2121,8 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
 #else
 
 UINT4
-Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
+Bitpack64_access (Signature_T signature, UINT4 *ptrs, UINT4 *comp) {
+  Oligospace_T bmer;
   UINT4 *info, start4;
   UINT8 start8;
   int nwritten, remainder;
@@ -2128,7 +2132,8 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   int packsize, i;
 #endif
 
-  info = &(ptrs[oligo/BLOCKSIZE * DIRECT_METAINFO_SIZE]);
+  bmer = signature/BLOCKSIZE;
+  info = &(ptrs[bmer * DIRECT_METAINFO_SIZE]);
 
 #ifdef WORDS_BIGENDIAN
   start4 = Bigendian_convert_uint(info[0]); /* In 128-bit registers */
@@ -2142,14 +2147,14 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
   nwritten = info[1] - start4;
 #endif
 
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nwritten*16 + remainder/4;
   column = remainder % 4;
 
 #ifdef DEBUG
   packsize = nwritten*2;
-  printf("Entered Bitpack64_access with oligo %u, packsize %d, remainder %d, column %d, index %d\n",
-	 oligo,packsize,remainder,column,index);
+  printf("Entered Bitpack64_access with signature %lu, packsize %d, remainder %d, column %d, index %d\n",
+	 signature,packsize,remainder,column,index);
   printf("bitpack:\n");
   for (i = 0; i < nwritten*4; i += 4) {
     printf("%08X %08X %08X %08X\n",bitpack[i],bitpack[i+1],bitpack[i+2],bitpack[i+3]);
@@ -2161,12 +2166,12 @@ Bitpack64_access (Oligospace_T oligo, UINT4 *ptrs, UINT4 *comp) {
 }
 
 UINT4
-Bitpack64_access_bitpack (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
+Bitpack64_access_bitpack (Signature_T signature, int packsize, UINT4 *bitpack) {
   int nregisters, remainder;	/* nregisters is same as nwritten */
   int index, column;
 
   nregisters = packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 
@@ -2182,13 +2187,13 @@ static UINT4 threshold[17] =
 
 
 bool
-Bitpack64_access_filledp (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
+Bitpack64_access_filledp (Signature_T signature, int packsize, UINT4 *bitpack) {
   int nregisters, remainder;	/* nregisters is same as nwritten */
   int index, column;
   UINT4 value;
 
   nregisters = packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 
@@ -2201,7 +2206,7 @@ Bitpack64_access_filledp (Oligospace_T oligo, int packsize, UINT4 *bitpack) {
 }
 
 int
-Bitpack64_access_new_packsize (Oligospace_T oligo, int old_packsize, UINT4 *bitpack, int increment) {
+Bitpack64_access_new_packsize (Signature_T signature, int old_packsize, UINT4 *bitpack, int increment) {
   int new_packsize;
   int nregisters, remainder;	/* nregisters is same as nwritten */
   int index, column;
@@ -2214,7 +2219,7 @@ Bitpack64_access_new_packsize (Oligospace_T oligo, int old_packsize, UINT4 *bitp
 
 
   nregisters = old_packsize / 2;
-  remainder = oligo % BLOCKSIZE;
+  remainder = signature % BLOCKSIZE;
   index = nregisters*16 + remainder/4;
   column = remainder % 4;
 

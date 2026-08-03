@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -8,6 +7,7 @@ static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 
 #include "trpath.h"
 #include "trpath-convert.h"
+#include "debug_groups.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,18 +15,19 @@ static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 
 #include "mem.h"
 #include "assert.h"
+#include "parameters.h"
 #include "path-eval.h"
 #include "path-solve.h"
 
 
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_TRPATH)
 #define debug0(x) x
 #else
 #define debug0(x)
 #endif
 
 /* endpoints_acceptable_p */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_TRPATH)
 #define debug2(x) x
 #else
 #define debug2(x)
@@ -34,7 +35,7 @@ static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 
 
 /* Conversion to Path_T */
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 #define debug10(x) x
 #else
 #define debug10(x)
@@ -42,7 +43,7 @@ static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 
 
 /* binary_search */
-#ifdef DEBUG20
+#if defined(DEBUG20) || defined(DEBUG_TRPATH)
 #define debug20(x) x
 #else
 #define debug20(x)
@@ -52,8 +53,83 @@ static char rcsid[] = "$Id: 39d09fc58b02abe1e7fd684d35dda104e7f59901 $";
 static Transcriptome_T transcriptome;
 static EF64_T chromosome_ef64;
 
+#define MAX_TRANSCRIPT_SPLICE_BOUNDARY_DELETION 10
+#define MIN_TRANSCRIPT_SPLICE_BOUNDARY_DELETION_INTRON 1000
+
 
 #define T Trpath_T
+
+static bool
+mismatches_all_zero_p (Intlist_T nmismatches, Intlist_T ref_nmismatches) {
+  Intlist_T p;
+
+  for (p = nmismatches; p != NULL; p = Intlist_next(p)) {
+    if (Intlist_head(p) != 0) {
+      return false;
+    }
+  }
+
+  for (p = ref_nmismatches; p != NULL; p = Intlist_next(p)) {
+    if (Intlist_head(p) != 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static Univcoord_T
+advance_univdiagonal (Univcoord_T univdiagonal, int direction, int adj) {
+  if (direction > 0) {
+    return univdiagonal + (Univcoord_T) adj;
+  } else {
+    return univdiagonal - (Univcoord_T) adj;
+  }
+}
+
+/* Emits a known intron adjacent to a short transcriptome deletion as two explicit
+   junctions instead of a middle JUNCTION_UNSOLVED.  The caller has already
+   emitted the aligned segment ending at endpoint; this routine adds the
+   zero-length segment between the splice and deletion. */
+static Univcoord_T
+push_splice_boundary_deletion (List_T *junctions, Intlist_T *endpoints,
+			       Univcoordlist_T *univdiagonals,
+			       Intlist_T *nmismatches, Intlist_T *ref_nmismatches,
+			       Univcoord_T univdiagonal, int endpoint,
+			       Chrpos_T splice_distance, int deletionlen,
+			       int sensedir, bool deletion_first_p, int direction,
+			       Listpool_T listpool, Intlistpool_T intlistpool,
+			       Univcoordlistpool_T univcoordlistpool,
+			       Pathpool_T pathpool) {
+  Junction_T first_junction, second_junction;
+  Univcoord_T middle_univdiagonal;
+
+  if (deletion_first_p == true) {
+    first_junction = Junction_new_deletion(deletionlen,pathpool);
+    second_junction = Junction_new_splice_annotated(splice_distance,sensedir,
+						    /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
+  } else {
+    first_junction = Junction_new_splice_annotated(splice_distance,sensedir,
+						   /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
+    second_junction = Junction_new_deletion(deletionlen,pathpool);
+  }
+
+  middle_univdiagonal = advance_univdiagonal(univdiagonal,direction,Junction_adj(first_junction));
+  *junctions = Listpool_push(*junctions,listpool,(void *) first_junction
+			     listpool_trace(__FILE__,__LINE__));
+  *endpoints = Intlistpool_push(*endpoints,intlistpool,endpoint
+				intlistpool_trace(__FILE__,__LINE__));
+  *univdiagonals = Univcoordlistpool_push(*univdiagonals,univcoordlistpool,middle_univdiagonal
+					  univcoordlistpool_trace(__FILE__,__LINE__));
+  *nmismatches = Intlistpool_push(*nmismatches,intlistpool,0
+				  intlistpool_trace(__FILE__,__LINE__));
+  *ref_nmismatches = Intlistpool_push(*ref_nmismatches,intlistpool,0
+				      intlistpool_trace(__FILE__,__LINE__));
+  *junctions = Listpool_push(*junctions,listpool,(void *) second_junction
+			     listpool_trace(__FILE__,__LINE__));
+
+  return advance_univdiagonal(middle_univdiagonal,direction,Junction_adj(second_junction));
+}
 
 /* exonbounds does not include the initial value of 0, so caller needs a special case when the initial exoni is 0 */
 static int
@@ -93,7 +169,7 @@ compute_exons (int trstart, int trend, int *exonbounds, int nexons,
   char firstchar, lastchar;
   int exoni, exonj, i;
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("compute_exons with trstart %d, trend %d\n",trstart,trend);
   for (i = 0; i < nexons; i++) {
     printf("exon %d: exonbound %d\n",i,exonbounds[i]);
@@ -177,18 +253,36 @@ compute_exons (int trstart, int trend, int *exonbounds, int nexons,
 }
 
 
+static bool
+trim_initial_transcript_start (int *tstart, int *trstart, int tend,
+			       Intlist_T tr_endpoints) {
+  int trim;
+
+  if (*trstart >= 0) {
+    return true;
+  } else if ((trim = -(*trstart)) + (*tstart) >= tend) {
+    return false;
+  } else {
+    *tstart += trim;
+    *trstart = 0;
+    Intlist_head_set(tr_endpoints,*tstart);
+    return true;
+  }
+}
+
+
 
 static Path_T
-convert_to_path_geneplus (int *nintrons, int *found_score,
+convert_to_path_geneplus (int *nintrons, int *found_score, int *end_score,
 			  Trpath_T trpath, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			  bool plusp, bool first_read_p, int sensedir,
 			  Shortread_T queryseq, char *queryptr, int querylength,
 			  Stage1_T this, Knownsplicing_T knownsplicing, Compress_T query_compress,
 			  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+			  int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			  Univcoordlistpool_T univcoordlistpool,
@@ -250,7 +344,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   debug0(printf("Entered convert_to_path_geneplus with trpath %p, trnum %d, chrnum %d from method %s\n",
 		trpath,trnum,chrnum,Method_string(method)));
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("\nEntered convert_to_path_geneplus with trpath %p, trnum %d, chrnum %d from method %s\n",
 	 trpath,trnum,chrnum,Method_string(method));
   printf("tr_endpoints: %s (querylength %d)\n",Intlist_to_string(tr_endpoints),querylength);
@@ -273,8 +367,8 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   debug10(printf("Initial tstart %d => trstart %d.  tend %d => trend %d.\n",
 		 tstart,trstart,tend,trend));
   assert(trstart < trend);
-  if (trstart < 0) {
-    debug10(printf("starting before coordinate 0 => aborting\n"));
+  if (trim_initial_transcript_start(&tstart,&trstart,tend,tr_endpoints) == false) {
+    debug10(printf("starting before coordinate 0 consumes the segment => aborting\n"));
     return (Path_T) NULL;
   } else if (trend >= exonbounds[nexons - 1]) {
     debug10(printf("ending past the last exonbound => aborting\n"));
@@ -375,9 +469,28 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
 	debug10(printf("Indel of adj %d is %d bp before intron of length %u\n",
 		       adj,exonlength - (exonpos + adj),splice_distance));
-	splice_distance += adj;
 
-	if (splice_distance == 0) {
+	if (Parameters_fix_splice_boundary_indels_p == true &&
+	    adj > 0 && adj <= MAX_TRANSCRIPT_SPLICE_BOUNDARY_DELETION &&
+	    splice_distance >= MIN_TRANSCRIPT_SPLICE_BOUNDARY_DELETION_INTRON) {
+	  univdiagonal = push_splice_boundary_deletion(&junctions,&endpoints,&univdiagonals,
+						       &nmismatches,&ref_nmismatches,
+						       univdiagonal,tend,splice_distance,adj,
+						       sensedir,/*deletion_first_p*/exonlength - (exonpos + adj) > 0,
+						       /*direction*/+1,listpool,intlistpool,
+						       univcoordlistpool,pathpool);
+	  tr_junctions = List_next(tr_junctions);
+	  (*nintrons) += 1;
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
+	  printf(">>Output splice-boundary deletion.  Advancing tr_junctions\n");
+	  printf("Head of junctions: ");
+	  if (tr_junctions != NULL) {
+	    Junction_print((Junction_T) List_head(tr_junctions));
+	  }
+	  printf("\n");
+#endif
+
+	} else if ((splice_distance += adj) == 0) {
 	  Intlistpool_free_list(&endpoints,intlistpool
 				intlistpool_trace(__FILE__,__LINE__)); /* Allocated by Intlistpool_T */
 	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
@@ -399,7 +512,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 				    listpool_trace(__FILE__,__LINE__));
 	  debug10(printf(">>Output UNSOLVED splice junction.  Advancing tr_junctions\n"));
 	  tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	  printf("Head of junctions: ");
 	  if (tr_junctions != NULL) {
 	    Junction_print((Junction_T) List_head(tr_junctions));
@@ -452,9 +565,28 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
 	debug10(printf("Indel of adj %d is %d bp after intron of length %u\n",
 		       adj,exonlength - exonpos,splice_distance));
-	splice_distance += adj;
 
-	if (splice_distance == 0) {
+	if (Parameters_fix_splice_boundary_indels_p == true &&
+	    adj > 0 && adj <= MAX_TRANSCRIPT_SPLICE_BOUNDARY_DELETION &&
+	    splice_distance >= MIN_TRANSCRIPT_SPLICE_BOUNDARY_DELETION_INTRON) {
+	  univdiagonal = push_splice_boundary_deletion(&junctions,&endpoints,&univdiagonals,
+						       &nmismatches,&ref_nmismatches,
+						       univdiagonal,tend,splice_distance,adj,
+						       sensedir,/*deletion_first_p*/false,
+						       /*direction*/+1,listpool,intlistpool,
+						       univcoordlistpool,pathpool);
+	  tr_junctions = List_next(tr_junctions);
+	  (*nintrons) += 1;
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
+	  printf(">>Output splice-boundary deletion.  Advancing tr_junctions\n");
+	  printf("Head of junctions: ");
+	  if (tr_junctions != NULL) {
+	    Junction_print((Junction_T) List_head(tr_junctions));
+	  }
+	  printf("\n");
+#endif
+
+	} else if ((splice_distance += adj) == 0) {
 	  Intlistpool_free_list(&endpoints,intlistpool
 				intlistpool_trace(__FILE__,__LINE__)); /* Allocated by Intlistpool_T */
 	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
@@ -476,7 +608,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 				    listpool_trace(__FILE__,__LINE__));
 	  debug10(printf(">>Output UNSOLVED splice junction.  Advancing tr_junctions\n"));
 	  tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	  printf("Head of junctions: ");
 	  if (tr_junctions != NULL) {
 	    Junction_print((Junction_T) List_head(tr_junctions));
@@ -533,14 +665,14 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 #endif
 	junctions = Listpool_push(junctions,listpool,(void *) junction
 				  listpool_trace(__FILE__,__LINE__));
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf(">>(1) Output indel junction: ");
 	Junction_print(junction);
 	printf("\n");
 #endif
 	univdiagonal += Junction_adj(junction); /* geneplus */
 	tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf("Head of junctions: ");
 	if (tr_junctions != NULL) {
 	  Junction_print((Junction_T) List_head(tr_junctions));
@@ -590,12 +722,12 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 #endif
 
 	splice_distance = exonstarts[exoni] - (exonstarts[exoni-1] + exonlength); /* gplus */
-	junction = Junction_new_splice(splice_distance,sensedir,
-				       /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
+	junction = Junction_new_splice_annotated(splice_distance,sensedir,
+						 /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
 	junctions = Listpool_push(junctions,listpool,(void *) junction
 				  listpool_trace(__FILE__,__LINE__));
 	(*nintrons) += 1;
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf(">>Output splice junction: ");
 	Junction_print(junction);
 	printf("\n");
@@ -634,7 +766,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   }
   exons = List_reverse(exons);
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("New exons: ");
   Exon_print_list_stdout(exons);
   printf("\n");
@@ -649,7 +781,7 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
   ref_nmismatches = Intlist_reverse(ref_nmismatches);
   junctions = List_reverse(junctions);
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("endpoints: %s\n",Intlist_to_string(endpoints));
   printf("univdiagonals: %s (%s)\n",
 	 Univcoordlist_to_string(univdiagonals),Univcoordlist_to_string_offset(univdiagonals,chroffset));
@@ -687,13 +819,13 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
     Intlistpool_free_list(&tr_endpoints,intlistpool);
     Intlistpool_free_list(&tr_nmismatches,intlistpool);
 
-    if ((newpath = Path_solve_junctions(&(*found_score),path,sensedir,/*genestrand*/0,
+    if ((newpath = Path_solve_junctions(&(*found_score),&(*end_score),path,sensedir,/*genestrand*/0,
 					query_compress,query_compress_fwd,query_compress_rev,
 					queryseq,queryptr,querylength,
 
-					streamspace_max_alloc,streamspace_alloc,
 					novel_univdiags_alloc,novel_diagonals_alloc,
-					localdb_alloc,localdb,localdb_nmismatches_allowed,
+					localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					localdb,localdb_nmismatches_allowed,
 
 					this,knownsplicing,
 					uintlistpool,intlistpool,univcoordlistpool,listpool,
@@ -741,17 +873,17 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 			       plusp,first_read_p,/*genestrand*/0,sensedir,querylength,
 			       query_compress_fwd,query_compress_rev,listpool,pathpool,method);
 
-    if (trpath->found_score == 0) {
-      /* Can skip Path_eval_nmatches */
+    if (trpath->found_score == 0 && path->found_score == 0 &&
+	mismatches_all_zero_p(path->nmismatches,path->ref_nmismatches) == true) {
+      /* Can skip Path_eval_nmatches only when genomic conversion is also exact. */
       path->found_score = path->score_within_trims = 0;
       path->nmatches = path->ref_nmatches = querylength /*- trpath->found_score*/ - trpath->total_ninserts;
       path->total_splice_prob = path->junction_splice_prob = (*nintrons) * 4.0;
-      if (*found_score > 0) {
-	*found_score = 0;
-      }
+      *found_score = 0;
+      *end_score = 0;
     } else {
       debug10(printf("(1) Calling Path_eval_nmatches\n"));
-      Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
     }
 
 #if 0
@@ -789,16 +921,16 @@ convert_to_path_geneplus (int *nintrons, int *found_score,
 
 
 static Path_T
-convert_to_path_geneminus (int *nintrons, int *found_score,
+convert_to_path_geneminus (int *nintrons, int *found_score, int *end_score,
 			   Trpath_T trpath, Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh,
 			   bool plusp, bool first_read_p, int sensedir,
 			   Shortread_T queryseq, char *queryptr, int querylength,
 			   Stage1_T this, Knownsplicing_T knownsplicing, Compress_T query_compress,
 			   Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-			   int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			   Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			   unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+			   unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+			   int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			   Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
@@ -858,7 +990,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   debug0(printf("Entered convert_to_path_geneminus with trpath %p, trnum %d, chrnum %d from method %s\n",
 		trpath,trnum,chrnum,Method_string(method)));
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("\nEntered convert_to_path_geneminus with trpath %p, trnum %d, chrnum %d from method %s\n",
 	 trpath,trnum,chrnum,Method_string(method));
   printf("tr_endpoints: %s (querylength %d)\n",Intlist_to_string(tr_endpoints),querylength);
@@ -881,8 +1013,8 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   debug10(printf("Initial tstart %d => trstart %d.  tend %d => trend %d.\n",
 		 tstart,trstart,tend,trend));
   assert(trstart < trend);
-  if (trstart < 0) {
-    debug10(printf("starting before coordinate 0 => aborting\n"));
+  if (trim_initial_transcript_start(&tstart,&trstart,tend,tr_endpoints) == false) {
+    debug10(printf("starting before coordinate 0 consumes the segment => aborting\n"));
     return (Path_T) NULL;
   } else if (trend>= exonbounds[nexons - 1]) {
     debug10(printf("ending past the last exonbound => aborting\n"));
@@ -982,9 +1114,28 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
 	debug10(printf("Indel of adj %d is %d bp before intron of length %u\n",
 		       adj,exonlength - (exonpos + adj),splice_distance));
-	splice_distance += adj;
 
-	if (splice_distance == 0) {
+	if (Parameters_fix_splice_boundary_indels_p == true &&
+	    adj > 0 && adj <= MAX_TRANSCRIPT_SPLICE_BOUNDARY_DELETION &&
+	    splice_distance >= MIN_TRANSCRIPT_SPLICE_BOUNDARY_DELETION_INTRON) {
+	  univdiagonal = push_splice_boundary_deletion(&junctions,&endpoints,&univdiagonals,
+						       &nmismatches,&ref_nmismatches,
+						       univdiagonal,querylength - tend,splice_distance,adj,
+						       sensedir,/*deletion_first_p*/exonlength - (exonpos + adj) > 0,
+						       /*direction*/-1,listpool,intlistpool,
+						       univcoordlistpool,pathpool);
+	  tr_junctions = List_next(tr_junctions);
+	  (*nintrons) += 1;
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
+	  printf(">>Output splice-boundary deletion.  Advancing tr_junctions\n");
+	  printf("Head of junctions: ");
+	  if (tr_junctions != NULL) {
+	    Junction_print((Junction_T) List_head(tr_junctions));
+	  }
+	  printf("\n");
+#endif
+
+	} else if ((splice_distance += adj) == 0) {
 	  Intlistpool_free_list(&endpoints,intlistpool
 				intlistpool_trace(__FILE__,__LINE__)); /* Allocated by Intlistpool_T */
 	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
@@ -1006,7 +1157,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 				    listpool_trace(__FILE__,__LINE__));
 	  debug10(printf(">>Output UNSOLVED splice junction.  Advancing tr_junctions\n"));
 	  tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	  printf("Head of junctions: ");
 	  if (tr_junctions != NULL) {
 	    Junction_print((Junction_T) List_head(tr_junctions));
@@ -1059,9 +1210,28 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	adj = Junction_adj((Junction_T) List_head(tr_junctions));
 	debug10(printf("Indel of adj %d is %d bp after intron of length %u\n",
 		       adj,exonlength - exonpos,splice_distance));
-	splice_distance += adj;
 
-	if (splice_distance == 0) {
+	if (Parameters_fix_splice_boundary_indels_p == true &&
+	    adj > 0 && adj <= MAX_TRANSCRIPT_SPLICE_BOUNDARY_DELETION &&
+	    splice_distance >= MIN_TRANSCRIPT_SPLICE_BOUNDARY_DELETION_INTRON) {
+	  univdiagonal = push_splice_boundary_deletion(&junctions,&endpoints,&univdiagonals,
+						       &nmismatches,&ref_nmismatches,
+						       univdiagonal,querylength - tend,splice_distance,adj,
+						       sensedir,/*deletion_first_p*/false,
+						       /*direction*/-1,listpool,intlistpool,
+						       univcoordlistpool,pathpool);
+	  tr_junctions = List_next(tr_junctions);
+	  (*nintrons) += 1;
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
+	  printf(">>Output splice-boundary deletion.  Advancing tr_junctions\n");
+	  printf("Head of junctions: ");
+	  if (tr_junctions != NULL) {
+	    Junction_print((Junction_T) List_head(tr_junctions));
+	  }
+	  printf("\n");
+#endif
+
+	} else if ((splice_distance += adj) == 0) {
 	  Intlistpool_free_list(&endpoints,intlistpool
 				intlistpool_trace(__FILE__,__LINE__)); /* Allocated by Intlistpool_T */
 	  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
@@ -1083,7 +1253,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 				    listpool_trace(__FILE__,__LINE__));
 	  debug10(printf(">>Output UNSOLVED splice junction.  Advancing tr_junctions\n"));
 	  tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	  printf("Head of junctions: ");
 	  if (tr_junctions != NULL) {
 	    Junction_print((Junction_T) List_head(tr_junctions));
@@ -1128,7 +1298,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 	trend = (trdiagonal - troffset - querylength) + tend;
 
 	junction = Junction_copy((Junction_T) List_head(tr_junctions),pathpool);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	if (Junction_ninserts(junction) != 0) {
 	  printf("For ninserts, revising endpoint %d to %d\n",
 		 Intlist_head(endpoints),Intlist_head(endpoints) - Junction_ninserts(junction));
@@ -1148,14 +1318,14 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 #endif
 	junctions = Listpool_push(junctions,listpool,(void *) junction
 				  listpool_trace(__FILE__,__LINE__));
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf(">>(2) Output indel junction: ");
 	Junction_print(junction);
 	printf("\n");
 #endif
 	univdiagonal -= Junction_adj(junction); /* geneminus */
 	tr_junctions = List_next(tr_junctions);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf("Head of junctions: ");
 	if (tr_junctions != NULL) {
 	  Junction_print((Junction_T) List_head(tr_junctions));
@@ -1205,12 +1375,12 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 #endif
 
 	splice_distance = (exonstarts[exoni-1] - exonlength) - exonstarts[exoni]; /* gminus */
-	junction = Junction_new_splice(splice_distance,sensedir,
-				       /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
+	junction = Junction_new_splice_annotated(splice_distance,sensedir,
+						 /*donor_prob*/2.0,/*acceptor_prob*/2.0,pathpool);
 	junctions = Listpool_push(junctions,listpool,(void *) junction
 				  listpool_trace(__FILE__,__LINE__));
 	(*nintrons) += 1;
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
 	printf(">>Output splice junction: ");
 	Junction_print(junction);
 	printf("\n");
@@ -1249,7 +1419,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
   }
 
   exons = List_reverse(exons);
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("New exons: ");
   Exon_print_list_stdout(exons);
   printf("\n");
@@ -1259,7 +1429,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 
   /*Do not reverse lists, since they are already in gplus order */
 
-#ifdef DEBUG10
+#if defined(DEBUG10) || defined(DEBUG_TRANSCRIPTOME) || defined(DEBUG_TRPATH)
   printf("endpoints: %s\n",Intlist_to_string(endpoints));
   printf("univdiagonals: %s (%s)\n",
 	 Univcoordlist_to_string(univdiagonals),Univcoordlist_to_string_offset(univdiagonals,chroffset));
@@ -1295,13 +1465,13 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
     Intlistpool_free_list(&tr_endpoints,intlistpool);
     Intlistpool_free_list(&tr_nmismatches,intlistpool);
 
-    if ((newpath = Path_solve_junctions(&(*found_score),path,sensedir,/*genestrand*/0,
+    if ((newpath = Path_solve_junctions(&(*found_score),&(*end_score),path,sensedir,/*genestrand*/0,
 					query_compress,query_compress_fwd,query_compress_rev,
 					queryseq,queryptr,querylength,
 
-					streamspace_max_alloc,streamspace_alloc,
 					novel_univdiags_alloc,novel_diagonals_alloc,
-					localdb_alloc,localdb,localdb_nmismatches_allowed,
+					localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					localdb,localdb_nmismatches_allowed,
 
 					this,knownsplicing,
 					uintlistpool,intlistpool,univcoordlistpool,listpool,
@@ -1351,14 +1521,17 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
 			       plusp,first_read_p,/*genestrand*/0,sensedir,querylength,
 			       query_compress_fwd,query_compress_rev,listpool,pathpool,method);
 
-    if (trpath->found_score == 0) {
-      /* Can skip Path_eval_nmatches */
+    if (trpath->found_score == 0 && path->found_score == 0 &&
+	mismatches_all_zero_p(path->nmismatches,path->ref_nmismatches) == true) {
+      /* Can skip Path_eval_nmatches only when genomic conversion is also exact. */
       path->found_score = path->score_within_trims = 0;
       path->nmatches = path->ref_nmatches = querylength /*- trpath->found_score*/ - trpath->total_ninserts;
       path->total_splice_prob = path->junction_splice_prob = (*nintrons) * 4.0;
+      *found_score = 0;
+      *end_score = 0;
     } else {
       debug10(printf("(2) Calling Path_eval_nmatches\n"));
-      Path_eval_nmatches(&(*found_score),path,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&(*found_score),&(*end_score),path,query_compress_fwd,query_compress_rev);
     }
 
 #if 0    
@@ -1404,7 +1577,7 @@ convert_to_path_geneminus (int *nintrons, int *found_score,
    along genome) */
 
 void
-Trpath_convert_sense (int *found_score,
+Trpath_convert_sense (int *found_score, int *end_score,
 		      List_T *sense_paths_gplus, List_T *sense_paths_gminus,
 		      List_T *antisense_paths_gplus, List_T *antisense_paths_gminus,
 
@@ -1414,9 +1587,9 @@ Trpath_convert_sense (int *found_score,
 
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		      unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		      int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		      Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -1439,16 +1612,16 @@ Trpath_convert_sense (int *found_score,
 
     if (trpath->transcript_genestrand > 0) {
       queryptr = Shortread_queryuc_ptr(queryseq);
-      if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),
+      if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),&(*end_score),
 					   trpath,trpath->chrnum,chroffset,chrhigh,
 					   /*plusp*/true,first_read_p,/*sensedir*/SENSE_FORWARD,
 					   queryseq,queryptr,querylength,this,knownsplicing,
 					   /*query_compress*/query_compress_fwd,
 					   query_compress_fwd,query_compress_rev,
 
-					   streamspace_max_alloc,streamspace_alloc,
 					   novel_univdiags_alloc,novel_diagonals_alloc,
-					   localdb_alloc,localdb,localdb_nmismatches_allowed,
+					   localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					   localdb,localdb_nmismatches_allowed,
 
 					   intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					   transcriptpool,hitlistpool,trpath->method)) != NULL) {
@@ -1473,16 +1646,16 @@ Trpath_convert_sense (int *found_score,
 
     } else {
       queryptr = Shortread_queryrc(queryseq);
-      if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),
+      if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),&(*end_score),
 					    trpath,trpath->chrnum,chroffset,chrhigh,
 					    /*plusp*/false,first_read_p,/*sensedir*/SENSE_FORWARD,
 					    queryseq,queryptr,querylength,this,knownsplicing,
 					    /*query_compress*/query_compress_rev,
 					    query_compress_fwd,query_compress_rev,
 					    
-					    streamspace_max_alloc,streamspace_alloc,
 					    novel_univdiags_alloc,novel_diagonals_alloc,
-					    localdb_alloc,localdb,localdb_nmismatches_allowed,
+					    localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					    localdb,localdb_nmismatches_allowed,
 
 					    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					    transcriptpool,hitlistpool,trpath->method)) != NULL) {
@@ -1512,7 +1685,7 @@ Trpath_convert_sense (int *found_score,
 
 
 void
-Trpath_convert_antisense (int *found_score,
+Trpath_convert_antisense (int *found_score, int *end_score,
 			  List_T *antisense_paths_gplus, List_T *antisense_paths_gminus,
 			  List_T *sense_paths_gplus, List_T *sense_paths_gminus,
 
@@ -1522,9 +1695,9 @@ Trpath_convert_antisense (int *found_score,
 
 			  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			  
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+			  int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			  Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -1547,16 +1720,16 @@ Trpath_convert_antisense (int *found_score,
 
     if (trpath->transcript_genestrand > 0) {
       queryptr = Shortread_queryrc(queryseq);
-      if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),
+      if ((path = convert_to_path_geneplus(&nintrons,&(*found_score),&(*end_score),
 					   trpath,trpath->chrnum,chroffset,chrhigh,
 					   /*plusp*/false,first_read_p,/*sensedir*/SENSE_ANTI,
 					   queryseq,queryptr,querylength,this,knownsplicing,
 					   /*query_compress*/query_compress_rev,
 					   query_compress_fwd,query_compress_rev,
 
-					   streamspace_max_alloc,streamspace_alloc,
 					   novel_univdiags_alloc,novel_diagonals_alloc,
-					   localdb_alloc,localdb,localdb_nmismatches_allowed,
+					   localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					   localdb,localdb_nmismatches_allowed,
 
 					   intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					   transcriptpool,hitlistpool,trpath->method)) != NULL) {
@@ -1580,16 +1753,16 @@ Trpath_convert_antisense (int *found_score,
 
     } else {
       queryptr = Shortread_queryuc_ptr(queryseq);
-      if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),
+      if ((path = convert_to_path_geneminus(&nintrons,&(*found_score),&(*end_score),
 					    trpath,trpath->chrnum,chroffset,chrhigh,
 					    /*plusp*/true,first_read_p,/*sensedir*/SENSE_ANTI,
 					    queryseq,queryptr,querylength,this,knownsplicing,
 					    /*query_compress*/query_compress_fwd,
 					    query_compress_fwd,query_compress_rev,
 
-					    streamspace_max_alloc,streamspace_alloc,
 					    novel_univdiags_alloc,novel_diagonals_alloc,
-					    localdb_alloc,localdb,localdb_nmismatches_allowed,
+					    localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+					    localdb,localdb_nmismatches_allowed,
 
 					    intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 					    transcriptpool,hitlistpool,trpath->method)) != NULL) {

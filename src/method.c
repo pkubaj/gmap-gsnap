@@ -30,6 +30,11 @@ Method_string (Method_T method) {
   case TR_PREVALENT: return "tr.prev";
   case TR_END: return "tr.end";
   case TR_EXT: return "tr.ext";
+  case TR_CHAIN: return "tr.chain";
+  case TR_CHAIN_K13: return "tr.chain.k13";
+  case TR_CHAIN_K11: return "tr.chain.k11";
+  case TR_CHAIN_FM_TRDIAG: return "tr.chain.fm-trdiag";
+  case TR_CHAIN_FM_LCHAIN: return "tr.chain.fm-lchain";
   case TR_METHOD: return "tr.method"; /* For debugging */
   case KMER_EXACT1: return "exact1";
   case KMER_ANYPAIR: return "anypair";
@@ -64,6 +69,11 @@ Method_samprint (Filestring_T fp, Method_T method) {
   case TR_PREVALENT: FPRINTF(fp,"\tXG:Z:tr.prev"); break;
   case TR_END: FPRINTF(fp,"\tXG:Z:tr.end"); break;
   case TR_EXT: FPRINTF(fp,"\tXG:Z:tr.ext"); break;
+  case TR_CHAIN: FPRINTF(fp,"\tXG:Z:tr.chain"); break;
+  case TR_CHAIN_K13: FPRINTF(fp,"\tXG:Z:tr.chain.k13"); break;
+  case TR_CHAIN_K11: FPRINTF(fp,"\tXG:Z:tr.chain.k11"); break;
+  case TR_CHAIN_FM_TRDIAG: FPRINTF(fp,"\tXG:Z:tr.chain.fm-trdiag"); break;
+  case TR_CHAIN_FM_LCHAIN: FPRINTF(fp,"\tXG:Z:tr.chain.fm-lchain"); break;
   case KMER_EXACT1: FPRINTF(fp,"\tXG:Z:exact1"); break;
   case KMER_ANYPAIR: FPRINTF(fp,"\tXG:Z:anypair"); break;
   case KMER_PREVALENT: FPRINTF(fp,"\tXG:Z:kmer.prev"); break;
@@ -98,6 +108,11 @@ Method_print (Filestring_T fp, Method_T method) {
   case TR_PREVALENT: FPRINTF(fp,"\tmethod:tr.prev"); break;
   case TR_END: FPRINTF(fp,"\tmethod:tr.end"); break;
   case TR_EXT: FPRINTF(fp,"\tmethod:tr.ext"); break;
+  case TR_CHAIN: FPRINTF(fp,"\tmethod:tr.chain"); break;
+  case TR_CHAIN_K13: FPRINTF(fp,"\tmethod:tr.chain.k13"); break;
+  case TR_CHAIN_K11: FPRINTF(fp,"\tmethod:tr.chain.k11"); break;
+  case TR_CHAIN_FM_TRDIAG: FPRINTF(fp,"\tmethod:tr.chain.fm-trdiag"); break;
+  case TR_CHAIN_FM_LCHAIN: FPRINTF(fp,"\tmethod:tr.chain.fm-lchain"); break;
   case KMER_EXACT1: FPRINTF(fp,"\tmethod:exact1"); break;
   case KMER_ANYPAIR: FPRINTF(fp,"\tmethod:anypair"); break;
   case KMER_PREVALENT: FPRINTF(fp,"\tmethod:kmer.prev"); break;
@@ -122,4 +137,3 @@ Method_print (Filestring_T fp, Method_T method) {
 
   return;
 }
-

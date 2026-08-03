@@ -117,6 +117,8 @@ Uint8list_min (T list);
 extern UINT8 *
 Uint8list_to_array (T list, UINT8 end);
 extern UINT8 *
+Uint8list_to_array_aligned (T list, UINT8 end);
+extern UINT8 *
 Uint8list_to_array_n (int *n, T list);
 extern UINT8 *
 Uint8list_to_array_out (int *n, T list);

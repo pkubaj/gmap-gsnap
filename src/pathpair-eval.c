@@ -6,6 +6,7 @@
 #endif
 
 #include "pathpair-eval.h"
+#include "debug_groups.h"
 #include "path-eval.h"		/* For Path_mark_alignment */
 
 #include "path-solve.h"
@@ -23,6 +24,7 @@
 #include "mapq.h"
 #include "outputtype.h"
 #include "stage1hr.h"
+#include "transcript.h"
 
 
 static bool *circularp;
@@ -33,7 +35,23 @@ static Outputtype_T output_type;
 static bool splicingp;
 static bool resolve_inner_p;
 static bool want_random_p;
-static bool allow_soft_clips_p;
+
+static bool allow_soft_clips_start_p;
+static bool allow_soft_clips_end_p;
+static int paired_terminal_anchor_min_score;
+static int paired_terminal_anchor_slop;
+static bool mincoverage_filter_per_read_p;
+static bool pathpair_equal_coverage_diff_tiebreak_p;
+static double score_match_reward;
+static double score_mismatch_penalty;
+static double score_indel_open_penalty;
+static double score_indel_extend_penalty;
+static double score_splice_unannotated_penalty;
+static double score_pair_transcript_discordance_penalty;
+static double score_pair_margin;
+static double score_min_read;
+static double score_min_pair;
+
 static Chrpos_T max_insertlength;
 
 static Transcriptome_T transcriptome;
@@ -47,23 +65,577 @@ static Transcriptome_T transcriptome;
 #define OUTERLENGTH_FACTOR 1.5
 
 #define INNER_NEEDED 15
+#define POSTFALLBACK_TERMINAL_ANCHOR_MAX_LOW_SCORE 0
+#define POSTFALLBACK_TERMINAL_ANCHOR_MAX_HIGH_SCORE 3
+#define POSTFALLBACK_TERMINAL_ANCHOR_MAX_HIGH_INDELS 1
+#define POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_LOW_SCORE 1
+#define POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_LOW_INDELS 1
+#define POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_HIGH_SCORE 1
 
 
 /* Pathpair_preeval_and_uniq */
-#ifdef DEBUG7
+#if defined(DEBUG7) || defined(DEBUG_PATH_CORE)
 #define debug7(x) x
 #else
 #define debug7(x)
 #endif
 
 /* Pathpair_eval_and_sort */
-#ifdef DEBUG8
+#if defined(DEBUG8) || defined(DEBUG_PATH_CORE)
 #define debug8(x) x
 #else
 #define debug8(x)
 #endif
 
 #define T Path_T
+
+static bool
+path_single_filter_pass_p (Path_T path, int coverage, int nmismatches_filter,
+			   int mincoverage_filter, int querylength,
+			   bool allow_soft_clips_qstart_p, bool allow_soft_clips_qend_p) {
+  if (path->score_within_trims > nmismatches_filter) {
+    return false;
+  } else if (coverage < mincoverage_filter) {
+    return false;
+  } else if (allow_soft_clips_qstart_p == false &&
+	     Intlist_head(path->endpoints) != 0) {
+    return false;
+  } else if (allow_soft_clips_qend_p == false &&
+	     Intlist_last_value(path->endpoints) != querylength) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+static void
+save_rejected_single_path (List_T *paths, Path_T path,
+			   Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
+			   Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
+			   Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
+  Path_T copy;
+
+  if (paths != NULL) {
+    copy = Path_copy(path,intlistpool,univcoordlistpool,listpool,
+		     pathpool,vectorpool,transcriptpool,hitlistpool);
+    *paths = Hitlist_push(*paths,hitlistpool,(void *) copy
+			  hitlistpool_trace(__FILE__,__LINE__));
+  }
+
+  return;
+}
+
+typedef struct Pathpair_one_low_side_T {
+  bool low5p;
+  Path_T low_path;
+  Path_T high_path;
+  int low_coverage;
+  int high_coverage;
+  int low_mincoverage_filter;
+  int high_mincoverage_filter;
+  int low_querylength;
+  int high_querylength;
+} Pathpair_one_low_side_T;
+
+
+static int
+Pathpair_global_cmp (const void *x, const void *y);
+
+
+static void
+Path_final_indel_counts (int *indel_opens, int *indel_extends, Path_T path) {
+  List_T p;
+  Junction_T junction;
+  int nindels;
+
+  *indel_opens = 0;
+  *indel_extends = 0;
+
+  for (p = path->junctions; p != NULL; p = List_next(p)) {
+    junction = (Junction_T) List_head(p);
+    if (Junction_type(junction) == INS_JUNCTION ||
+	Junction_type(junction) == DEL_JUNCTION) {
+      nindels = Junction_nindels(junction);
+      if (nindels > 0) {
+	*indel_opens += 1;
+	*indel_extends += nindels - 1;
+      }
+    }
+  }
+
+  return;
+}
+
+
+static int
+Path_unannotated_splice_count (Path_T path) {
+  List_T p;
+  Junction_T junction;
+  int count = 0;
+
+  for (p = path->junctions; p != NULL; p = List_next(p)) {
+    junction = (Junction_T) List_head(p);
+    if (Junction_type(junction) == SPLICE_JUNCTION &&
+	Junction_annotatedp(junction) == false) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+
+static bool
+Path_transcript_evidence_p (Path_T path) {
+  return path->transcripts != NULL || path->invalid_transcripts != NULL;
+}
+
+
+double
+Path_final_score (Path_T path) {
+  int indel_opens, indel_extends, unannotated_splices;
+
+  Path_final_indel_counts(&indel_opens,&indel_extends,path);
+  unannotated_splices = Path_unannotated_splice_count(path);
+
+  return score_match_reward * (double) path->nmatches
+    - score_mismatch_penalty * (double) path->score_within_trims
+    - score_indel_open_penalty * (double) indel_opens
+    - score_indel_extend_penalty * (double) indel_extends
+    - score_splice_unannotated_penalty * (double) unannotated_splices;
+}
+
+
+bool
+Path_final_score_reportable_p (Path_T path) {
+  return Path_final_score(path) >= score_min_read ? true : false;
+}
+
+
+void
+Path_set_final_score (Path_T path, int pair_score) {
+  path->final_score_p = true;
+  path->final_read_score = (int) rint(Path_final_score(path));
+  path->final_pair_score = pair_score;
+  return;
+}
+
+
+static double
+Pathpair_transcript_discordance_penalty (Pathpair_T pathpair) {
+  if (Path_transcript_evidence_p(pathpair->path5) == true &&
+      Path_transcript_evidence_p(pathpair->path3) == true &&
+      Transcript_intersectp(pathpair->path5->transcripts,pathpair->path3->transcripts) == false) {
+    return score_pair_transcript_discordance_penalty;
+  } else {
+    return 0.0;
+  }
+}
+
+
+static double
+Pathpair_final_score (Pathpair_T pathpair) {
+  return Path_final_score(pathpair->path5) + Path_final_score(pathpair->path3)
+    - Pathpair_transcript_discordance_penalty(pathpair);
+}
+
+
+static bool
+Pathpair_final_score_reportable_p (Pathpair_T pathpair) {
+  double read_score_5 = Path_final_score(pathpair->path5);
+  double read_score_3 = Path_final_score(pathpair->path3);
+  double pair_score = read_score_5 + read_score_3
+    - Pathpair_transcript_discordance_penalty(pathpair);
+
+  if (read_score_5 < score_min_read || read_score_3 < score_min_read) {
+    return false;
+  } else if (pair_score < score_min_pair) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+
+static void
+Pathpair_set_final_scores (Pathpair_T pathpair) {
+  int pair_score = (int) rint(Pathpair_final_score(pathpair));
+
+  Path_set_final_score(pathpair->path5,pair_score);
+  Path_set_final_score(pathpair->path3,pair_score);
+
+  return;
+}
+
+
+static int
+Pathpair_final_score_cmp (const void *x, const void *y) {
+  Pathpair_T a = * (Pathpair_T *) x;
+  Pathpair_T b = * (Pathpair_T *) y;
+  double score_a = Pathpair_final_score(a);
+  double score_b = Pathpair_final_score(b);
+
+  if (score_a > score_b) {
+    return -1;
+  } else if (score_b > score_a) {
+    return +1;
+  } else {
+    return Pathpair_global_cmp(x,y);
+  }
+}
+
+static bool
+pathpair_one_low_side_setup (Pathpair_one_low_side_T *side, Pathpair_T pathpair,
+			     int coverage5, int coverage3,
+			     int mincoverage_filter_5, int mincoverage_filter_3,
+			     int querylength5, int querylength3) {
+  bool low5p = coverage5 < mincoverage_filter_5;
+  bool low3p = coverage3 < mincoverage_filter_3;
+
+  if (low5p == low3p) {
+    return false;
+  } else if (low5p == true) {
+    side->low5p = true;
+    side->low_path = pathpair->path5;
+    side->high_path = pathpair->path3;
+    side->low_coverage = coverage5;
+    side->high_coverage = coverage3;
+    side->low_mincoverage_filter = mincoverage_filter_5;
+    side->high_mincoverage_filter = mincoverage_filter_3;
+    side->low_querylength = querylength5;
+    side->high_querylength = querylength3;
+  } else {
+    side->low5p = false;
+    side->low_path = pathpair->path3;
+    side->high_path = pathpair->path5;
+    side->low_coverage = coverage3;
+    side->high_coverage = coverage5;
+    side->low_mincoverage_filter = mincoverage_filter_3;
+    side->high_mincoverage_filter = mincoverage_filter_5;
+    side->low_querylength = querylength3;
+    side->high_querylength = querylength5;
+  }
+
+  return true;
+}
+
+static bool
+pathpair_mincoverage_rescue_side_p (const Pathpair_one_low_side_T *side) {
+  if (side->low_path->score_within_trims != 0 ||
+      side->high_path->score_within_trims != 0) {
+    return false;
+  } else if (Path_nindels(side->low_path) + Path_nindels(side->high_path) != 0) {
+    return false;
+  } else if (side->low_coverage + side->high_coverage <
+	     side->low_mincoverage_filter + side->high_mincoverage_filter) {
+    return false;
+  } else if (side->low_coverage < (side->low_mincoverage_filter * 3)/4) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+static bool
+path_terminal_anchor_p (Path_T path, int coverage, int querylength) {
+  int qstart, qend;
+
+  if (coverage < paired_terminal_anchor_min_score) {
+    return false;
+  } else {
+    qstart = Intlist_head(path->endpoints);
+    qend = Intlist_last_value(path->endpoints);
+    return (qstart <= paired_terminal_anchor_slop ||
+	    qend >= querylength - paired_terminal_anchor_slop) ? true : false;
+  }
+}
+
+static bool
+path_clean_full_partner_p (Path_T path, int coverage, int mincoverage_filter, int querylength) {
+  if (path->score_within_trims != 0) {
+    return false;
+  } else if (Path_nindels(path) != 0) {
+    return false;
+  } else if (coverage < mincoverage_filter) {
+    return false;
+  } else if (Intlist_head(path->endpoints) != 0 ||
+	     Intlist_last_value(path->endpoints) != querylength) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+bool
+Pathpair_near_exact_terminal_anchor_partner_p (Path_T path) {
+  return (path->score_within_trims <= POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_HIGH_SCORE &&
+	  Path_nindels(path) == 0) ? true : false;
+}
+
+static bool
+path_near_exact_terminal_anchor_core_p (Path_T path, int coverage, int mincoverage_filter,
+					int querylength, bool clean_full_partner_p) {
+  int mincoverage, nindels;
+  bool one_error_no_indel_p, transcript_backed_one_error_p, paired_supported_one_error_p;
+
+  if (path->score_within_trims < 0 ||
+      path->score_within_trims > POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_LOW_SCORE) {
+    return false;
+  } else if ((nindels = Path_nindels(path)) > POSTFALLBACK_NEAR_EXACT_TERMINAL_ANCHOR_MAX_LOW_INDELS) {
+    return false;
+  } else {
+    one_error_no_indel_p =
+      (path->score_within_trims > POSTFALLBACK_TERMINAL_ANCHOR_MAX_LOW_SCORE && nindels == 0) ?
+      true : false;
+    transcript_backed_one_error_p =
+      (one_error_no_indel_p == true && path->transcriptome_method_p == true &&
+       path->transcripts != NULL) ? true : false;
+    paired_supported_one_error_p =
+      (one_error_no_indel_p == true && clean_full_partner_p == true) ? true : false;
+
+    mincoverage = paired_terminal_anchor_min_score;
+    /* A one-error terminal anchor needs more support than an exact one. */
+    if ((path->score_within_trims > POSTFALLBACK_TERMINAL_ANCHOR_MAX_LOW_SCORE || nindels > 0) &&
+	transcript_backed_one_error_p == false &&
+	paired_supported_one_error_p == false &&
+	mincoverage_filter/2 > mincoverage) {
+      mincoverage = mincoverage_filter/2;
+    }
+    /* Paired/deferred callers may keep a one-mismatch genomic terminal anchor
+       with one-third coverage if the opposite mate is a clean full-length path. */
+    if (paired_supported_one_error_p == true &&
+	transcript_backed_one_error_p == false &&
+	mincoverage_filter/3 > mincoverage) {
+      mincoverage = mincoverage_filter/3;
+    }
+
+    if (coverage < mincoverage) {
+      return false;
+    } else {
+      return path_terminal_anchor_p(path,coverage,querylength);
+    }
+  }
+}
+
+static bool
+path_near_exact_terminal_anchor_with_partner_p (Path_T path, int coverage, int mincoverage_filter,
+						int querylength, Path_T partner, int partner_coverage,
+						int partner_mincoverage_filter, int partner_querylength) {
+  bool clean_full_partner_p =
+    path_clean_full_partner_p(partner,partner_coverage,partner_mincoverage_filter,partner_querylength);
+
+  return path_near_exact_terminal_anchor_core_p(path,coverage,mincoverage_filter,
+						querylength,clean_full_partner_p);
+}
+
+static bool
+pathpair_terminal_anchor_rescue_side_p (const Pathpair_one_low_side_T *side) {
+  if (side->low_path->score_within_trims != 0 ||
+      side->high_path->score_within_trims != 0) {
+    return false;
+  } else if (Path_nindels(side->low_path) + Path_nindels(side->high_path) != 0) {
+    return false;
+  } else {
+    return (side->high_coverage >= side->high_mincoverage_filter &&
+	    path_terminal_anchor_p(side->low_path,side->low_coverage,side->low_querylength)) ?
+      true : false;
+  }
+}
+
+static bool
+pathpair_terminal_anchor_rescue_p (Pathpair_T pathpair, int coverage5, int coverage3,
+				   int mincoverage_filter_5, int mincoverage_filter_3,
+				   int querylength5, int querylength3) {
+  Pathpair_one_low_side_T side;
+
+  return (pathpair_one_low_side_setup(&side,pathpair,coverage5,coverage3,
+				      mincoverage_filter_5,mincoverage_filter_3,
+				      querylength5,querylength3) == true &&
+	  pathpair_terminal_anchor_rescue_side_p(&side) == true) ? true : false;
+}
+
+static bool
+pathpair_low_coverage_side_nonexact_p (Pathpair_T pathpair, int coverage5, int coverage3,
+				       int mincoverage_filter_5, int mincoverage_filter_3) {
+  if (coverage5 < mincoverage_filter_5 &&
+      (pathpair->path5->score_within_trims > 0 || Path_nindels(pathpair->path5) > 0)) {
+    return true;
+  } else if (coverage3 < mincoverage_filter_3 &&
+	     (pathpair->path3->score_within_trims > 0 || Path_nindels(pathpair->path3) > 0)) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static bool
+pathpair_low_coverage_side_substantial_p (int coverage5, int coverage3,
+					  int mincoverage_filter_5, int mincoverage_filter_3,
+					  int querylength5, int querylength3) {
+  if (coverage5 < mincoverage_filter_5) {
+    return (coverage5 * 3 >= querylength5) ? true : false;
+  } else if (coverage3 < mincoverage_filter_3) {
+    return (coverage3 * 3 >= querylength3) ? true : false;
+  } else {
+    return false;
+  }
+}
+
+static bool
+pathpair_postfallback_terminal_anchor_rescue_side_p (const Pathpair_one_low_side_T *side) {
+  int nindels_high;
+
+  nindels_high = Path_nindels(side->high_path);
+  return (side->low_path->score_within_trims <= POSTFALLBACK_TERMINAL_ANCHOR_MAX_LOW_SCORE &&
+	  side->high_path->score_within_trims <= POSTFALLBACK_TERMINAL_ANCHOR_MAX_HIGH_SCORE &&
+	  Path_nindels(side->low_path) == 0 &&
+	  nindels_high <= POSTFALLBACK_TERMINAL_ANCHOR_MAX_HIGH_INDELS &&
+	  (nindels_high == 0 || side->low_coverage >= side->low_mincoverage_filter/2) &&
+	  side->high_coverage >= side->high_mincoverage_filter &&
+	  path_terminal_anchor_p(side->low_path,side->low_coverage,side->low_querylength)) ?
+    true : false;
+}
+
+static bool
+pathpair_postfallback_terminal_anchor_rescue_p (Pathpair_T pathpair, int coverage5, int coverage3,
+						int mincoverage_filter_5, int mincoverage_filter_3,
+						int querylength5, int querylength3) {
+  Pathpair_one_low_side_T side;
+
+  return (pathpair_one_low_side_setup(&side,pathpair,coverage5,coverage3,
+				      mincoverage_filter_5,mincoverage_filter_3,
+				      querylength5,querylength3) == true &&
+	  pathpair_postfallback_terminal_anchor_rescue_side_p(&side) == true) ? true : false;
+}
+
+typedef enum Pathpair_local_anchor_rescue_T {
+  PATHPAIR_LOCAL_ANCHOR_RESCUE_NONE,
+  PATHPAIR_LOCAL_ANCHOR_RESCUE_TERMINAL,
+  PATHPAIR_LOCAL_ANCHOR_RESCUE_POSTFALLBACK
+} Pathpair_local_anchor_rescue_T;
+
+static Pathpair_local_anchor_rescue_T
+pathpair_local_terminal_anchor_rescue (int *coverage5_out, int *coverage3_out,
+				       Pathpair_T pathpair,
+				       bool best_low_coverage_p,
+				       bool best_low_coverage_side_nonexact_p,
+				       bool best_terminal_anchor_rescue_p,
+				       bool best_postfallback_terminal_anchor_rescue_p,
+				       bool require_best_low_coverage_side_nonexact_p,
+				       bool require_low_coverage_side_substantial_p,
+				       int mincoverage_filter_5, int mincoverage_filter_3,
+				       int querylength5, int querylength3,
+				       List_T *terminal_anchor_pathpairs_deferred,
+				       bool allow_postfallback_terminal_anchor_rescue_p) {
+  int coverage5, coverage3;
+
+  if (best_low_coverage_p == false ||
+      best_terminal_anchor_rescue_p == true) {
+    return PATHPAIR_LOCAL_ANCHOR_RESCUE_NONE;
+  } else if (require_best_low_coverage_side_nonexact_p == true &&
+	     best_low_coverage_side_nonexact_p == false) {
+    return PATHPAIR_LOCAL_ANCHOR_RESCUE_NONE;
+  } else {
+    coverage5 = Path_coverage(pathpair->path5);
+    coverage3 = Path_coverage(pathpair->path3);
+  }
+
+  if (pathpair_terminal_anchor_rescue_p(pathpair,coverage5,coverage3,
+					mincoverage_filter_5,mincoverage_filter_3,
+					querylength5,querylength3) == true &&
+      (require_low_coverage_side_substantial_p == false ||
+       pathpair_low_coverage_side_substantial_p(coverage5,coverage3,
+						mincoverage_filter_5,mincoverage_filter_3,
+						querylength5,querylength3) == true)) {
+    *coverage5_out = coverage5;
+    *coverage3_out = coverage3;
+    return PATHPAIR_LOCAL_ANCHOR_RESCUE_TERMINAL;
+
+  } else if (best_postfallback_terminal_anchor_rescue_p == false &&
+	     (terminal_anchor_pathpairs_deferred != NULL ||
+	      allow_postfallback_terminal_anchor_rescue_p == true) &&
+	     pathpair_postfallback_terminal_anchor_rescue_p(pathpair,coverage5,coverage3,
+							   mincoverage_filter_5,mincoverage_filter_3,
+							   querylength5,querylength3) == true &&
+	     (require_low_coverage_side_substantial_p == false ||
+	      pathpair_low_coverage_side_substantial_p(coverage5,coverage3,
+						       mincoverage_filter_5,mincoverage_filter_3,
+						       querylength5,querylength3) == true)) {
+    *coverage5_out = coverage5;
+    *coverage3_out = coverage3;
+    return PATHPAIR_LOCAL_ANCHOR_RESCUE_POSTFALLBACK;
+
+  } else {
+    return PATHPAIR_LOCAL_ANCHOR_RESCUE_NONE;
+  }
+}
+
+static bool
+pathpair_near_exact_terminal_anchor_rescue_side_p (const Pathpair_one_low_side_T *side) {
+  return (Pathpair_near_exact_terminal_anchor_partner_p(side->high_path) == true &&
+	  side->high_coverage >= side->high_mincoverage_filter &&
+	  path_near_exact_terminal_anchor_with_partner_p(side->low_path,side->low_coverage,
+							 side->low_mincoverage_filter,side->low_querylength,
+							 side->high_path,side->high_coverage,
+							 side->high_mincoverage_filter,
+							 side->high_querylength)) ? true : false;
+}
+
+static bool
+pathpair_near_exact_low_side_path_p (const Pathpair_one_low_side_T *side) {
+  return (side->high_coverage >= side->high_mincoverage_filter &&
+	  path_near_exact_terminal_anchor_with_partner_p(side->low_path,side->low_coverage,
+							 side->low_mincoverage_filter,side->low_querylength,
+							 side->high_path,side->high_coverage,
+							 side->high_mincoverage_filter,
+							 side->high_querylength)) ? true : false;
+}
+
+static bool
+pathpair_clean_transcript_overlap_p (Pathpair_T pathpair, int coverage5, int coverage3,
+				     int mincoverage_filter_5, int mincoverage_filter_3) {
+  if (pathpair->outerlength > INNER_NEEDED) {
+    return false;
+  } else if (pathpair->path5->transcripts == NULL || pathpair->path3->transcripts == NULL) {
+    return false;
+  } else if (pathpair->transcript_concordant_p == false) {
+    return false;
+  } else if (pathpair->path5->score_within_trims != 0 ||
+	     pathpair->path3->score_within_trims != 0) {
+    return false;
+  } else if (Path_nindels(pathpair->path5) + Path_nindels(pathpair->path3) != 0) {
+    return false;
+  } else if (coverage5 < mincoverage_filter_5 || coverage3 < mincoverage_filter_3) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+static int
+Pathpair_equal_coverage_diff_cmp (Pathpair_T a, Pathpair_T b) {
+  int ndiffs_a, ndiffs_b, nindels_a, nindels_b;
+
+  ndiffs_a = Path_ndiffs(a->pathL) + Path_ndiffs(a->pathH);
+  ndiffs_b = Path_ndiffs(b->pathL) + Path_ndiffs(b->pathH);
+
+  if (ndiffs_a < ndiffs_b) {
+    return -1;
+  } else if (ndiffs_b < ndiffs_a) {
+    return +1;
+  }
+
+  nindels_a = Path_nindels(a->pathL) + Path_nindels(a->pathH);
+  nindels_b = Path_nindels(b->pathL) + Path_nindels(b->pathH);
+
+  if (nindels_a < nindels_b) {
+    return -1;
+  } else if (nindels_b < nindels_a) {
+    return +1;
+  } else {
+    return 0;
+  }
+}
 
 /* For DNA-seq reads, do not want to use insertlength or outerlength */
 /* Duplicates with respect to method have already been taken care of */
@@ -126,6 +698,7 @@ Pathpair_local_cmp (const void *x, const void *y) {
   Pathpair_T b = * (Pathpair_T *) y;
 
   int cmpL, cmpH;
+  int diff_cmp;
   int chopped_nmatches_a, chopped_nmatches_b, nmatches_a, nmatches_b;
 
   int coverage_a, coverage_b;
@@ -146,7 +719,7 @@ Pathpair_local_cmp (const void *x, const void *y) {
   /* Fusions can eliminate good results.  Can judge all by their nmatches */
   bool fusionp_x = false, fusionp_y = false;
 
-#ifdef DEBUG8
+#if defined(DEBUG8) || defined(DEBUG_PATH_CORE)
   printf("Pathpair_local_cmp comparing\n");
   Pathpair_print(a);
   Pathpair_print(b);
@@ -199,6 +772,11 @@ Pathpair_local_cmp (const void *x, const void *y) {
     return +1;
   }
 #endif
+
+  if (pathpair_equal_coverage_diff_tiebreak_p == true && coverage_a == coverage_b &&
+      (diff_cmp = Pathpair_equal_coverage_diff_cmp(a,b)) != 0) {
+    return diff_cmp;
+  }
     
 #if 0
   /* With better control over long splices, this is no longer useful */
@@ -350,6 +928,7 @@ Pathpair_global_cmp (const void *x, const void *y) {
   Pathpair_T b = * (Pathpair_T *) y;
 
   int cmpL, cmpH;
+  int diff_cmp;
   int chopped_nmatches_a, chopped_nmatches_b, nmatches_a, nmatches_b;
 
   int coverage_a, coverage_b;
@@ -405,6 +984,11 @@ Pathpair_global_cmp (const void *x, const void *y) {
     return +1;
   }
 #endif
+
+  if (pathpair_equal_coverage_diff_tiebreak_p == true && coverage_a == coverage_b &&
+      (diff_cmp = Pathpair_equal_coverage_diff_cmp(a,b)) != 0) {
+    return diff_cmp;
+  }
     
   cmpL = Path_nmatches_cmp(a->pathL,b->pathL);
   cmpH = Path_nmatches_cmp(a->pathH,b->pathH);
@@ -507,7 +1091,7 @@ Pathpair_preeval_and_uniq (List_T pathpairs, Pathpair_T *pathpairarray, int npat
   int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
 
   
-#ifdef DEBUG7
+#if defined(DEBUG7) || defined(DEBUG_PATH_CORE)
   printf("Entered Pathpair_preeval_and_uniq with %d pathpairs\n",npaths);
   for (int pathi = 0; pathi < npaths; pathi++) {
     printf("Pathpair (sense %d and %d): %p and %p\n",
@@ -666,7 +1250,7 @@ Pathpair_uniq (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
   int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
 
   
-#ifdef DEBUG7
+#if defined(DEBUG7) || defined(DEBUG_PATH_CORE)
   printf("Entered Pathpair_preeval_and_uniq with %d pathpairs\n",npaths);
   for (int pathi = 0; pathi < npaths; pathi++) {
     printf("Pathpair (sense %d and %d): %p and %p\n",
@@ -865,8 +1449,9 @@ Pathpair_pick_dir (List_T pathpairs, Pathpair_T *pathpairarray, int npaths,
    path creation, and then an empty pathpairarray */
 
 Pathpair_T *
-Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
+Pathpair_eval_and_sort (int *found_score_5, int *found_score_3, int *end_score_5, int *end_score_3,
 			int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq,
+			List_T *singlepaths5_from_rejected, List_T *singlepaths3_from_rejected,
 			Pathpair_T *pathpairarray, int npaths, Stage1_T stage1_5, Stage1_T stage1_3,
 			Compress_T query5_compress_fwd, Compress_T query5_compress_rev,
 			Compress_T query3_compress_fwd, Compress_T query3_compress_rev,
@@ -875,9 +1460,9 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			char *quality_string_5, char *quality_string_3,
 
 			int *mismatch_positions_alloc_5, int *mismatch_positions_alloc_3,
-			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			unsigned short *localdb_alloc, int localdb_nmismatches_allowed,
+			unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+			int max_nblocks, int localdb_nmismatches_allowed,
 
 			Knownsplicing_T knownsplicing, Knownindels_T knownindels,
 
@@ -887,32 +1472,46 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 			Univdiagpool_T univdiagpool, Intlistpool_T intlistpool,
 			Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
 			Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-			Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, bool filterp) {
+			Vectorpool_T vectorpool, Hitlistpool_T hitlistpool,
+			List_T *terminal_anchor_pathpairs_deferred,
+			List_T *terminal_anchor_paths5_deferred,
+			List_T *terminal_anchor_paths3_deferred,
+			bool filterp, bool allow_postfallback_terminal_anchor_rescue_p,
+			bool allow_near_exact_terminal_anchor_rescue_p) {
   int pathi;
   float maxlik, loglik;
 
   float total, qual;
   int mapq_score;
 
-  int randomi, i, j, k, l;
-  Pathpair_T temp, pathpair;
+  int randomi, i, j, k, l, structure_cmp;
+  int rescue_npaths;
+  Pathpair_T temp, pathpair, *rescue_pathpairarray;
   Path_T path5, path3;
   Univcoord_T high, low, distal5, distal3;
   int tr_insertlength;
 
   bool valid5p, valid3p;
+  bool allow_soft_clips_qstart_p, allow_soft_clips_qend_p;
   bool possible_fusion5_p = false, possible_fusion3_p = false;
+  bool best_low_coverage_p, best_low_coverage_side_nonexact_p;
+  bool best_terminal_anchor_rescue_p, best_postfallback_terminal_anchor_rescue_p;
+  Pathpair_local_anchor_rescue_T local_anchor_rescue;
+  bool one_low_side_p;
+  Pathpair_one_low_side_T low_side;
+  int coverage5, coverage3, best_coverage5, best_coverage3;
 
   List_T paths, fusion_paths_5, fusion_paths_3, p, q;
   List_T unresolved_pathpairs;
+  double best_pair_score, accepted_pair_score, pair_score;
   double best_avg_junction_sense_prob, best_avg_junction_antisense_prob,
     best_end_sense_prob, best_end_antisense_prob, prob;
   /* int best_querystart5, best_queryend5, best_querystart3, best_queryend3, querystart, queryend; */
   int chop_qstart_L, chop_qend_L, chop_qstart_H, chop_qend_H, qstart, qend;
-  int ignore_found_score;
+  int ignore_found_score = 0, ignore_end_score = 0;
 
   
-#ifdef DEBUG8
+#if defined(DEBUG8) || defined(DEBUG_PATH_CORE)
   printf("Entered Pathpair_eval_and_sort with %d pathpairs\n",npaths);
   for (pathi = 0; pathi < npaths; pathi++) {
     printf("Pathpair (sense %d and %d): %p and %p\n",
@@ -1000,10 +1599,12 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 				      query3_compress_fwd,query3_compress_rev);
     }
     /* true means that endpoints were acceptable */
-    if (Path_trim_chrbounds(&ignore_found_score,path5,query5_compress_fwd,query5_compress_rev,
+    if (Path_trim_chrbounds(&ignore_found_score,&ignore_end_score,
+			    path5,query5_compress_fwd,query5_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,
 			    transcriptpool) == true &&
-	Path_trim_chrbounds(&ignore_found_score,path3,query3_compress_fwd,query3_compress_rev,
+	Path_trim_chrbounds(&ignore_found_score,&ignore_end_score,
+			    path3,query3_compress_fwd,query3_compress_rev,
 			    intlistpool,univcoordlistpool,listpool,pathpool,
 			    transcriptpool) == true) {
       pathpairarray[k++] = pathpair;
@@ -1040,7 +1641,15 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
       valid5p = valid3p = true;
       
       debug8(printf("Resolving paths %p and %p\n",path5,path3));
-      if (pathpair->plusp == true) {
+      coverage5 = Path_coverage(path5);
+      coverage3 = Path_coverage(path3);
+      if (pathpair_clean_transcript_overlap_p(pathpair,coverage5,coverage3,
+					      mincoverage_filter_5,mincoverage_filter_3) == true) {
+	/* This short-overlap transcript pair is already scored; trimming can erase valid exonic coverage. */
+	debug8(printf("Skipping inner overlap resolve for clean transcript pathpair: %d and %d coverage, outerlength %u\n",
+		      coverage5,coverage3,pathpair->outerlength));
+
+      } else if (pathpair->plusp == true) {
 	distal5 = Path_genomiclow(path5);
 	distal3 = Path_genomichigh(path3);
 	
@@ -1092,14 +1701,14 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	} else {
 	  /* Need to call even if resolved, because of overreach issues */
 	  debug8(printf("Calling Pathpair_resolve\n"));
-	  Pathpair_resolve(&(*found_score_5),&(*found_score_3),
+	  Pathpair_resolve(&(*found_score_5),&(*found_score_3),&(*end_score_5),&(*end_score_3),
 			   pathpair,pathpair->plusp,/*genestrand*/0,
 			   query5_compress_fwd,query5_compress_fwd,query5_compress_rev,
 			   query3_compress_fwd,query3_compress_fwd,query3_compress_rev,
 			   /*queryseqL*/queryseq5,/*queryseqH*/queryseq3,queryuc_ptr_5,queryuc_ptr_3,
 			   /*querylengthL*/querylength5,/*querylengthH*/querylength3,
-			   streamspace_max_alloc,streamspace_alloc,
 			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			   localdb_tally,localdb_overflowp,max_nblocks,
 			   localdb_nmismatches_allowed,
 			   
 			   stage1_5,stage1_3,knownsplicing,
@@ -1161,14 +1770,14 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	} else {
 	  /* Need to call even if resolved, because of overreach issues */
 	  debug8(printf("Calling Pathpair_resolve\n"));
-	  Pathpair_resolve(&(*found_score_5),&(*found_score_3),
+	  Pathpair_resolve(&(*found_score_5),&(*found_score_3),&(*end_score_5),&(*end_score_3),
 			   pathpair,pathpair->plusp,/*genestrand*/0,
 			   query3_compress_rev,query3_compress_fwd,query3_compress_rev,
 			   query5_compress_rev,query5_compress_fwd,query5_compress_rev,
 			   /*queryseqL*/queryseq3,/*queryseqH*/queryseq5,queryrc3,queryrc5,
 			   /*querylengthL*/querylength3,/*querylengthH*/querylength5,
-			   streamspace_max_alloc,streamspace_alloc,
 			   novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
+			   localdb_tally,localdb_overflowp,max_nblocks,
 			   localdb_nmismatches_allowed,
 
 			   stage1_3,stage1_5,knownsplicing,
@@ -1187,6 +1796,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
     }
 
     if ((npaths = k) == 0) {
+      FREE_OUT(pathpairarray);
       *npaths_primary = *npaths_altloc = 0;
       *first_absmq = 0;
       *second_absmq = 0;
@@ -1299,6 +1909,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
       paths = Hitlist_push(paths,hitlistpool, (void *) pathpair
 			   hitlistpool_trace(__FILE__,__LINE__));
       
+#ifdef FUSION
       /* Look for fusion paths */
       if (pathpair->plusp == true) {
 	/* plus */
@@ -1308,7 +1919,8 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	  /* Skip: requires sense */
 	  fusion_paths_5 = (List_T) NULL;
 	} else {
-	  fusion_paths_5 = Path_fusion_outer_querystart_plus(&(*found_score_5),/*main*/pathpair->path5,stage1_5,
+	  fusion_paths_5 = Path_fusion_outer_querystart_plus(&(*found_score_5),&(*end_score_5),
+							     /*main*/pathpair->path5,stage1_5,
 
 							     query5_compress_fwd,query5_compress_rev,
 							     queryseq5,querylength5,knownsplicing,
@@ -1324,7 +1936,8 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	  /* Skip: requires sense */
 	  fusion_paths_3 = (List_T) NULL;
 	} else {
-	  fusion_paths_3 = Path_fusion_outer_queryend_plus(&(*found_score_3),/*main*/pathpair->path3,stage1_3,
+	  fusion_paths_3 = Path_fusion_outer_queryend_plus(&(*found_score_3),&(*end_score_3),
+							   /*main*/pathpair->path3,stage1_3,
 
 							   query3_compress_fwd,query3_compress_rev,
 							   queryseq3,querylength3,knownsplicing,
@@ -1400,7 +2013,8 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	  /* Skip: requires antisense */
 	  fusion_paths_3 = (List_T) NULL;
 	} else {
-	  fusion_paths_3 = Path_fusion_outer_querystart_minus(&(*found_score_3),/*main*/pathpair->path3,stage1_3,
+	  fusion_paths_3 = Path_fusion_outer_querystart_minus(&(*found_score_3),&(*end_score_3),
+							      /*main*/pathpair->path3,stage1_3,
 
 							      query3_compress_fwd,query3_compress_rev,
 							      queryseq3,querylength3,knownsplicing,
@@ -1416,7 +2030,8 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	  /* Skip: requires antisense */
 	  fusion_paths_5 = (List_T) NULL;
 	} else {
-	  fusion_paths_5 = Path_fusion_outer_queryend_minus(&(*found_score_5),/*main*/pathpair->path5,stage1_5,
+	  fusion_paths_5 = Path_fusion_outer_queryend_minus(&(*found_score_5),&(*end_score_5),
+							    /*main*/pathpair->path5,stage1_5,
 
 							    query5_compress_fwd,query5_compress_rev,
 							    queryseq5,querylength5,knownsplicing,
@@ -1484,6 +2099,7 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
 	  Path_gc(&fusion_paths_3,intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,hitlistpool);
 	}
       }
+#endif	/* FUSION */
     }
 
     /* Use new pathpairarray that integrates original paths and fusions */
@@ -1624,20 +2240,95 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
       
       /* Keep the best ones in the overlapping group */
       qsort(&(pathpairarray[i]),j - i,sizeof(Pathpair_T),Pathpair_local_cmp);
-      debug8(printf("(5 best) Keeping by local_cmp ")); debug8(Pathpair_print(pathpairarray[i]));
-      pathpairarray[k++] = pathpairarray[i];
+      temp = pathpairarray[i];
+      debug8(printf("(5 best) Keeping by local_cmp ")); debug8(Pathpair_print(temp));
+      pathpairarray[k++] = temp;
+
+      if (mincoverage_filter_per_read_p == true) {
+	best_coverage5 = Path_coverage(temp->path5);
+	best_coverage3 = Path_coverage(temp->path3);
+	best_low_coverage_p =
+	  (best_coverage5 < mincoverage_filter_5 ||
+	   best_coverage3 < mincoverage_filter_3) ? true : false;
+	best_terminal_anchor_rescue_p =
+	  pathpair_terminal_anchor_rescue_p(temp,best_coverage5,best_coverage3,
+					    mincoverage_filter_5,mincoverage_filter_3,
+					    querylength5,querylength3);
+	best_postfallback_terminal_anchor_rescue_p =
+	  pathpair_postfallback_terminal_anchor_rescue_p(temp,best_coverage5,best_coverage3,
+							 mincoverage_filter_5,mincoverage_filter_3,
+							 querylength5,querylength3);
+	best_low_coverage_side_nonexact_p =
+	  pathpair_low_coverage_side_nonexact_p(temp,best_coverage5,best_coverage3,
+					       mincoverage_filter_5,mincoverage_filter_3);
+      } else {
+	best_low_coverage_p = best_low_coverage_side_nonexact_p =
+	  best_terminal_anchor_rescue_p =
+	  best_postfallback_terminal_anchor_rescue_p = false;
+      }
 	
       for (l = i + 1; l < j; l++) {
 	pathpair = pathpairarray[l];
-	if (Pathpair_structure_ignore_sense_cmp(&pathpair,&(pathpairarray[i])) == 0) {
-	  debug8(printf("(5 identical) Eliminating by identical structure ")); debug8(Pathpair_print(pathpair));
-	  Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
-			listpool,pathpool,transcriptpool,hitlistpool);
+	structure_cmp = Pathpair_structure_ignore_sense_cmp(&pathpair,&temp);
+	if (structure_cmp == 0) {
+	  local_anchor_rescue =
+	    pathpair_local_terminal_anchor_rescue(&coverage5,&coverage3,pathpair,
+						  best_low_coverage_p,
+						  best_low_coverage_side_nonexact_p,
+						  best_terminal_anchor_rescue_p,
+						  best_postfallback_terminal_anchor_rescue_p,
+						  /*require_best_low_coverage_side_nonexact_p*/true,
+						  /*require_low_coverage_side_substantial_p*/true,
+						  mincoverage_filter_5,mincoverage_filter_3,
+						  querylength5,querylength3,
+						  terminal_anchor_pathpairs_deferred,
+						  allow_postfallback_terminal_anchor_rescue_p);
+	  if (local_anchor_rescue == PATHPAIR_LOCAL_ANCHOR_RESCUE_TERMINAL) {
+	    debug8(printf("(5 rescue) Keeping paired terminal-anchor rescue before identical-structure deletion: %d and %d coverage ",
+			  coverage5,coverage3));
+	    debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+
+	  } else if (local_anchor_rescue == PATHPAIR_LOCAL_ANCHOR_RESCUE_POSTFALLBACK) {
+	    debug8(printf("(5 rescue) Keeping post-fallback terminal-anchor rescue before identical-structure deletion: %d and %d coverage ",
+			  coverage5,coverage3));
+	    debug8(Pathpair_print(pathpair));
+	    pathpairarray[k++] = pathpair;
+
+	  } else {
+	    debug8(printf("(5 identical) Eliminating by identical structure ")); debug8(Pathpair_print(pathpair));
+	    Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			  listpool,pathpool,transcriptpool,hitlistpool);
+	  }
 	  
-	} else if (Pathpair_local_cmp(&pathpair,&(pathpairarray[i])) == 0) {
+	} else if (Pathpair_local_cmp(&pathpair,&temp) == 0) {
 	  debug8(printf("(5 tie) Keeping by local_cmp ")); debug8(Pathpair_print(pathpair));
 	  pathpairarray[k++] = pathpair;
-	    
+
+	} else if ((local_anchor_rescue =
+		    pathpair_local_terminal_anchor_rescue(&coverage5,&coverage3,pathpair,
+							  best_low_coverage_p,
+							  best_low_coverage_side_nonexact_p,
+							  best_terminal_anchor_rescue_p,
+							  best_postfallback_terminal_anchor_rescue_p,
+							  /*require_best_low_coverage_side_nonexact_p*/false,
+							  /*require_low_coverage_side_substantial_p*/false,
+							  mincoverage_filter_5,mincoverage_filter_3,
+							  querylength5,querylength3,
+							  terminal_anchor_pathpairs_deferred,
+							  allow_postfallback_terminal_anchor_rescue_p)) ==
+		   PATHPAIR_LOCAL_ANCHOR_RESCUE_TERMINAL) {
+	  debug8(printf("(5 rescue) Keeping paired terminal-anchor rescue over low-coverage local_cmp best: %d and %d coverage ",
+			coverage5,coverage3));
+	  debug8(Pathpair_print(pathpair));
+	  pathpairarray[k++] = pathpair;
+
+	} else if (local_anchor_rescue == PATHPAIR_LOCAL_ANCHOR_RESCUE_POSTFALLBACK) {
+	  debug8(printf("(5 rescue) Keeping post-fallback terminal-anchor rescue over low-coverage local_cmp best: %d and %d coverage ",
+			coverage5,coverage3));
+	  debug8(Pathpair_print(pathpair));
+	  pathpairarray[k++] = pathpair;
+
 	} else {
 	  debug8(printf("(5 worse) Eliminating by local_cmp ")); debug8(Pathpair_print(pathpair));
 	  Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
@@ -1651,7 +2342,182 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
   }
 
 
-  /* 6.  Find best solution globally */
+  /* 6.  Filter the results */
+  if (filterp == true) {
+    rescue_pathpairarray = (Pathpair_T *) MALLOC_OUT(npaths * sizeof(Pathpair_T));
+    rescue_npaths = 0;
+    k = 0;
+    for (i = 0; i < npaths; i++) {
+      pathpair = pathpairarray[i];
+      
+      if (pathpair->plusp == true) {
+	allow_soft_clips_qstart_p = allow_soft_clips_start_p;
+	allow_soft_clips_qend_p = allow_soft_clips_end_p;
+      } else {
+	allow_soft_clips_qstart_p = allow_soft_clips_end_p;
+	allow_soft_clips_qend_p = allow_soft_clips_start_p;
+      }
+      coverage5 = Path_coverage(pathpair->path5);
+      coverage3 = Path_coverage(pathpair->path3);
+      one_low_side_p =
+	(mincoverage_filter_per_read_p == true &&
+	 pathpair_one_low_side_setup(&low_side,pathpair,coverage5,coverage3,
+				     mincoverage_filter_5,mincoverage_filter_3,
+				     querylength5,querylength3) == true) ? true : false;
+
+      if (pathpair->path5->score_within_trims > nmismatches_filter_5 || pathpair->path3->score_within_trims > nmismatches_filter_3) {
+	debug8(printf("(6 filter) Eliminating: solution has too many %d + %d nmismatches\n",
+		      pathpair->path5->score_within_trims,pathpair->path3->score_within_trims));
+	Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+
+      } else if ((mincoverage_filter_per_read_p == true &&
+		  (coverage5 < mincoverage_filter_5 || coverage3 < mincoverage_filter_3)) ||
+		 (mincoverage_filter_per_read_p == false &&
+		  coverage5 < mincoverage_filter_5 && coverage3 < mincoverage_filter_3)) {
+	if (one_low_side_p == true &&
+	    pathpair_mincoverage_rescue_side_p(&low_side) == true) {
+	  debug8(printf("(6 filter) Saving clean paired coverage rescue: %d and %d coverage\n",
+			coverage5,coverage3));
+	  rescue_pathpairarray[rescue_npaths++] = pathpair;
+
+	} else if (one_low_side_p == true &&
+		   pathpair_terminal_anchor_rescue_side_p(&low_side) == true) {
+	  debug8(printf("(6 filter) Saving paired terminal-anchor coverage rescue: %d and %d coverage\n",
+			coverage5,coverage3));
+	  rescue_pathpairarray[rescue_npaths++] = pathpair;
+
+	} else if (allow_postfallback_terminal_anchor_rescue_p == true &&
+		   one_low_side_p == true &&
+		   pathpair_postfallback_terminal_anchor_rescue_side_p(&low_side) == true) {
+	  debug8(printf("(6 filter) Saving post-fallback terminal-anchor coverage rescue: %d and %d coverage, scores %d and %d\n",
+			coverage5,coverage3,pathpair->path5->score_within_trims,pathpair->path3->score_within_trims));
+	  rescue_pathpairarray[rescue_npaths++] = pathpair;
+
+	} else if (allow_near_exact_terminal_anchor_rescue_p == true &&
+		   one_low_side_p == true &&
+		   pathpair_near_exact_terminal_anchor_rescue_side_p(&low_side) == true) {
+	  debug8(printf("(6 filter) Saving near-exact terminal-anchor coverage rescue: %d and %d coverage, scores %d and %d\n",
+			coverage5,coverage3,pathpair->path5->score_within_trims,pathpair->path3->score_within_trims));
+	  rescue_pathpairarray[rescue_npaths++] = pathpair;
+
+	} else if (terminal_anchor_pathpairs_deferred != NULL &&
+		   one_low_side_p == true &&
+		   pathpair_postfallback_terminal_anchor_rescue_side_p(&low_side) == true) {
+	  /* Keep this pair out of ranking until final singles show that one mate is absent. */
+	  debug8(printf("(6 filter) Deferring post-fallback terminal-anchor coverage rescue: %d and %d coverage, scores %d and %d\n",
+			coverage5,coverage3,pathpair->path5->score_within_trims,pathpair->path3->score_within_trims));
+	  if (path_single_filter_pass_p(pathpair->path5,coverage5,nmismatches_filter_5,
+					mincoverage_filter_5,querylength5,
+					allow_soft_clips_qstart_p,allow_soft_clips_qend_p)) {
+	    save_rejected_single_path(singlepaths5_from_rejected,pathpair->path5,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  if (path_single_filter_pass_p(pathpair->path3,coverage3,nmismatches_filter_3,
+					mincoverage_filter_3,querylength3,
+					allow_soft_clips_qstart_p,allow_soft_clips_qend_p)) {
+	    save_rejected_single_path(singlepaths3_from_rejected,pathpair->path3,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  *terminal_anchor_pathpairs_deferred =
+	    Hitlist_push(*terminal_anchor_pathpairs_deferred,hitlistpool,(void *) pathpair
+			 hitlistpool_trace(__FILE__,__LINE__));
+
+	} else {
+	  debug8(printf("(6 filter) Eliminating: too little %d and %d coverage\n",
+			coverage5,coverage3));
+	  /* Save near-exact terminal paths before freeing the rejected pair. */
+	  if (one_low_side_p == true &&
+	      low_side.low5p == true && terminal_anchor_paths5_deferred != NULL &&
+	      pathpair_near_exact_low_side_path_p(&low_side) == true) {
+	    debug8(printf("(6 filter) Deferring near-exact 5' terminal-anchor path: coverage %d, score %d\n",
+			  coverage5,pathpair->path5->score_within_trims));
+	    save_rejected_single_path(terminal_anchor_paths5_deferred,pathpair->path5,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  if (one_low_side_p == true &&
+	      low_side.low5p == false && terminal_anchor_paths3_deferred != NULL &&
+	      pathpair_near_exact_low_side_path_p(&low_side) == true) {
+	    debug8(printf("(6 filter) Deferring near-exact 3' terminal-anchor path: coverage %d, score %d\n",
+			  coverage3,pathpair->path3->score_within_trims));
+	    save_rejected_single_path(terminal_anchor_paths3_deferred,pathpair->path3,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  if (path_single_filter_pass_p(pathpair->path5,coverage5,nmismatches_filter_5,
+					mincoverage_filter_5,querylength5,
+					allow_soft_clips_qstart_p,allow_soft_clips_qend_p)) {
+	    save_rejected_single_path(singlepaths5_from_rejected,pathpair->path5,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  if (path_single_filter_pass_p(pathpair->path3,coverage3,nmismatches_filter_3,
+					mincoverage_filter_3,querylength3,
+					allow_soft_clips_qstart_p,allow_soft_clips_qend_p)) {
+	    save_rejected_single_path(singlepaths3_from_rejected,pathpair->path3,
+				      intlistpool,univcoordlistpool,listpool,pathpool,vectorpool,
+				      transcriptpool,hitlistpool);
+	  }
+	  Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+			listpool,pathpool,transcriptpool,hitlistpool);
+	}
+
+      } else if (allow_soft_clips_qstart_p == false &&
+		 (Intlist_head(pathpair->path5->endpoints) != 0 || Intlist_head(pathpair->path3->endpoints) != 0)) {
+	debug8(printf("(6 filter) Eliminating: soft clips %d and %d at qstart; %d and %d at qend\n",
+		      Intlist_head(pathpair->path5->endpoints),Intlist_head(pathpair->path5->endpoints),
+		      querylength5 - Intlist_last_value(pathpair->path5->endpoints),
+		      querylength3 - Intlist_last_value(pathpair->path3->endpoints)));
+	Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+
+      } else if (allow_soft_clips_qend_p == false &&
+		 (Intlist_last_value(pathpair->path5->endpoints) != querylength5 ||
+		  Intlist_last_value(pathpair->path3->endpoints) != querylength3)) {
+	debug8(printf("(6 filter) Eliminating: soft clips %d and %d at qstart; %d and %d at qend\n",
+		      Intlist_head(pathpair->path5->endpoints),Intlist_head(pathpair->path5->endpoints),
+		      querylength5 - Intlist_last_value(pathpair->path5->endpoints),
+		      querylength3 - Intlist_last_value(pathpair->path3->endpoints)));
+	Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+
+      } else {
+	debug8(printf("(6 filter) Keeping\n"));
+	pathpairarray[k++] = pathpair;
+      }
+    }
+
+    if (k == 0 && rescue_npaths > 0) {
+      debug8(printf("(6 filter) Keeping %d clean paired coverage rescues because no full-coverage pair survived\n",
+		    rescue_npaths));
+      for (i = 0; i < rescue_npaths; i++) {
+	pathpairarray[k++] = rescue_pathpairarray[i];
+      }
+
+    } else {
+      for (i = 0; i < rescue_npaths; i++) {
+	pathpair = rescue_pathpairarray[i];
+	Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		      listpool,pathpool,transcriptpool,hitlistpool);
+      }
+    }
+    FREE_OUT(rescue_pathpairarray);
+
+    npaths = k;
+  }
+
+  if (npaths == 0) {
+    FREE_OUT(pathpairarray);
+    *npaths_primary = *npaths_altloc = 0;
+    *first_absmq = 0;
+    *second_absmq = 0;
+    return (Pathpair_T *) NULL;
+  }
+
+  /* 7.  Find best solution globally */
   /* TODO: Can make this O(n) rather than O(n*log n) */
   if (npaths > 1) {
     chop_qstart_L = Intlist_head(pathpairarray[0]->pathL->endpoints);
@@ -1681,76 +2547,66 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
       pathpairarray[i]->pathH->chop_qend = chop_qend_H;
     }
 
-    qsort(pathpairarray,npaths,sizeof(T),Pathpair_global_cmp);
-  }
-  debug8(printf("Found the global best solution across %d paths with %d + %d nmatches\n",
-		npaths,pathpairarray[0]->path5->nmatches,pathpairarray[0]->path3->nmatches));
+    qsort(pathpairarray,npaths,sizeof(T),Pathpair_final_score_cmp);
 
+    best_pair_score = Pathpair_final_score(pathpairarray[0]);
+    accepted_pair_score = best_pair_score * (1.0 - score_pair_margin);
 
-  /* 6.  Check if we should be filtering the result */
-  pathpair = pathpairarray[0];
-  if (filterp == true &&
-      (pathpair->path5->score_within_trims > nmismatches_filter_5 || pathpair->path3->score_within_trims > nmismatches_filter_3)) {
-    debug8(printf("(6 filter) Best solution has too many %d + %d nmismatches, so returning early\n",
-		  pathpair->path5->score_within_trims,pathpair->path3->score_within_trims));
-    for (k = 0; k < npaths; k++) {
-      debug8(printf("(6 filter) Eliminating ")); debug8(Pathpair_print(pathpairarray[k]));
-      pathpair = pathpairarray[k];
-      Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-    }
-    FREE_OUT(pathpairarray);
-    *npaths_primary = *npaths_altloc = 0;
-    return (Pathpair_T *) NULL;
+    debug8(printf("Found the global best solution across %d paths with score %.3f, accepted score %.3f, and %d + %d nmatches\n",
+		  npaths,best_pair_score,accepted_pair_score,
+		  pathpairarray[0]->path5->nmatches,pathpairarray[0]->path3->nmatches));
 
-  } else if (filterp == true && (Path_coverage(pathpair->path5) < mincoverage_filter_5 &&
-				 Path_coverage(pathpair->path3) < mincoverage_filter_3)) {
-    /* Was || on coverage */
-    debug8(printf("Best solution has too little %d and %d coverage, so eliminating all\n",
-		  Path_coverage(pathpair->path5),Path_coverage(pathpair->path3)));
-    for (k = 0; k < npaths; k++) {
-      debug8(printf("(6 filter) Eliminating ")); debug8(Pathpair_print(pathpairarray[k]));
-      pathpair = pathpairarray[k];
-      Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-    }
-    FREE_OUT(pathpairarray);
-    *npaths_primary = *npaths_altloc = 0;
-    return (Pathpair_T *) NULL;
-
-  } else if (filterp == true && allow_soft_clips_p == false &&
-	     (Intlist_head(pathpair->path5->endpoints) != 0 || Intlist_last_value(pathpair->path5->endpoints) != querylength5 ||
-	      Intlist_head(pathpair->path3->endpoints) != 0 || Intlist_last_value(pathpair->path3->endpoints) != querylength3)) {
-    debug8(printf("Best solution has soft clips, so eliminating all\n"));
-    for (k = 0; k < npaths; k++) {
-      debug8(printf("(6 filter) Eliminating ")); debug8(Pathpair_print(pathpairarray[k]));
-      pathpair = pathpairarray[k];
-      Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
-		    listpool,pathpool,transcriptpool,hitlistpool);
-    }
-    FREE_OUT(pathpairarray);
-    *npaths_primary = *npaths_altloc = 0;
-    return (Pathpair_T *) NULL;
-
-  } else {
-    /* Otherwise, keep all paths equivalent to the best path */
-    debug8(printf("(6 best) Keeping best by global_cmp\n")); debug8(Pathpair_print(pathpairarray[0]));
+    /* Keep all paths inside the best-score margin */
+    debug8(printf("(7 best) Keeping best by final score %.3f\n",best_pair_score));
+    debug8(Pathpair_print(pathpairarray[0]));
     i = 1;		/* Skip the best path */
       
     for (k = 1; k < npaths; k++) {
       pathpair = pathpairarray[k];
-      if (Pathpair_global_cmp(&pathpair,&(pathpairarray[0])) == 0) {
-	debug8(printf("(6 tie) Keeping by global_cmp\n")); debug8(Pathpair_print(pathpair));
+      pair_score = Pathpair_final_score(pathpair);
+      if (pair_score >= accepted_pair_score) {
+	debug8(printf("(7 margin) Keeping by final score %.3f >= %.3f\n",
+		      pair_score,accepted_pair_score));
+	debug8(Pathpair_print(pathpair));
 
 	pathpairarray[i++] = pathpair;
       } else {
-	debug8(printf("(6 worse) Eliminating by global_cmp\n")); debug8(Pathpair_print(pathpair));
+	debug8(printf("(7 worse) Eliminating by final score %.3f < %.3f\n",
+		      pair_score,accepted_pair_score));
+	debug8(Pathpair_print(pathpair));
 	Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
 		      listpool,pathpool,transcriptpool,hitlistpool);
       }
     }
 
     npaths = i;			
+  }
+
+  for (i = k = 0; i < npaths; i++) {
+    pathpair = pathpairarray[i];
+    if (Pathpair_final_score_reportable_p(pathpair) == true) {
+      pathpairarray[k++] = pathpair;
+    } else {
+      debug8(printf("(7 nonreportable) Eliminating by final scores read5 %.3f, read3 %.3f, pair %.3f below minima %.3f/%.3f\n",
+		    Path_final_score(pathpair->path5),Path_final_score(pathpair->path3),
+		    Pathpair_final_score(pathpair),score_min_read,score_min_pair));
+      debug8(Pathpair_print(pathpair));
+      Pathpair_free(&pathpair,intlistpool,univcoordlistpool,
+		    listpool,pathpool,transcriptpool,hitlistpool);
+    }
+  }
+  npaths = k;
+
+  if (npaths == 0) {
+    FREE_OUT(pathpairarray);
+    *npaths_primary = *npaths_altloc = 0;
+    *first_absmq = 0;
+    *second_absmq = 0;
+    return (Pathpair_T *) NULL;
+  }
+
+  for (i = 0; i < npaths; i++) {
+    Pathpair_set_final_scores(pathpairarray[i]);
   }
 
 
@@ -1779,9 +2635,13 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
     } else if (output_type == STD_OUTPUT || output_type == M8_OUTPUT) {
       /* If output type is alignment or m8, then don't want to split up the parts */
     } else if (pathpair->pathL->plusp == true) {
-      Path_trim_circular(pathpair->pathL,query5_compress_fwd,intlistpool,univcoordlistpool,listpool);
+      Path_trim_circular(pathpair->pathL,/*query_compress*/query5_compress_fwd,
+			 query5_compress_fwd,query5_compress_rev,
+			 intlistpool,univcoordlistpool,listpool);
     } else {
-      Path_trim_circular(pathpair->pathL,query3_compress_rev,intlistpool,univcoordlistpool,listpool);
+      Path_trim_circular(pathpair->pathL,/*query_compress*/query3_compress_rev,
+			 query3_compress_fwd,query3_compress_rev,
+			 intlistpool,univcoordlistpool,listpool);
     }
 
     if (circularp[pathpair->pathH->chrnum] == false) {
@@ -1792,9 +2652,13 @@ Pathpair_eval_and_sort (int *found_score_5, int *found_score_3,
     } else if (output_type == STD_OUTPUT || output_type == M8_OUTPUT) {
       /* If output type is alignment or m8, then don't want to split up the parts */
     } else if (pathpair->pathH->plusp == true) {
-      Path_trim_circular(pathpair->pathH,query3_compress_fwd,intlistpool,univcoordlistpool,listpool);
+      Path_trim_circular(pathpair->pathH,/*query_compress*/query3_compress_fwd,
+			 query3_compress_fwd,query3_compress_rev,
+			 intlistpool,univcoordlistpool,listpool);
     } else {
-      Path_trim_circular(pathpair->pathH,query5_compress_rev,intlistpool,univcoordlistpool,listpool);
+      Path_trim_circular(pathpair->pathH,/*query_compress*/query5_compress_rev,
+			 query5_compress_fwd,query5_compress_rev,
+			 intlistpool,univcoordlistpool,listpool);
     }
   }
 
@@ -1954,7 +2818,20 @@ Pathpair_eval_setup (int expected_pairlength, int pairlength_deviation,
 		     bool *circularp_in, bool *chrsubsetp_in, bool *altlocp_in,
 		     Outputtype_T output_type_in,
 		     bool splicingp_in, bool resolve_inner_p_in, bool want_random_p_in,
-		     bool allow_soft_clips_p_in) {
+		     bool allow_soft_clips_start_p_in, bool allow_soft_clips_end_p_in,
+		     int paired_terminal_anchor_min_score_in,
+		     int paired_terminal_anchor_slop_in,
+		     bool mincoverage_filter_per_read_p_in,
+		     bool pathpair_equal_coverage_diff_tiebreak_p_in,
+		     double score_match_reward_in,
+		     double score_mismatch_penalty_in,
+		     double score_indel_open_penalty_in,
+		     double score_indel_extend_penalty_in,
+		     double score_splice_unannotated_penalty_in,
+		     double score_pair_transcript_discordance_penalty_in,
+		     double score_pair_margin_in,
+		     double score_min_read_in,
+		     double score_min_pair_in) {
 
   max_insertlength = expected_pairlength + 2*pairlength_deviation;
   transcriptome = transcriptome_in;
@@ -1967,8 +2844,22 @@ Pathpair_eval_setup (int expected_pairlength, int pairlength_deviation,
   splicingp = splicingp_in;
   resolve_inner_p = resolve_inner_p_in;
   want_random_p = want_random_p_in;
-  allow_soft_clips_p = allow_soft_clips_p_in;
+
+  allow_soft_clips_start_p = allow_soft_clips_start_p_in;
+  allow_soft_clips_end_p = allow_soft_clips_end_p_in;
+  paired_terminal_anchor_min_score = paired_terminal_anchor_min_score_in;
+  paired_terminal_anchor_slop = paired_terminal_anchor_slop_in;
+  mincoverage_filter_per_read_p = mincoverage_filter_per_read_p_in;
+  pathpair_equal_coverage_diff_tiebreak_p = pathpair_equal_coverage_diff_tiebreak_p_in;
+  score_match_reward = score_match_reward_in;
+  score_mismatch_penalty = score_mismatch_penalty_in;
+  score_indel_open_penalty = score_indel_open_penalty_in;
+  score_indel_extend_penalty = score_indel_extend_penalty_in;
+  score_splice_unannotated_penalty = score_splice_unannotated_penalty_in;
+  score_pair_transcript_discordance_penalty = score_pair_transcript_discordance_penalty_in;
+  score_pair_margin = score_pair_margin_in;
+  score_min_read = score_min_read_in;
+  score_min_pair = score_min_pair_in;
 
   return;
 }
-

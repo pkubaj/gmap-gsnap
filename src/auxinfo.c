@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: b387ae682f2a4f454698d47d4aa790e3598e558e $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -33,21 +32,25 @@ Auxinfo_print (T this) {
 
 
 T
-Auxinfo_pop (T old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool) {
+Auxinfo_pop (T old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool, Listpool_T listpool) {
   T prev;
+  List_T chain, p;
+  int nsplices;
 
   prev = old;
   old = prev->rest;
 
-  if (prev->right_univdiags != NULL) {
-    Univdiagpool_gc(&prev->right_univdiags,univdiagpool
-		    univdiagpool_trace(__FILE__,__LINE__));
+  for (nsplices = 0; nsplices <= prev->max_nsplices; nsplices++) {
+    for (p = prev->chains_by_nsplices[nsplices]; p != NULL; p = List_next(p)) {
+      chain = (List_T) List_head(p);
+      Univdiagpool_gc(&chain,univdiagpool
+		      univdiagpool_trace(__FILE__,__LINE__));
+    }
+    Listpool_free_list(&(prev->chains_by_nsplices[nsplices]),listpool
+		       listpool_trace(__FILE__,__LINE__));
   }
-  if (prev->left_univdiags != NULL) {
-    Univdiagpool_gc(&prev->left_univdiags,univdiagpool
-		    univdiagpool_trace(__FILE__,__LINE__));
-  }
-  
+  FREE(prev->chains_by_nsplices);
+
   Auxinfopool_free_auxinfo(&prev,auxinfopool
 			   auxinfopool_trace(__FILE__,__LINE__)); /* Allocated by Pathpool_new_path */
 
@@ -57,23 +60,30 @@ Auxinfo_pop (T old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool) {
 
 /* Frees the entire list */
 void
-Auxinfo_free (T *old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool) {
+Auxinfo_free (T *old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool, Listpool_T listpool,
+	      bool free_chains_p) {
   T prev;
+  List_T chain, p;
+  int nsplices;
 
   debug0(printf("Freeing auxinfo %p\n",*old));
 
   while ((prev = *old) != NULL) {
     *old = prev->rest;
 
-    if (prev->right_univdiags != NULL) {
-      Univdiagpool_gc(&prev->right_univdiags,univdiagpool
-		      univdiagpool_trace(__FILE__,__LINE__));
+    if (free_chains_p == true) {
+      for (nsplices = 0; nsplices <= prev->max_nsplices; nsplices++) {
+	for (p = prev->chains_by_nsplices[nsplices]; p != NULL; p = List_next(p)) {
+	  chain = (List_T) List_head(p);
+	  Univdiagpool_gc(&chain,univdiagpool
+			  univdiagpool_trace(__FILE__,__LINE__));
+	}
+	Listpool_free_list(&(prev->chains_by_nsplices[nsplices]),listpool
+			   listpool_trace(__FILE__,__LINE__));
+      }
     }
-    if (prev->left_univdiags != NULL) {
-      Univdiagpool_gc(&prev->left_univdiags,univdiagpool
-		      univdiagpool_trace(__FILE__,__LINE__));
-    }
-      
+    FREE(prev->chains_by_nsplices);
+    
     Auxinfopool_free_auxinfo(&prev,auxinfopool
 			     auxinfopool_trace(__FILE__,__LINE__)); /* Allocated by Pathpool_new_path */
   }
@@ -83,14 +93,14 @@ Auxinfo_free (T *old, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool) {
 
 
 void
-Auxinfo_gc (T *array, int n, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool) {
+Auxinfo_gc (T *array, int n, Univdiagpool_T univdiagpool, Auxinfopool_T auxinfopool, Listpool_T listpool) {
   int i;
   T this;
 
 
   for (i = 0; i < n; i++) {
     this = array[i];
-    Auxinfo_free(&this,univdiagpool,auxinfopool);
+    Auxinfo_free(&this,univdiagpool,auxinfopool,listpool,/*free_chains_p*/true);
   }
 
   FREE(array);
@@ -110,10 +120,13 @@ Auxinfo_new (Method_T method, int qstart, int qend, Auxinfopool_T auxinfopool) {
   new->method = method;
   new->qstart = qstart;
   new->qend = qend;
-  new->nmismatches = -1;
 
-  new->right_univdiags = (List_T) NULL;
-  new->left_univdiags = (List_T) NULL;
+  new->chains_by_nsplices = (List_T *) NULL;
+  new->nsplices = 0;
+  new->max_nsplices = -1;
+  new->chaindir = CHAIN_NONE;
+
+  new->elti = -1;
 
   new->rest = (T) NULL;
 
@@ -131,37 +144,72 @@ Auxinfo_new_tr (Auxinfopool_T auxinfopool) {
   new->method = TR_METHOD;	/* Some tr method, e.g., TR_EXACT1 */
   new->qstart = -1;
   new->qend = -1;
-  new->nmismatches = -1;
 
-  new->right_univdiags = (List_T) NULL;
-  new->left_univdiags = (List_T) NULL;
+  new->chains_by_nsplices = (List_T *) NULL;
+  new->nsplices = 0;
+  new->max_nsplices = -1;
+  new->chaindir = CHAIN_NONE;
+
+  new->elti = -1;
 
   new->rest = (T) NULL;
 
   return new;
 }
 
+
+
+
 T
-Auxinfo_new_univdiags (Method_T method, int qstart, int qend, int nmismatches,
-		       List_T right_univdiags, List_T left_univdiags, Auxinfopool_T auxinfopool) {
+Auxinfo_new_chains (Method_T method, int qstart, int qend,
+		    List_T chains, int chaindir, int nsplices, int max_nsplices,
+		    Auxinfopool_T auxinfopool) {
   T new = Auxinfopool_new_auxinfo(auxinfopool
 				  auxinfopool_trace(__FILE__,__LINE__));
 
-  debug0(printf("Created auxinfo %p using Auxinfo_new_univdiags\n",new));
+  debug0(printf("Created auxinfo %p using Auxinfo_new_chains\n",new));
 
   new->method = method;
   new->qstart = qstart;
   new->qend = qend;
-  new->nmismatches = nmismatches;
 
-  new->right_univdiags = right_univdiags;
-  new->left_univdiags = left_univdiags;
+  new->chains_by_nsplices = (List_T *) CALLOC(max_nsplices + 1,sizeof(List_T));
+  new->chains_by_nsplices[nsplices] = chains;
+  new->chaindir = chaindir;
+  new->nsplices = nsplices;
+  new->max_nsplices = max_nsplices;
+
+  new->elti = -1;
 
   new->rest = (T) NULL;
 
   return new;
 }
 
+
+T
+Auxinfo_new_elt (Method_T method, int qstart, int qend, int elti,
+		 Auxinfopool_T auxinfopool) {
+  T new = Auxinfopool_new_auxinfo(auxinfopool
+				  auxinfopool_trace(__FILE__,__LINE__));
+
+  debug0(printf("Created auxinfo %p using Auxinfo_new\n",new));
+
+  new->method = method;
+  new->qstart = qstart;
+  new->qend = qend;
+
+  new->chains_by_nsplices = (List_T *) NULL;
+  new->nsplices = 0;
+  new->max_nsplices = -1;
+  new->chaindir = CHAIN_NONE;
+
+  new->elti = elti;
+
+  new->rest = (T) NULL;
+
+  return new;
+}
 
 
 int
@@ -181,7 +229,8 @@ T
 Auxinfo_append (T first, T second) {
   T *p = &first;
 
-  assert(first != second);
+  /* Doesn't hold when first and second are NULL */
+  /* assert(first != second); */
 
   while (*p) {
     p = &(*p)->rest;
