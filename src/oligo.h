@@ -1,4 +1,3 @@
-/* $Id: f0b9fbe1ca4cd6b60b02bf52c788ff2c9c1f50e8 $ */
 #ifndef OLIGO_INCLUDED
 #define OLIGO_INCLUDED
 

@@ -49,6 +49,7 @@ struct T {
   List_T junctions;
 
   int found_score;
+  int end_score;
   int total_ninserts;
   Method_T method;
 };

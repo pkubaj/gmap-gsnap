@@ -61,11 +61,7 @@ sub print_gene {
     my ($gene) = @_;
 
     foreach my $transcript (@ {$gene->{transcripts}}) {
-	if (transcript_valid_p($transcript->{type}) == 0) {
-	    # Skip.  Undesirable transcript
-	} elsif ($#{$transcript->{exons}} < 0) {
-	    # Skip.  No exons or CDS
-	} else {
+	if (transcript_valid_p($transcript->{type}) == 1) {
 	    print ">";
 	    my $transcript_id = $transcript->{id};
 	    $transcript_id =~ s/^rna-//;
@@ -253,53 +249,26 @@ sub read_transcript {
 	my $transcript_high = $fields[4];
 
 	$line = <>;
-
 	my @exons = ();
-	if ($cds_p == 1) {
-	    # CDS only
-	    while (defined($line) &&
-		   !defined(gene_type($line)) &&
-		   !defined(transcript_type($line))) {
-		if ($line !~ /^\S+\t\S+\tCDS\t/) {
-		    # Skip.  Require only lines with "CDS"
+	while (defined($line) &&
+	       !defined(gene_type($line)) &&
+	       !defined(transcript_type($line))) {
+	    if ($line !~ /^\S+\t\S+\texon\t/) {
+		# Skip
+	    } else {
+		my @fields = split /\t/,$line;
+		my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
+		if (!defined($parent_id)) {
+		    die "Cannot find Parent in $fields[8]";
+		} elsif ($parent_id ne $transcript_id) {
+		    # Skip: Could be exon for an miRNA
 		} else {
-		    my @fields = split /\t/,$line;
-		    my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
-		    if (!defined($parent_id)) {
-			die "Cannot find Parent in $fields[8]";
-		    } elsif ($parent_id ne $transcript_id) {
-			# Skip: Could be exon for an miRNA
-		    } else {
-			my $exon_low = $fields[3];
-			my $exon_high = $fields[4];
-			push @exons,new Exon($exon_low,$exon_high);
-		    }
+		    my $exon_low = $fields[3];
+		    my $exon_high = $fields[4];
+		    push @exons,new Exon($exon_low,$exon_high);
 		}
-		$line = <>;
 	    }
-
-	} else {
-	    # Exons (including UTR)
-	    while (defined($line) &&
-		   !defined(gene_type($line)) &&
-		   !defined(transcript_type($line))) {
-		if ($line !~ /^\S+\t\S+\texon\t/) {
-		    # Skip.  Use only lines with "exon"
-		} else {
-		    my @fields = split /\t/,$line;
-		    my ($parent_id) = $fields[8] =~ /Parent=([^;]+)/;
-		    if (!defined($parent_id)) {
-			die "Cannot find Parent in $fields[8]";
-		    } elsif ($parent_id ne $transcript_id) {
-			# Skip: Could be exon for an miRNA
-		    } else {
-			my $exon_low = $fields[3];
-			my $exon_high = $fields[4];
-			push @exons,new Exon($exon_low,$exon_high);
-		    }
-		}
-		$line = <>;
-	    }
+	    $line = <>;
 	}
 
 	# print "Exiting read_transcript with $transcript\n";

@@ -23,6 +23,8 @@ extern void
 Hitlistpool_free (T *old);
 extern T
 Hitlistpool_new (void);
+extern int
+Hitlistpool_nchunks (T this);
 
 #ifdef HITLISTPOOL_REUSE
 extern void

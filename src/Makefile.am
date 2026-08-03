@@ -238,7 +238,7 @@ GMAP_FILES = simd.h \
  popcount.c popcount.h dinucl_bits.c dinucl_bits.h genome_canonical.c genome_canonical.h \
  genome-write.c genome-write.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h \
  oligo.c oligo.h block.c block.h \
  chrom.c chrom.h segmentpos.c segmentpos.h \
  chrnum.c chrnum.h uinttable_rh.c uinttable_rh.h gregion.c gregion.h \
@@ -336,7 +336,7 @@ GMAPL_FILES = simd.h \
  popcount.c popcount.h dinucl_bits.c dinucl_bits.h genome_canonical.c genome_canonical.h \
  genome-write.c genome-write.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h \
  oligo.c oligo.h block.c block.h \
  chrom.c chrom.h segmentpos.c segmentpos.h \
  chrnum.c chrnum.h uinttable_rh.c uinttable_rh.h uint8table_rh.c uint8table_rh.h gregion.c gregion.h \
@@ -440,7 +440,7 @@ GSNAP_FILES = simd.h \
  merge-diagonals-heap-uint4.c merge-diagonals-heap-uint4.h \
  merge-uint4.c merge-uint4.h merge-diagonals-simd-uint4.c merge-diagonals-simd-uint4.h \
  record.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h \
  localdb-read.c localdb-read.h \
  oligo.c oligo.h \
  chrnum.c chrnum.h \
@@ -584,7 +584,7 @@ GSNAPL_FILES = simd.h \
  merge-diagonals-heap-uint4.c merge-diagonals-heap-uint4.h \
  merge-uint4.c merge-uint4.h merge-diagonals-simd-uint4.c merge-diagonals-simd-uint4.h \
  record.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h \
  localdb-read.c localdb-read.h \
  oligo.c oligo.h \
  chrnum.c chrnum.h \
@@ -795,7 +795,7 @@ GFILTER_FILES = simd.h \
  genomicpos.c genomicpos.h \
  popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h \
  intersectp-simd.h intersectp-simd.c \
  fopen.c fopen.h shortread.c shortread.h \
  request.c request.h \
@@ -861,6 +861,7 @@ dist_gfilter_avx512bw_SOURCES = $(GFILTER_FILES)
 COMPARE2TRUTH_FILES = bool.h \
  except.c except.h assert.c assert.h mem.c mem.h \
  intlist.c intlist.h uintlist.c uintlist.h list.c list.h \
+ samread.c samread.h \
  getopt.c getopt1.c getopt.h compare2truth.c
 
 compare2truth_CC = $(PTHREAD_CC)
@@ -886,7 +887,7 @@ GMAPINDEX_FILES = simd.h \
  compress.c compress.h popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
  bitpack64-access.c bitpack64-access.h bitpack64-incr.c bitpack64-incr.h bitpack64-write.c bitpack64-write.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
  saca-k.c saca-k.h localdb-write.c localdb-write.h \
  table.c table.h tableuint.c tableuint.h tableuint8.c tableuint8.h tableint.c tableint.h \
  bytecoding.c bytecoding.h sarray-write.c sarray-write.h \
@@ -915,7 +916,7 @@ INDEXDB_CAT_FILES = simd.h \
  popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
  bitpack64-access.c bitpack64-access.h bitpack64-incr.c bitpack64-incr.h bitpack64-write.c bitpack64-write.h \
- indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
+ signature.c signature.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
  complement.h compress-write.c compress-write.h bzip2.c bzip2.h fopen.c fopen.h \
  datadir.c datadir.h parserange.c parserange.h \
  getline.c getline.h getopt.c getopt1.c getopt.h indexdb-cat.c
@@ -941,8 +942,7 @@ SNPINDEX_FILES = simd.h \
  popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
  bitpack64-access.c bitpack64-access.h bitpack64-incr.c bitpack64-incr.h bitpack64-write.c bitpack64-write.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h \
- indexdb-write.c indexdb-write.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
  chrom.c chrom.h \
  complement.h md5.c md5.h bzip2.c bzip2.h fopen.c fopen.h sequence.c sequence.h genome.c genome.h \
  datadir.c datadir.h parserange.c parserange.h \
@@ -968,7 +968,7 @@ CMETINDEX_FILES = simd.h \
  popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
  bitpack64-access.c bitpack64-access.h bitpack64-incr.c bitpack64-incr.h bitpack64-write.c bitpack64-write.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
  cmet.c cmet.h \
  complement.h md5.c md5.h bzip2.c bzip2.h fopen.c fopen.h sequence.c sequence.h genome.c genome.h \
  uintlist.c uintlist.h intlist.c intlist.h \
@@ -996,7 +996,7 @@ ATOIINDEX_FILES = simd.h \
  popcount.c popcount.h \
  bitpack64-read.c bitpack64-read.h bitpack64-readtwo.c bitpack64-readtwo.h \
  bitpack64-access.c bitpack64-access.h bitpack64-incr.c bitpack64-incr.h bitpack64-write.c bitpack64-write.h \
- filesuffix.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
+ filesuffix.h signature.c signature.h indexdbdef.h indexdb.c indexdb.h indexdb-write.c indexdb-write.h \
  atoi.c atoi.h \
  complement.h md5.c md5.h bzip2.c bzip2.h fopen.c fopen.h sequence.c sequence.h genome.c genome.h \
  uintlist.c uintlist.h intlist.c intlist.h \
@@ -1022,7 +1022,7 @@ TRINDEX_FILES = simd.h \
  iitdef.h iit-read.c iit-read.h \
  parserange.c parserange.h univinterval.c univinterval.h iit-read-univ.c iit-read-univ.h \
  popcount.c popcount.h \
- bitpack64-access.c bitpack64-access.h bitpack64-write.c bitpack64-write.h \
+ signature.c signature.h bitpack64-access.c bitpack64-access.h bitpack64-write.c bitpack64-write.h \
  uintlist.c uintlist.h intlist.c intlist.h list.c list.h \
  bitpack64-readtwo.c bitpack64-readtwo.h transcriptome.c transcriptome.h \
  datadir.c datadir.h \

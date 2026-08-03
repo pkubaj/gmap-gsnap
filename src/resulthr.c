@@ -37,6 +37,7 @@ struct T {
   int first_absmq2;
   int second_absmq2;
   double worker_runtime;
+  Cascade_Timing_T cascade_timing;
 
   SAM_split_output_type split_output;
   int strlength;
@@ -110,6 +111,23 @@ Result_id (T this) {
   return this->id;
 }
 
+const Cascade_Timing_T *
+Result_cascade_timing (T this) {
+  if (this == NULL || this->cascade_timing.validp == false) {
+    return (const Cascade_Timing_T *) NULL;
+  } else {
+    return &(this->cascade_timing);
+  }
+}
+
+void
+Result_set_cascade_timing (T this, const Cascade_Timing_T *timing) {
+  if (this != NULL && timing != NULL && timing->validp == true) {
+    this->cascade_timing = *timing;
+  }
+  return;
+}
+
 
 void **
 Result_array (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq, T this) {
@@ -146,6 +164,7 @@ Result_single_read_new (int id, void **resultarray, int npaths_primary, int npat
   int pathi;
 
   new->tr_consistent_p = false;
+  new->cascade_timing.validp = false;
 
   if (npaths_primary + npaths_altloc == 0) {
     new->resulttype = SINGLEEND_NOMAPPING;
@@ -196,6 +215,7 @@ Result_paired_read_new (int id, void **resultarray, int npaths_primary, int npat
   /* printf("final_pairtype %d\n",final_pairtype); */
 
   new->tr_consistent_p = false;
+  new->cascade_timing.validp = false;
 
   if (final_pairtype == CONCORDANT_TRANSLOCATIONS) {
     new->resulttype = CONCORDANT_TRANSLOC;
@@ -269,6 +289,7 @@ Result_paired_as_singles_new (int id, void **hits5, int npaths5_primary, int npa
   debug(printf("npaths5 = %d, npaths3 = %d\n",npaths5,npaths3));
 
   new->tr_consistent_p = false;
+  new->cascade_timing.validp = false;
 
   if (npaths5 == 0 && npaths3 == 0) {
     new->resulttype = PAIREDEND_NOMAPPING;
@@ -403,6 +424,5 @@ Result_free (T *old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlis
 
   return;
 }
-
 
 

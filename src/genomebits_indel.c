@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: e7c313e61f1e8e849e04c050671254c6f1981c3c $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -200,6 +199,22 @@ compute_max_deletionlen_one_mm (int fragment_length) {
   }
 }
 
+/* A qend deletion consumes reference bases to the right of pos3.  Limit the
+   search to the loaded genomebits extent so genomebits_shift never needs a
+   real current block beyond the allocation. */
+static inline int
+clamp_max_deletionlen_right (int deletionlen, T genome, Univcoord_T endpos) {
+  Univcoord_T genomeend, available;
+
+  genomeend = (genome->high_len / sizeof(Genomecomp_T)) * 32U;
+  if (endpos >= genomeend) {
+    return 0;
+  } else {
+    available = genomeend - endpos;
+    return available < (Univcoord_T) deletionlen ? (int) available : deletionlen;
+  }
+}
+
 
 /* For insertions, let L = pos3 - pos5, be the length of the fragment
    being tested, and consider an insertion of length I, which means
@@ -316,11 +331,18 @@ genomebits_shift (Genomecomp_T **genome_high_shifted, Genomecomp_T **genome_low_
   int nwords, wordi;
   int leftshift, rightshift;
   Genomecomp_T *high_ptr, *low_ptr, *flags_ptr;
-  Univcoord_T startblocki, endblocki, blocki;
+  Univcoord_T startblocki, endblocki, blocki, genome_nblocks, genomeend;
+  Genomecomp_T current_high, current_low, current_flags;
+  Genomecomp_T next_high, next_low, next_flags;
 
+  genome_nblocks = genome->high_len / sizeof(Genomecomp_T);
+  genomeend = genome_nblocks * 32U;
   startblocki = startpos/32U;
   endblocki = endpos/32U;
   nwords = endblocki - startblocki + 1;
+  assert(startblocki < genome_nblocks);
+  assert(endpos <= genomeend);
+  assert(endblocki <= genome_nblocks);
 
   debug(printf("genomebits_shift called with startpos %u and endpos %u => %d words\n",
 	       startpos,endpos,nwords));
@@ -340,20 +362,39 @@ genomebits_shift (Genomecomp_T **genome_high_shifted, Genomecomp_T **genome_low_
 
   /* Shift genome leftward (by rightshift) */
   blocki = startblocki;
-  if (rightshift == 0) {
-    for (wordi = 0; wordi < nwords; wordi++) {
-      *high_ptr++ = genome->high_blocks[blocki];
-      *low_ptr++ = genome->low_blocks[blocki];
-      *flags_ptr++ = genome->flags_blocks[blocki];
-      blocki++;
+  for (wordi = 0; wordi < nwords; wordi++) {
+    if (blocki < genome_nblocks) {
+      current_high = genome->high_blocks[blocki];
+      current_low = genome->low_blocks[blocki];
+      current_flags = genome->flags_blocks[blocki];
+    } else {
+      /* endpos can equal genomeend.  The resulting terminal word is required
+         by exact-boundary discard logic, but all of its bits are discarded. */
+      assert(blocki == genome_nblocks && endpos == genomeend);
+      current_high = 0U;
+      current_low = 0U;
+      current_flags = 0U;
     }
-  } else {
-    for (wordi = 0; wordi < nwords; wordi++) {
-      *high_ptr++ = (genome->high_blocks[blocki] >> rightshift) | (genome->high_blocks[blocki+1] << leftshift);
-      *low_ptr++ = (genome->low_blocks[blocki] >> rightshift) | (genome->low_blocks[blocki+1] << leftshift);
-      *flags_ptr++ = (genome->flags_blocks[blocki] >> rightshift) | (genome->flags_blocks[blocki+1] << leftshift);
-      blocki++;
+
+    if (rightshift == 0) {
+      *high_ptr++ = current_high;
+      *low_ptr++ = current_low;
+      *flags_ptr++ = current_flags;
+    } else {
+      if (blocki + 1 < genome_nblocks) {
+	next_high = genome->high_blocks[blocki+1];
+	next_low = genome->low_blocks[blocki+1];
+	next_flags = genome->flags_blocks[blocki+1];
+      } else {
+	next_high = 0U;
+	next_low = 0U;
+	next_flags = 0U;
+      }
+      *high_ptr++ = (current_high >> rightshift) | (next_high << leftshift);
+      *low_ptr++ = (current_low >> rightshift) | (next_low << leftshift);
+      *flags_ptr++ = (current_flags >> rightshift) | (next_flags << leftshift);
     }
+    blocki++;
   }
 
   return nwords;
@@ -404,6 +445,8 @@ querybits_shift (Genomecomp_T **query_high_shifted, Genomecomp_T **query_low_shi
     }
 
   } else {
+    /* Compress_T query shift arrays are padded by compress.c EXTRA_WORDS=1,
+       so blocki+1 is valid here even on the terminal query word. */
     for (wordi = 0; wordi < nwords; wordi++) {
       *high_ptr++ = (query_high_blocks[blocki] >> rightshift) | (query_high_blocks[blocki+1] << leftshift);
       *low_ptr++ = (query_low_blocks[blocki] >> rightshift) | (query_low_blocks[blocki+1] << leftshift);
@@ -561,6 +604,7 @@ solve_high_short (int *nmismatches_to_trimpos, Univcoord_T univdiagonal, int que
     pos5 = querylength - univdiagonal;
   }
   max_deletionlen = compute_max_deletionlen_exact(pos3 - pos5);
+  max_deletionlen = clamp_max_deletionlen_right(max_deletionlen,omebits,left + pos3);
 
   max_insertionlen = compute_max_insertionlen_exact(pos3 - pos5);
   
@@ -1066,6 +1110,8 @@ mismatches_fromleft (int *mismatch_positions, int max_mismatches, int rightmost_
   bool query_unk_mismatch_p = false;
   bool genome_unk_mismatch_p = false;
 
+  assert(startblocki <= endblocki);
+
   debug(printf("Entering mismatches_fromleft with startblocki %d, endblocki %d, startdiscard %d, enddiscard %d, max_mismatches %d\n",
 	       startblocki,endblocki,startdiscard,enddiscard,max_mismatches));
 
@@ -1333,6 +1379,7 @@ solve_high_long (int *best_trimpos, int *nmismatches_to_trimpos,
     pos5 = querylength - univdiagonal;
   }
   max_deletionlen = compute_max_deletionlen_exact(pos3 - pos5);
+  max_deletionlen = clamp_max_deletionlen_right(max_deletionlen,omebits,left + pos3);
 
   fragment_length = pos3 - pos5;
   max_insertionlen = compute_max_insertionlen_exact(pos3 - pos5);
@@ -1610,8 +1657,14 @@ solve_high_long (int *best_trimpos, int *nmismatches_to_trimpos,
   FREE(ref_high_shifted);
 
   *best_trimpos += best_trimpos_adj;
-  assert(*best_trimpos >= 0 && *best_trimpos <= querylength);
-  return best_adj;
+  /* TODO: Figure out why we get trims outside the read */
+  if (*best_trimpos < 0) {
+    return 0;
+  } else if (*best_trimpos > querylength) {
+    return 0;
+  } else {
+    return best_adj;
+  }
 }
 
 
@@ -1687,6 +1740,8 @@ mismatches_fromright (int *mismatch_positions, int max_mismatches, int leftmost_
   /* Matching the parameters for Genomebits_mismatches_right_trim */
   bool query_unk_mismatch_p = false;
   bool genome_unk_mismatch_p = false;
+
+  assert(startblocki <= endblocki);
 
   debug(printf("Entering mismatches_fromright with startblocki %d, endblocki %d, startdiscard %d, enddiscard %d, max_mismatches %d\n",
 	       startblocki,endblocki,startdiscard,enddiscard,max_mismatches));
@@ -2265,8 +2320,14 @@ solve_low_long (int *best_trimpos, int *nmismatches_to_trimpos,
 
 
   *best_trimpos += best_trimpos_adj;
-  assert(*best_trimpos >= 0 && *best_trimpos <= querylength);
-  return best_adj;
+  /* TODO: Figure out why we get trims outside the read */
+  if (*best_trimpos < 0) {
+    return 0;
+  } else if (*best_trimpos > querylength) {
+    return 0;
+  } else {
+    return best_adj;
+  }
 }
 
 

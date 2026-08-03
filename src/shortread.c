@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: d513dc483af03ef293908c77a094697173421f57 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -35,6 +34,7 @@ static char rcsid[] = "$Id: d513dc483af03ef293908c77a094697173421f57 $";
 #include "intlist.h"
 #include "fopen.h"
 #include "getline.h"
+#include "parameters.h"
 
 
 #ifdef DEBUG
@@ -246,12 +246,10 @@ static char Header[HEADERLEN];
 static char Discard[DISCARDLEN];
 
 
-/* input_oneline() can actually read longer than this */
-#define MAX_EXPECTED_READLENGTH 300
-
-static char Read1[MAX_EXPECTED_READLENGTH+1];
-static char Read2[MAX_EXPECTED_READLENGTH+1];
-static char Quality[MAX_EXPECTED_READLENGTH+1];
+/* Per-read buffers, allocated by Shortread_setup from Parameters_max_readlength. */
+static char *Read1 = NULL;
+static char *Read2 = NULL;
+static char *Quality = NULL;
 
 
 /* The first element of Sequence is always the null character, to mark
@@ -384,6 +382,29 @@ Shortread_setup (int acc_fieldi_start_in, int acc_fieldi_end_in,
   invert_second_p = invert_second_p_in;
   chop_poly_at_first_p = chop_poly_at_first_p_in;
   chop_poly_at_second_p = chop_poly_at_second_p_in;
+
+  if (Read1 != NULL) {
+    free(Read1);
+  }
+  if (Read2 != NULL) {
+    free(Read2);
+  }
+  if (Quality != NULL) {
+    free(Quality);
+  }
+
+  Read1 = (char *) malloc((size_t) Parameters_max_readlength + 1);
+  Read2 = (char *) malloc((size_t) Parameters_max_readlength + 1);
+  Quality = (char *) malloc((size_t) Parameters_max_readlength + 1);
+  if (Read1 == NULL || Read2 == NULL || Quality == NULL) {
+    fprintf(stderr,
+	    "\nGSNAP: failed to allocate per-read buffers for --max-read-length=%d.\n"
+	    "       Need %zu bytes total; try a smaller --max-read-length or --tune preset.\n\n",
+	    Parameters_max_readlength,
+	    (size_t) 3 * ((size_t) Parameters_max_readlength + 1));
+    exit(9);
+  }
+  Read1[0] = Read2[0] = Quality[0] = '\0';
 
   return;
 }
@@ -946,7 +967,7 @@ input_header_fastq_bzip2 (bool *filterp, char **restofheader, int nextchar,
       p++;
     }
 
-    if (filter_chastity_p == true || keep_chastity_p == true) {
+    if (filter_chastity_p == true) {
       q = p;
       /* Expecting <read>:<is filtered>:<control number>:<index sequence>, e.g., 1:Y:0:CTTGTA */
       while (*q != '\0' && *q != ':') {
@@ -954,30 +975,58 @@ input_header_fastq_bzip2 (bool *filterp, char **restofheader, int nextchar,
       }
       if (*q != '\0') {
 	q++;
-	if (filter_chastity_p == true && *q == 'Y') {
+	if (*q == 'Y') {
 	  *filterp = true;
 	}
       }
-    }
 
-    if (keep_chastity_p == false) {
+      if (keep_chastity_p == false) {
+	*p = '\0';
+	length = (p - start)/sizeof(char);
+	acc = (char *) CALLOC_IN(length+1,sizeof(char));
+	strcpy(acc,start);
+	*restofheader = (char *) CALLOC_IN(1,sizeof(char));
+	(*restofheader)[0] = '\0';
+	
+      } else {
+	length = (p - start)/sizeof(char);
+	acc = (char *) CALLOC_IN(length+1,sizeof(char));
+	strncpy(acc,start,length);
+	acc[length] = '\0';
+	
+	q += 4;			/* Skip Y:0: */
+	length = strlen(q);
+	*restofheader = (char *) MALLOC_IN((length+1)*sizeof(char));
+	strcpy(*restofheader,q);
+      }
+
+    } else if (keep_chastity_p == true) {
+      q = p;
+      /* Expecting <read>:<is filtered>:<control number>:<index sequence>, e.g., 1:Y:0:CTTGTA */
+      while (*q != '\0' && *q != ':') {
+	q++;
+      }
+      if (*q != '\0') {
+	q++;
+      }
+
+      length = (p - start)/sizeof(char);
+      acc = (char *) CALLOC_IN(length+1,sizeof(char));
+      strncpy(acc,start,length);
+      acc[length] = '\0';
+	
+      q += 4;			/* Skip Y:0: */
+      length = strlen(q);
+      *restofheader = (char *) MALLOC_IN((length+1)*sizeof(char));
+      strcpy(*restofheader,q);
+
+    } else {
       *p = '\0';
       length = (p - start)/sizeof(char);
       acc = (char *) CALLOC_IN(length+1,sizeof(char));
       strcpy(acc,start);
       *restofheader = (char *) CALLOC_IN(1,sizeof(char));
       (*restofheader)[0] = '\0';
-
-    } else {
-      length = (p - start)/sizeof(char);
-      acc = (char *) CALLOC_IN(length+1,sizeof(char));
-      strncpy(acc,start,length);
-      acc[length] = '\0';
-
-      q += 4;			/* Skip Y:0: */
-      length = strlen(q);
-      *restofheader = (char *) MALLOC_IN((length+1)*sizeof(char));
-      strcpy(*restofheader,q);
     }
 
     return acc;
@@ -1118,6 +1167,30 @@ find_spaces (int *nspaces, char *line) {
   }
 }
 
+static void
+too_long_read_exit (char *Start) {
+  int prefix_n = (int) strlen(Start);
+  if (prefix_n > 60) {
+    prefix_n = 60;
+  }
+
+  fprintf(stderr,
+	  "\nGSNAP: a FASTQ line exceeds --max-read-length=%d (tune=%s).\n"
+	  "       Line begins with: '%.*s%s'\n"
+	  "       Re-run with a larger cap. Presets:\n"
+	  "         --tune=sbx        (cap %d)\n"
+	  "         --tune=pacbio     (cap %d)\n"
+	  "         --tune=nanopore   (cap %d)\n"
+	  "       Or override explicitly: --max-read-length=<N>\n\n",
+	  Parameters_max_readlength,
+	  Parameters_tune_name(Parameters_tune),
+	  prefix_n,Start,(prefix_n == 60 ? "..." : ""),
+	  DEFAULT_MAX_READLENGTH_SBX,
+	  DEFAULT_MAX_READLENGTH_PACBIO,
+	  DEFAULT_MAX_READLENGTH_NANOPORE);
+  exit(9);
+}
+
 
 static int
 input_oneline (int *nextchar, int *nchars, char **longstring, char *Start,
@@ -1126,14 +1199,11 @@ input_oneline (int *nextchar, int *nchars, char **longstring, char *Start,
   char *ptr, *p = NULL;
   int strlenp, nspaces;
 
-  int i;
-  Intlist_T intlist;
-
   debug(printf("Entering input_oneline with nextchar = %c\n",*nextchar));
   *longstring = (char *) NULL;
 
   ptr = &(Start[0]);
-  remainder = (&(Start[MAX_EXPECTED_READLENGTH]) - ptr)/sizeof(char);
+  remainder = (&(Start[Parameters_max_readlength]) - ptr)/sizeof(char);
   if (*nextchar == EOF || (possible_fasta_header_p == true && (*nextchar == '>' || *nextchar == '+'))) {
     debug(printf("nchars %d: EOF or > or +: Returning 0\n",*nchars));
     return 0;
@@ -1142,12 +1212,14 @@ input_oneline (int *nextchar, int *nchars, char **longstring, char *Start,
     return 0;
   } else {
     *ptr++ = (char) *nextchar;
-    if ((p = fgets(ptr,remainder+1,fp)) == NULL) {
+    /* remainder+1 can lead to a buffer overflow with strlen */
+    if ((p = fgets(ptr,remainder/*+1*/,fp)) == NULL) {
       /* NULL if file ends with a blank line */
-      debug(printf("Blank line. read %s.\n",ptr));
+      debug(printf("Blank line\n"));
     } else {
+      debug(printf("p %s, with length %d\n",p,strlen(p)));
       *nchars += strlen(p);
-      debug(printf("nchars %d: Read %s.\n",*nchars,ptr));
+      debug(printf("nchars is now %d\n",*nchars));
 #if 0
       if (pc_linefeeds_p == true) {
 #endif
@@ -1176,31 +1248,7 @@ input_oneline (int *nextchar, int *nchars, char **longstring, char *Start,
 	/* No line feed, but end of file.  Handle below. */
 	debug(printf("nchars %d: End of file seen\n",*nchars));
       } else {
-	/* No line feed, but not end of file.  Read too long, so using another method. */
-	debug(printf("No line feed, but not end of file.  Using Intlist_T.\n"));
-	intlist = (Intlist_T) NULL;
-	i = 0;
-	while (i <= MAX_EXPECTED_READLENGTH && Start[i] != '\0') {
-	  debug(printf("Pushing %c\n",Start[i]));
-	  intlist = Intlist_push_in(intlist,Start[i]);
-	  i++;
-	}
-	while ((*nextchar = fgetc(fp)) != EOF && *nextchar != '\n') {
-	  *nchars += 1;
-	  intlist = Intlist_push_in(intlist,*nextchar);
-	}
-	*nchars += 1;
-	if (*nextchar == '\n') {
-	  *nextchar = fgetc(fp);
-	  *nchars += 1;
-	}
-
-	intlist = Intlist_reverse(intlist);
-	*longstring = Intlist_to_char_array_in(&i,intlist);
-	Intlist_free_in(&intlist);
-
-	debug(printf("nchars %d: Intlist method returning %d\n",*nchars,i));
-	return i;
+	too_long_read_exit(Start);
       }
     }
 
@@ -1224,14 +1272,11 @@ input_oneline_gzip (int *nextchar, char **longstring, char *Start,
   char *ptr, *p = NULL;
   int strlenp, nspaces;
 
-  int i;
-  Intlist_T intlist;
-
   debug(printf("Entering input_oneline with nextchar = %c\n",*nextchar));
   *longstring = (char *) NULL;
 
   ptr = &(Start[0]);
-  remainder = (&(Start[MAX_EXPECTED_READLENGTH]) - ptr)/sizeof(char);
+  remainder = (&(Start[Parameters_max_readlength]) - ptr)/sizeof(char);
   if (*nextchar == EOF || (possible_fasta_header_p == true && (*nextchar == '>' || *nextchar == '+'))) {
     debug(printf("EOF or > or +: Returning 0\n"));
     return 0;
@@ -1240,7 +1285,8 @@ input_oneline_gzip (int *nextchar, char **longstring, char *Start,
     return 0;
   } else {
     *ptr++ = (char) *nextchar;
-    if ((p = gzgets(fp,ptr,remainder+1)) == NULL) {
+    /* remainder+1 can lead to a buffer overflow with strlen */
+    if ((p = gzgets(fp,ptr,remainder/*+1*/)) == NULL) {
       /* NULL if file ends with a blank line */
       debug(printf("Blank line. read %s.\n",ptr));
     } else {
@@ -1273,28 +1319,7 @@ input_oneline_gzip (int *nextchar, char **longstring, char *Start,
 	/* No line feed, but end of file.  Handle below. */
 	debug(printf("End of file seen\n"));
       } else {
-	/* No line feed, but not end of file.  Read too long, so using another method. */
-	debug(printf("No line feed, but not end of file.  Using Intlist_T.\n"));
-	intlist = (Intlist_T) NULL;
-	i = 0;
-	while (i <= MAX_EXPECTED_READLENGTH && Start[i] != '\0') {
-	  debug(printf("Pushing %c\n",Start[i]));
-	  intlist = Intlist_push_in(intlist,Start[i]);
-	  i++;
-	}
-	while ((*nextchar = gzgetc(fp)) != EOF && *nextchar != '\n') {
-	  intlist = Intlist_push_in(intlist,*nextchar);
-	}
-	if (*nextchar == '\n') {
-	  *nextchar = gzgetc(fp);
-	}
-
-	intlist = Intlist_reverse(intlist);
-	*longstring = Intlist_to_char_array_in(&i,intlist);
-	Intlist_free_in(&intlist);
-
-	debug(printf("Intlist method returning %d\n",i));
-	return i;
+	too_long_read_exit(Start);
       }
     }
     ptr += strlen(ptr);
@@ -1316,14 +1341,11 @@ input_oneline_bzip2 (int *nextchar, char **longstring, char *Start,
   char *ptr, *p = NULL;
   int strlenp, nspaces;
 
-  int i;
-  Intlist_T intlist;
-
   debug(printf("Entering input_oneline with nextchar = %c\n",*nextchar));
   *longstring = (char *) NULL;
 
   ptr = &(Start[0]);
-  remainder = (&(Start[MAX_EXPECTED_READLENGTH]) - ptr)/sizeof(char);
+  remainder = (&(Start[Parameters_max_readlength]) - ptr)/sizeof(char);
   if (*nextchar == EOF || (possible_fasta_header_p == true && (*nextchar == '>' || *nextchar == '+'))) {
     debug(printf("EOF or > or +: Returning 0\n"));
     return 0;
@@ -1332,7 +1354,8 @@ input_oneline_bzip2 (int *nextchar, char **longstring, char *Start,
     return 0;
   } else {
     *ptr++ = (char) *nextchar;
-    if ((p = bzgets(fp,ptr,remainder+1)) == NULL) {
+    /* remainder+1 can lead to a buffer overflow with strlen */
+    if ((p = bzgets(fp,ptr,remainder/*+1*/)) == NULL) {
       /* NULL if file ends with a blank line */
       debug(printf("Blank line. read %s.\n",ptr));
     } else {
@@ -1365,28 +1388,7 @@ input_oneline_bzip2 (int *nextchar, char **longstring, char *Start,
 	/* No line feed, but end of file.  Handle below. */
 	debug(printf("End of file seen\n"));
       } else {
-	/* No line feed, but not end of file.  Read too long, so using another method. */
-	debug(printf("No line feed, but not end of file.  Using Intlist_T.\n"));
-	intlist = (Intlist_T) NULL;
-	i = 0;
-	while (i <= MAX_EXPECTED_READLENGTH && Start[i] != '\0') {
-	  debug(printf("Pushing %c\n",Start[i]));
-	  intlist = Intlist_push_in(intlist,Start[i]);
-	  i++;
-	}
-	while ((*nextchar = bzgetc(fp)) != EOF && *nextchar != '\n') {
-	  intlist = Intlist_push_in(intlist,*nextchar);
-	}
-	if (*nextchar == '\n') {
-	  *nextchar = bzgetc(fp);
-	}
-
-	intlist = Intlist_reverse(intlist);
-	*longstring = Intlist_to_char_array_in(&i,intlist);
-	Intlist_free_in(&intlist);
-
-	debug(printf("Intlist method returning %d\n",i));
-	return i;
+	too_long_read_exit(Start);
       }
     }
     ptr += strlen(ptr);
@@ -4620,8 +4622,9 @@ Shortread_print_query_singleend (Filestring_T fp, T queryseq, T headerseq) {
     
     if (queryseq->quality != NULL) {
       FPRINTF(fp,"+\n");
-      Shortread_print_quality(fp,queryseq,/*hardclip_low*/0,/*hardclip_high*/0,
-			      /*shift*/0,/*choppedp*/false);
+      if (queryseq->left_chop_quality != NULL) FPRINTF(fp,"%s",queryseq->left_chop_quality);
+      FPRINTF(fp,"%.*s",queryseq->fulllength,queryseq->quality);
+      if (queryseq->right_chop_quality != NULL) FPRINTF(fp,"%s",queryseq->right_chop_quality);
       FPRINTF(fp,"\n");
     }
 
@@ -4653,8 +4656,9 @@ Shortread_print_query_pairedend (Filestring_T fp1, Filestring_T fp2, T queryseq1
       FPRINTF(fp1,"\n");
       if (queryseq1->quality != NULL) {
 	FPRINTF(fp1,"+\n");
-	Shortread_print_quality_revcomp(fp1,queryseq1,/*hardclip_low*/0,/*hardclip_high*/0,
-					/*shift*/0,/*choppedp*/false);
+	if (queryseq1->right_chop_quality != NULL) FPRINTF(fp1,"%.*r",queryseq1->right_choplength,queryseq1->right_chop_quality);
+	FPRINTF(fp1,"%.*r",queryseq1->fulllength,queryseq1->quality);
+	if (queryseq1->left_chop_quality != NULL) FPRINTF(fp1,"%.*r",queryseq1->left_choplength,queryseq1->left_chop_quality);
 	FPRINTF(fp1,"\n");
       }
     } else {
@@ -4662,8 +4666,9 @@ Shortread_print_query_pairedend (Filestring_T fp1, Filestring_T fp2, T queryseq1
       FPRINTF(fp1,"\n");
       if (queryseq1->quality != NULL) {
 	FPRINTF(fp1,"+\n");
-	Shortread_print_quality(fp1,queryseq1,/*hardclip_low*/0,/*hardclip_high*/0,
-				/*shift*/0,/*choppedp*/false);
+	if (queryseq1->left_chop_quality != NULL) FPRINTF(fp1,"%s",queryseq1->left_chop_quality);
+	FPRINTF(fp1,"%.*s",queryseq1->fulllength,queryseq1->quality);
+	if (queryseq1->right_chop_quality != NULL) FPRINTF(fp1,"%s",queryseq1->right_chop_quality);
 	FPRINTF(fp1,"\n");
       }
     }
@@ -4680,8 +4685,9 @@ Shortread_print_query_pairedend (Filestring_T fp1, Filestring_T fp2, T queryseq1
       FPRINTF(fp2,"\n");
       if (queryseq2->quality != NULL) {
 	FPRINTF(fp2,"+\n");
-	Shortread_print_quality_revcomp(fp2,queryseq2,/*hardclip_low*/0,/*hardclip_high*/0,
-					/*shift*/0,/*chopped*/false);
+	if (queryseq2->right_chop_quality != NULL) FPRINTF(fp2,"%.*r",queryseq2->right_choplength,queryseq2->right_chop_quality);
+	FPRINTF(fp2,"%.*r",queryseq2->fulllength,queryseq2->quality);
+	if (queryseq2->left_chop_quality != NULL) FPRINTF(fp2,"%.*r",queryseq2->left_choplength,queryseq2->left_chop_quality);
 	FPRINTF(fp2,"\n");
       }
     } else {
@@ -4689,8 +4695,9 @@ Shortread_print_query_pairedend (Filestring_T fp1, Filestring_T fp2, T queryseq1
       FPRINTF(fp2,"\n");
       if (queryseq2->quality != NULL) {
 	FPRINTF(fp2,"+\n");
-	Shortread_print_quality(fp2,queryseq2,/*hardclip_low*/0,/*hardclip_high*/0,
-				/*shift*/0,/*choppedp*/false);
+	if (queryseq2->left_chop_quality != NULL) FPRINTF(fp2,"%s",queryseq2->left_chop_quality);
+	FPRINTF(fp2,"%.*s",queryseq2->fulllength,queryseq2->quality);
+	if (queryseq2->right_chop_quality != NULL) FPRINTF(fp2,"%s",queryseq2->right_chop_quality);
 	FPRINTF(fp2,"\n");
       }
     }

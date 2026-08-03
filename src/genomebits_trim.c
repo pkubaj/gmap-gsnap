@@ -53,8 +53,8 @@ Genomebits_trim_qend (int *nmismatches_to_trimpos,
 		      Univcoord_T univdiagonal, int querylength,
 		      int pos5, int pos3, bool plusp, int genestrand) {
 
-  int trimpos = pos3, prevpos = pos5 - 1, pos;
-  int max_score = (pos3 - pos5)*TRIM_MISMATCH_SCORE_MULT, score = 0;
+  int trimpos, prevpos, pos;
+  int max_score, score = 0;
   bool query_unk_mismatch_p = false;
   bool genome_unk_mismatch_p = true;
 
@@ -78,11 +78,13 @@ Genomebits_trim_qend (int *nmismatches_to_trimpos,
 
   *nmismatches_to_trimpos = 0;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
+  left = Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    return pos3;
   }
+  trimpos = pos3;
+  prevpos = pos5 - 1;
+  max_score = (pos3 - pos5)*TRIM_MISMATCH_SCORE_MULT;
 
   debug1(
 	printf("\n\n");
@@ -105,13 +107,19 @@ Genomebits_trim_qend (int *nmismatches_to_trimpos,
   debug1(printf("Query shifted %d:\n",nshift));
   debug1(Compress_print(query_compress,nshift,pos5,pos3));
 
+  startdiscard = (left+pos5) % 32U;
+  enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+  }
+
   /* For rightward scanning */
   ref_high_ptr = &(ref->high_blocks[startblocki]);
   ref_low_ptr = &(ref->low_blocks[startblocki]);
   ref_flags_ptr = &(ref->flags_blocks[startblocki]);
 
-  startdiscard = (left+pos5) % 32U;
-  enddiscard = (left+pos3) % 32U;
   offset = -startdiscard + pos5;
   debug1(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
@@ -463,8 +471,8 @@ Genomebits_trim_qstart (int *nmismatches_to_trimpos,
 			Univcoord_T univdiagonal, int querylength,
 			int pos5, int pos3, bool plusp, int genestrand) {
 
-  int trimpos = pos5, prevpos = pos3, pos;
-  int max_score = (pos3 - pos5)*TRIM_MISMATCH_SCORE_MULT, score = 0;
+  int trimpos, prevpos, pos;
+  int max_score, score = 0;
   bool query_unk_mismatch_p = false;
   bool genome_unk_mismatch_p = true;
 
@@ -488,11 +496,13 @@ Genomebits_trim_qstart (int *nmismatches_to_trimpos,
 
   *nmismatches_to_trimpos = 0;
 
-  /* Check for alignments before genome start */
-  left = univdiagonal - querylength;
-  if (univdiagonal + pos5 < (Univcoord_T) querylength) {
-    pos5 = querylength - univdiagonal;
+  left = Genomebits_clip_query_bounds(&pos5,&pos3,ref,univdiagonal,querylength);
+  if (pos5 >= pos3) {
+    return pos5;
   }
+  trimpos = pos5;
+  prevpos = pos3;
+  max_score = (pos3 - pos5)*TRIM_MISMATCH_SCORE_MULT;
 
   debug1(
 	printf("\n\n");
@@ -514,13 +524,20 @@ Genomebits_trim_qstart (int *nmismatches_to_trimpos,
   debug1(printf("Query shifted %d:\n",nshift));
   debug1(Compress_print(query_compress,nshift,pos5,pos3));
 
+  startdiscard = (left+pos5) % 32U;
+  enddiscard = (left+pos3) % 32U;
+  if (enddiscard == 0 && endblocki > startblocki &&
+      endblocki >= ref->high_len / sizeof(Genomecomp_T)) {
+    endblocki = ref->high_len / sizeof(Genomecomp_T) - 1;
+    enddiscard = 32;
+    query_high_shifted--; query_low_shifted--; query_flags_shifted--;
+  }
+
   /* For leftward scanning */
   ref_high_ptr = &(ref->high_blocks[endblocki]);
   ref_low_ptr = &(ref->low_blocks[endblocki]);
   ref_flags_ptr = &(ref->flags_blocks[endblocki]);
 
-  startdiscard = (left+pos5) % 32U;
-  enddiscard = (left+pos3) % 32U;
   offset = (32 - enddiscard) + pos3 - 1;
   debug1(printf("nshift = %d, startdiscard = %d, enddiscard = %d or %d\n",
 	       nshift,startdiscard,enddiscard,enddiscard + 32));
@@ -963,6 +980,5 @@ Genomebits_trim_setup (Mode_T mode, bool maskedp) {
 
   return;
 }
-
 
 

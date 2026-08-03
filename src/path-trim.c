@@ -6,6 +6,7 @@
 #endif
 
 #include "path-trim.h"
+#include "debug_groups.h"
 #include "path-eval.h"
 
 #include <stdio.h>
@@ -27,21 +28,21 @@ static Genomebits_T genomebits_alt;
 
 /* #define MIN_END 4 */
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PATH_CORE)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
 /* Path_trim_circular */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
 #define debug2(x) x
 #else
 #define debug2(x)
 #endif
 
 /* unalias_path */
-#ifdef DEBUG3
+#if defined(DEBUG3) || defined(DEBUG_PATH_CORE)
 #define debug3(x) x
 #else
 #define debug3(x)
@@ -282,8 +283,10 @@ Path_trim_qstart_n (int noutside, T this,
 		    Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool) {
   int nsegments = 0, remainder, nmatches_trimmed;
   Intlist_T p;
-  int overall_qstart;
+  List_T j;
+  int overall_qstart, last_ninserts, ninserts;
   int ignore_found_score = this->querylength;
+  int ignore_end_score = this->querylength;
 
   
   debug(printf("Entering Path_trim_qstart_n with noutside %d against %s\n",
@@ -292,9 +295,27 @@ Path_trim_qstart_n (int noutside, T this,
 
   p = this->endpoints;
   overall_qstart = Intlist_head(p);
-  while (Intlist_next(p) != NULL && Intlist_second_value(p) - overall_qstart <= noutside) {
+
+  j = this->junctions;
+  last_ninserts = 0;
+  if (j == NULL) {
+    ninserts = 0;
+  } else {
+    ninserts = Junction_ninserts((Junction_T) List_head(j));
+  }
+  debug(printf("Comparing endpoint %d - ninserts %d against overall_qstart %d + noutside %d\n",
+	       Intlist_second_value(p),ninserts,overall_qstart,noutside));
+  while (Intlist_next(p) != NULL && Intlist_second_value(p) - ninserts <= overall_qstart + noutside) {
     nsegments++;
     p = Intlist_next(p);
+    last_ninserts = 0;
+    if (j == NULL) {
+      ninserts = 0;
+    } else if ((j = List_next(j)) == NULL) {
+      ninserts = 0;
+    } else {
+      ninserts = Junction_ninserts((Junction_T) List_head(j));
+    }
   }
   
   debug(printf("Now endpoints is %s\n",Intlist_to_string(p)));
@@ -303,8 +324,9 @@ Path_trim_qstart_n (int noutside, T this,
 
   } else {
     /* Previously checked qstart = Intlist_head(p)) - overall_qstart >= noutside */
-    remainder = noutside - (Intlist_head(p) - overall_qstart);
-    debug(printf("Computed %d segments, remainder %d\n",nsegments,remainder));
+    remainder = noutside - (Intlist_head(p) - overall_qstart) + last_ninserts;
+    debug(printf("Computed %d segments, remainder %d (using last_ninserts %d)\n",
+		 nsegments,remainder,last_ninserts));
     
     if (trim_qstart(&nmatches_trimmed,nsegments,remainder,this,
 		    intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool) == false) {
@@ -312,7 +334,7 @@ Path_trim_qstart_n (int noutside, T this,
       this->nmatches -= nmatches_trimmed;
     } else {
       this->nmatches = -1;
-      Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
     }
     
     /* Used to always call Path_eval_nmatches */
@@ -356,7 +378,7 @@ Path_trim_qstart_trimbounds (T this,
     this->nmatches -= nmatches_trimmed;
   } else {
     this->nmatches = -1;
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
   }
 
   return;
@@ -374,6 +396,7 @@ Path_trim_qstart_trimdiag (T this,
 			   Univcoord_T trimdiag) {
   int nsegments;
   int ignore_found_score = this->querylength;
+  int ignore_end_score = this->querylength;
   int nmatches_trimmed;
 
   debug(printf("Entering Path_trim_qstart_trimdiag with trimdiag %u\n",trimdiag));
@@ -393,13 +416,13 @@ Path_trim_qstart_trimdiag (T this,
     /* Call even if nsegments == 0 and remainder == 0 */
     this->nmatches -= nmatches_trimmed;
 #ifdef CHECK_ASSERTIONS
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
 #endif
     return true;
 
   } else {
     this->nmatches = -1;
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
     return true;
   }
 }
@@ -619,8 +642,10 @@ Path_trim_qend_n (int noutside, T this,
 		  Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool) {
   int nsegments = 0, remainder, nmatches_trimmed;
   Intlist_T p;
-  int overall_qend;
+  List_T j;
+  int overall_qend, last_ninserts, ninserts;
   int ignore_found_score = this->querylength;
+  int ignore_end_score = this->querylength;
 
   debug(printf("Entering Path_trim_qend_n with noutside %d against %s\n",
 	       noutside,Intlist_to_string(this->endpoints)));
@@ -630,9 +655,27 @@ Path_trim_qend_n (int noutside, T this,
 
   p = this->endpoints;
   overall_qend = Intlist_head(p);
-  while (Intlist_next(p) != NULL && overall_qend - Intlist_second_value(p) <= noutside) {
+
+  j = this->junctions;
+  last_ninserts = 0;
+  if (j == NULL) {
+    ninserts = 0;
+  } else {
+    ninserts = Junction_ninserts((Junction_T) List_head(j));
+  }
+  debug(printf("Comparing endpoint %d + ninserts %d against overall_qend %d - noutside %d\n",
+	       Intlist_second_value(p),ninserts,overall_qend,noutside));
+  while (Intlist_next(p) != NULL && Intlist_second_value(p) + ninserts >= overall_qend - noutside) {
     nsegments++;
     p = Intlist_next(p);
+    last_ninserts = ninserts;
+    if (j == NULL) {
+      ninserts = 0;
+    } else if ((j = List_next(j)) == NULL) {
+      ninserts = 0;
+    } else {
+      ninserts = Junction_ninserts((Junction_T) List_head(j));
+    }
   }
 
   debug(printf("Now endpoints is %s\n",Intlist_to_string(p)));
@@ -642,8 +685,9 @@ Path_trim_qend_n (int noutside, T this,
 
   } else {
     /* Previously checked overall_qend - (qend = Intlist_head(p)) >= noutside */
-    remainder = noutside - (overall_qend - Intlist_head(p));
-    debug(printf("Computed %d segments, remainder %d\n",nsegments,remainder));
+    remainder = noutside - (overall_qend - Intlist_head(p)) + last_ninserts;
+    debug(printf("Computed %d segments, remainder %d (using last_ninserts %d)\n",
+		 nsegments,remainder,last_ninserts));
     
     if (trim_qend(&nmatches_trimmed,nsegments,remainder,this,
 		  intlistpool,univcoordlistpool,listpool,pathpool,transcriptpool) == false) {
@@ -651,13 +695,13 @@ Path_trim_qend_n (int noutside, T this,
       this->nmatches -= nmatches_trimmed;
       Path_reverse(this,/*expect_fwd_p*/true);
 #ifdef CHECK_ASSERTIONS
-      Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
 #endif
       
     } else {
       Path_reverse(this,/*expect_fwd_p*/true);
       this->nmatches = -1;
-      Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
     }
 
     debug(printf("After trimming: "));
@@ -701,12 +745,12 @@ Path_trim_qend_trimbounds (T this, Intlistpool_T intlistpool, Univcoordlistpool_
     /* Call even if nsegments == 0 and remainder == 0 */
     this->nmatches -= nmatches_trimmed;
 #ifdef CHECK_ASSERTIONS
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
 #endif
 
   } else {
     this->nmatches = -1;
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
   }
 
   Path_reverse(this,/*expect_fwd_p*/true);
@@ -726,6 +770,7 @@ Path_trim_qend_trimdiag (T this,
 			 Transcriptpool_T transcriptpool, int querylength, Univcoord_T trimdiag) {
   int nsegments;
   int ignore_found_score = this->querylength;
+  int ignore_end_score = this->querylength;
   int nmatches_trimmed;
 
   debug(printf("Entering Path_trim_qend_trimdiag with trimdiag %u\n",trimdiag));
@@ -750,21 +795,21 @@ Path_trim_qend_trimdiag (T this,
     this->nmatches -= nmatches_trimmed;
     Path_reverse(this,/*expect_fwd_p*/true);
 #ifdef CHECK_ASSERTIONS
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
 #endif
     return true;
 
   } else {
     this->nmatches = -1;
     Path_reverse(this,/*expect_fwd_p*/true);
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
     return true;
   }
 }
 
 
 bool
-Path_trim_chrbounds (int *found_score, T this,
+Path_trim_chrbounds (int *found_score, int *end_score, T this,
 		     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		     Listpool_T listpool, Pathpool_T pathpool,
@@ -775,6 +820,7 @@ Path_trim_chrbounds (int *found_score, T this,
   Intlist_T q;
   List_T j;
   int ignore_found_score = this->querylength;
+  int ignore_end_score = this->querylength;
   bool qstart_evalp = false, qend_evalp = false;
   int qstart_nmatches_trimmed = 0, qend_nmatches_trimmed = 0;
   
@@ -805,7 +851,10 @@ Path_trim_chrbounds (int *found_score, T this,
   }
   
   if (p == NULL) {
-    /* Skip */
+    /* All segments are before chromosomal start */
+    debug(printf("All segments are before chromosomal start, so returning false\n"));
+    return false;
+
   } else {
     univdiagonal = Univcoordlist_head(p);
     qstart = Intlist_head(q);
@@ -868,7 +917,10 @@ Path_trim_chrbounds (int *found_score, T this,
   }
 
   if (p == NULL) {
-    /* Skip */
+    /* All segments are after chromosomal end */
+    debug(printf("All segments are after chromosomal end, so returning false\n"));
+    return false;
+
   } else {
     univdiagonal = Univcoordlist_head(p);
     qend = Intlist_head(q);
@@ -899,17 +951,19 @@ Path_trim_chrbounds (int *found_score, T this,
 
   if (this->nmatches < 0) {
     /* Path was changed by caller, e.g., Pathpair_resolve */
-    Path_eval_nmatches(&(*found_score),this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),this,query_compress_fwd,query_compress_rev);
 
   } else if (qstart_evalp == false && qend_evalp == false) {
+    debug(printf("Starting with nmatches %d, but subtracting %d from start and %d from end\n",
+		 this->nmatches,qstart_nmatches_trimmed,qend_nmatches_trimmed));
     this->nmatches -= qstart_nmatches_trimmed;
     this->nmatches -= qend_nmatches_trimmed;
 #ifdef CHECK_ASSERTIONS
-    Path_eval_nmatches(&ignore_found_score,this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
 #endif
   } else {
     this->nmatches = -1;
-    Path_eval_nmatches(&(*found_score),this,query_compress_fwd,query_compress_rev);
+    Path_eval_nmatches(&(*found_score),&(*end_score),this,query_compress_fwd,query_compress_rev);
   }
 
   debug(printf("After trimming: "));
@@ -965,16 +1019,18 @@ divide_path (int *nhigh, int *qend_nsegments, int *qend_remainder,
 }
 
 
+/* Moves path from higher coordinates to lower ones */
 /* Need to check that this alignment has no splices (although it could have indels) */
 static void
-unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress) {
+unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress,
+	      Compress_T query_compress_fwd, Compress_T query_compress_rev) {
   Univcoord_T circular_origin, new_univdiagonal, univdiagonal;
   Univcoordlist_T u;
   Altsplice_T altsplice;
   Intlist_T q, r, s;
   List_T j;
   int qstart, qend, last_ninserts;
-  int nmismatches, ref_nmismatches;
+  int nmismatches, ref_nmismatches, ignore_found_score, ignore_end_score;
   bool cross_origin_p = false;
   int i;
 
@@ -1023,6 +1079,12 @@ unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress) {
   
   if (cross_origin_p == true) {
     this->genomic_diff = (char *) NULL;
+
+    /* Need to re-evaluate path, since matches and mismatches might have gone past chrhigh */
+    this->nmatches = -1;
+    ignore_found_score = ignore_end_score = this->querylength;
+    Path_eval_nmatches(&ignore_found_score,&ignore_end_score,this,query_compress_fwd,query_compress_rev);
+
     /* Pathpool_free_string(&this->genomic_diff); */
   }
 
@@ -1030,6 +1092,7 @@ unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress) {
   /* It is possible that some qstart alts_coords are above linear_chrhigh and some below */
   /* However, if we don't unalias all of them, we could get a negative splice distance */
   if ((altsplice = this->qstart_alts) != NULL) {
+    altsplice->medial_univdiagonal -= linear_chrlength;
     for (i = 0; i < altsplice->nunivdiagonals; i++) {
       /* if (altsplice->univdiagonals[i] >= linear_chrhigh) { */
       altsplice->univdiagonals[i] -= linear_chrlength;
@@ -1038,6 +1101,7 @@ unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress) {
   }
 
   if ((altsplice = this->qend_alts) != NULL) {
+    altsplice->medial_univdiagonal -= linear_chrlength;
     for (i = 0; i < altsplice->nunivdiagonals; i++) {
       altsplice->univdiagonals[i] -= linear_chrlength;
     }
@@ -1053,7 +1117,8 @@ unalias_path (T this, Univcoord_T linear_chrlength, Compress_T query_compress) {
 /* Returns true if the entire path is in the upper half, meaning that
    it must have an alias in the lower half */
 void
-Path_trim_circular_unalias (T this, Compress_T query_compress) {
+Path_trim_circular_unalias (T this, Compress_T query_compress,
+			    Compress_T query_compress_fwd, Compress_T query_compress_rev) {
   int nlow, nhigh, qend_nsegments, qend_remainder;
   Univcoord_T linear_chrhigh, linear_chrlength;
 
@@ -1061,7 +1126,7 @@ Path_trim_circular_unalias (T this, Compress_T query_compress) {
 			  &linear_chrhigh,&linear_chrlength,this)) > 0) {
     /* Do not alter the path */
   } else {
-    unalias_path(this,linear_chrlength,query_compress);
+    unalias_path(this,linear_chrlength,query_compress,query_compress_fwd,query_compress_rev);
   }
 
   return;
@@ -1080,8 +1145,10 @@ Path_trim_circular_unalias_pair (T path5, T path3, Compress_T query5_compress_fw
       /* Do not alter either path */
     } else {
       /* Alter both paths */
-      unalias_path(path5,linear_chrlength,query5_compress_fwd);
-      unalias_path(path3,linear_chrlength,query3_compress_fwd);
+      unalias_path(path5,linear_chrlength,query5_compress_fwd,
+		   query5_compress_fwd,query5_compress_rev);
+      unalias_path(path3,linear_chrlength,query3_compress_fwd,
+		   query3_compress_rev,query3_compress_rev);
     }
   } else {
     if ((nlow = divide_path(&nhigh,&qend_nsegments,&qend_remainder,
@@ -1089,8 +1156,10 @@ Path_trim_circular_unalias_pair (T path5, T path3, Compress_T query5_compress_fw
       /* Do not alter either path */
     } else {
       /* Alter both paths */
-      unalias_path(path5,linear_chrlength,query5_compress_rev);
-      unalias_path(path3,linear_chrlength,query3_compress_rev);
+      unalias_path(path5,linear_chrlength,query5_compress_rev,
+		   query5_compress_fwd,query5_compress_rev);
+      unalias_path(path3,linear_chrlength,query3_compress_rev,
+		   query3_compress_fwd,query3_compress_rev);
     }
   }
 
@@ -1106,6 +1175,7 @@ Path_trim_circular_unalias_pair (T path5, T path3, Compress_T query5_compress_fw
 
 void
 Path_trim_circular (T this, Compress_T query_compress,
+		    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		    Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		    Listpool_T listpool) {
   int nlow, nhigh, qend_nsegments, qend_remainder, i;
@@ -1124,7 +1194,8 @@ Path_trim_circular (T this, Compress_T query_compress,
 			  &linear_chrhigh,&linear_chrlength,this)) == 0) {
     /* Entire alignment is in the top half of the double chromosome, so unalias all univdiagonals */
     debug2(printf("Entire alignment is in the top half\n"));
-    Path_trim_circular_unalias(this,query_compress);
+    Path_trim_circular_unalias(this,query_compress,
+			       query_compress_fwd,query_compress_rev);
 
   } else if (nhigh == 0) {
     /* Entire alignment is in the bottom half of the double chromosome, so nothing to do */
@@ -1207,6 +1278,7 @@ Path_trim_circular (T this, Compress_T query_compress,
 
     /* Unalias qend_alts, which are above chrlength */
     if ((altsplice = this->qend_alts) != NULL) {
+      altsplice->medial_univdiagonal -= linear_chrlength;
       for (i = 0; i < altsplice->nunivdiagonals; i++) {
 	altsplice->univdiagonals[i] -= linear_chrlength;
       }

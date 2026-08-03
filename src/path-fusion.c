@@ -1247,7 +1247,7 @@ compute_fusions_case1 (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1331,7 +1331,7 @@ compute_fusions_case1p (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					  /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1413,7 +1413,7 @@ compute_fusions_case2 (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1495,7 +1495,7 @@ compute_fusions_case2p (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					  /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1576,7 +1576,7 @@ compute_fusions_case3 (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					  /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1658,7 +1658,7 @@ compute_fusions_case3p (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1741,7 +1741,7 @@ compute_fusions_case4 (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					  /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1825,7 +1825,7 @@ compute_fusions_case4p (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/false);
       debug(Path_print(newpath));
-      Path_eval_nmatches(&found_score_ignore,newpath,query_compress_fwd,query_compress_rev);
+      Path_eval_nmatches(&found_score_ignore,&end_score_ignore,newpath,query_compress_fwd,query_compress_rev);
       fusion_paths = Hitlist_push(fusion_paths,hitlistpool,(void *) newpath
 				  hitlistpool_trace(__FILE__,__LINE__));
     }
@@ -1836,10 +1836,11 @@ compute_fusions_case4p (Path_T fusion, Path_T mainpath, List_T fusion_paths,
 #endif
 
 
+#if 0
 /* Returns or replaces the original mainpath */
 /* Handles cases 1 and 2 */
 List_T
-Path_fusion_outer_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_querystart_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				   Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				   Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -2085,8 +2086,8 @@ Path_fusion_outer_querystart_plus (int *found_score, T mainpath, Stage1_T stage1
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -2100,12 +2101,14 @@ Path_fusion_outer_querystart_plus (int *found_score, T mainpath, Stage1_T stage1
 
   return result;
 }
+#endif
 
 
+#if 0
 /* Returns or replaces the original mainpath */
 /* Handles cases 2' and 1' */
 List_T
-Path_fusion_outer_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_querystart_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				    Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -2353,8 +2356,8 @@ Path_fusion_outer_querystart_minus (int *found_score, T mainpath, Stage1_T stage
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -2368,13 +2371,14 @@ Path_fusion_outer_querystart_minus (int *found_score, T mainpath, Stage1_T stage
 
   return result;
 }
+#endif
 
 
-
+#if 0
 /* Returns or replaces the original mainpath */
 /* Handles cases 3 and 4 */
 List_T
-Path_fusion_outer_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_queryend_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				 Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				 Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -2623,8 +2627,8 @@ Path_fusion_outer_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -2638,10 +2642,12 @@ Path_fusion_outer_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
+#endif
 
 
+#if 0
 List_T
-Path_fusion_outer_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_outer_queryend_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 				  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 				  Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -2889,8 +2895,8 @@ Path_fusion_outer_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -2904,17 +2910,16 @@ Path_fusion_outer_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
-
+#endif
 
 
 T
-Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
+Path_fusion_inner_qend (int *found_score, int *end_score, T fusion5, T anchor3,
 			char *queryptr_main, bool main_plusp, int querylength,
 			Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
-			int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			unsigned short *localdb_alloc, Stage1_T stage1,
-			Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+			unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			Stage1_T stage1, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 			Compress_T query_compress_main, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			Shortread_T queryseq, int genestrand, int nmismatches_allowed,
 			Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -2992,11 +2997,11 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
       new_univdiagonals = (Univcoord_T *) NULL;
     } else {
       new_univdiagonals =
-	Spliceends_qend_resolve(&ndiagonals,&local_nmismatches,pos5,querylength,
+	Spliceends_qend_resolve(&ndiagonals,pos5,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress_main,queryptr_main,main_plusp,genestrand,
 				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				stage1,streamspace_max_alloc,streamspace_alloc,
+				localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				nmismatches_allowed);
     }
 
@@ -3040,11 +3045,11 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
       new_univdiagonals = (Univcoord_T *) NULL;
     } else {
       new_univdiagonals =
-	Spliceends_qstart_resolve(&ndiagonals,&local_nmismatches,pos3,querylength,
+	Spliceends_qstart_resolve(&ndiagonals,pos3,querylength,
 				  low_univdiagonal,high_univdiagonal,
 				  query_compress_main,queryptr_main,main_plusp,genestrand,
 				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				  stage1,streamspace_max_alloc,streamspace_alloc,
+				  localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				  nmismatches_allowed);
     }
   }
@@ -3132,8 +3137,8 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 					    queryseq,intlistpool,uintlistpool,univcoordlistpool,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/false);
-      Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-      if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+      Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+      if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
 	debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
 	Path_free(&newpath,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
@@ -3143,7 +3148,7 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
       } else {
 	Path_free(&mainpath,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	return newpath;
       }
 
@@ -3153,13 +3158,12 @@ Path_fusion_inner_qend (int *found_score, T fusion5, T anchor3,
 
 
 T
-Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
+Path_fusion_inner_qstart (int *found_score, int *end_score, T fusion3, T anchor5,
 			  char *queryptr_main, bool main_plusp, int querylength,
 			  Chrnum_T main_chrnum, Univcoord_T main_chroffset, Univcoord_T main_chrhigh,
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, Stage1_T stage1,
-			  Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+			  Stage1_T stage1, Spliceinfo_T spliceinfo, Knownsplicing_T knownsplicing,
 			  Compress_T query_compress_main, Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			  Shortread_T queryseq, int genestrand, int nmismatches_allowed,
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
@@ -3232,11 +3236,11 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
       new_univdiagonals = (Univcoord_T *) NULL;
     } else {
       new_univdiagonals =
-	Spliceends_qstart_resolve(&ndiagonals,&local_nmismatches,pos3,querylength,
+	Spliceends_qstart_resolve(&ndiagonals,pos3,querylength,
 				  low_univdiagonal,high_univdiagonal,
 				  query_compress_main,queryptr_main,main_plusp,genestrand,
 				  novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				  stage1,streamspace_max_alloc,streamspace_alloc,
+				  localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				  nmismatches_allowed);
     }
 
@@ -3281,11 +3285,11 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
       new_univdiagonals = (Univcoord_T *) NULL;
     } else {
       new_univdiagonals =
-	Spliceends_qend_resolve(&ndiagonals,&local_nmismatches,pos5,querylength,
+	Spliceends_qend_resolve(&ndiagonals,pos5,querylength,
 				low_univdiagonal,high_univdiagonal,
 				query_compress_main,queryptr_main,main_plusp,genestrand,
 				novel_univdiags_alloc,novel_diagonals_alloc,localdb_alloc,
-				stage1,streamspace_max_alloc,streamspace_alloc,
+				localdb_tally,localdb_overflowp,max_nblocks,stage1,
 				nmismatches_allowed);
     }
   }
@@ -3374,8 +3378,8 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
 					  queryseq,intlistpool,uintlistpool,univcoordlistpool,
 					  listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					  /*fusion_created_p*/false);
-      Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-      if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+      Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+      if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
 	debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
 	Path_free(&newpath,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
@@ -3385,7 +3389,7 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
       } else {
 	Path_free(&mainpath,intlistpool,univcoordlistpool,
 		  listpool,pathpool,transcriptpool,hitlistpool);
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	return newpath;
       }
     }
@@ -3397,8 +3401,9 @@ Path_fusion_inner_qstart (int *found_score, T fusion3, T anchor5,
  *  For single-end reads.  Procedures return only the fusion path, if found.
  ************************************************************************/
 
+#if 0
 List_T
-Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_querystart_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			     Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -3520,7 +3525,7 @@ Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
 					      listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					      /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -3596,7 +3601,7 @@ Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
 					      listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					      /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -3622,8 +3627,8 @@ Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -3637,12 +3642,14 @@ Path_fusion_querystart_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
+#endif
 
 
+#if 0
 /* Returns or replaces the original mainpath */
 /* Handles cases 2' and 1' */
 List_T
-Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_querystart_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			      Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -3764,7 +3771,7 @@ Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -3840,7 +3847,7 @@ Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -3866,8 +3873,8 @@ Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -3881,13 +3888,14 @@ Path_fusion_querystart_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
+#endif
 
 
-
+#if 0
 /* Returns or replaces the original mainpath */
 /* Handles cases 3 and 4 */
 List_T
-Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_queryend_plus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			   Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			   Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -4011,7 +4019,7 @@ Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -4087,7 +4095,7 @@ Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 					    listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					    /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -4113,8 +4121,8 @@ Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -4128,10 +4136,12 @@ Path_fusion_queryend_plus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
+#endif
 
 
+#if 0
 List_T
-Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
+Path_fusion_queryend_minus (int *found_score, int *end_score, T mainpath, Stage1_T stage1,
 
 			    Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			    Shortread_T queryseq, int querylength, Knownsplicing_T knownsplicing,
@@ -4251,7 +4261,7 @@ Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 					      listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					      /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -4327,7 +4337,7 @@ Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 					      listpool,pathpool,vectorpool,transcriptpool,hitlistpool,
 					      /*fusion_created_p*/true);
 
-	Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
+	Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
 	debug(Path_print(newpath));
 	debug(printf("Freeing middle path %p and pushing newpath %p\n",middle_path,newpath));
 	Path_free(&middle_path,intlistpool,univcoordlistpool,
@@ -4353,8 +4363,8 @@ Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   for (p = fusion_paths; p != NULL; p = List_next(p)) {
     newpath = (T) List_head(p);
-    Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev);
-    if (0 && querylength - Path_eval_nmatches(&(*found_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
+    Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev);
+    if (0 && querylength - Path_eval_nmatches(&(*found_score),&(*end_score),newpath,query_compress_fwd,query_compress_rev) > nmismatches_allowed) {
       debug(printf("querylength %d - nmatches %d > nmismatches_allowed %d\n",querylength,newpath->nmatches,nmismatches_allowed));
       Path_free(&newpath,intlistpool,univcoordlistpool,
 		listpool,pathpool,transcriptpool,hitlistpool);
@@ -4368,6 +4378,7 @@ Path_fusion_queryend_minus (int *found_score, T mainpath, Stage1_T stage1,
 
   return result;
 }
+#endif
 
 
 void

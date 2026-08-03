@@ -1,9 +1,9 @@
-static char rcsid[] = "$Id: c37eafa0346bc18248e54bf94ed75998a4e4d992 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
 #include "concordance.h"
+#include "debug_groups.h"
 
 #include <stdlib.h>		/* For qsort */
 #include <stdio.h>
@@ -18,6 +18,7 @@ static char rcsid[] = "$Id: c37eafa0346bc18248e54bf94ed75998a4e4d992 $";
 
 #include "trpath.h"
 #include "trpath-convert.h"
+#include "trpath-solve.h"
 
 #include "path.h"
 #include "pathpair.h"
@@ -50,20 +51,20 @@ static bool merge_samechr_p;
 #define T Path_T
 
 /* Concordant paths */
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PAIRED_DEEP)
 #define debug0(x) x
 #else
 #define debug0(x)
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
 /* Exhaustive listing of jj loop */
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PAIRED_DEEP)
 #define debug9(x) x
 #else
 #define debug9(x)
@@ -79,7 +80,7 @@ static bool merge_samechr_p;
 
 
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 static char *
 print_sense (int sense) {
   if (sense == SENSE_NULL) {
@@ -97,8 +98,53 @@ print_sense (int sense) {
 
 
 static List_T
-do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_3, List_T pathpairs,
-		  Trpath_T *trpaths5, int ntrpaths5, Trpath_T *trpaths3, int ntrpaths3,
+push_concordant_trpath_with_repair (List_T concordant_trpaths, List_T *repaired_trpaths,
+				    Trpath_T trpath, int querylength, Stage1_T stage1,
+				    Compress_T query_compress_fwd, Compress_T query_compress_rev,
+				    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+				    Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool) {
+  Trpath_T repaired_trpath;
+  Compress_T query_compress_tr;
+
+  concordant_trpaths = Listpool_push(concordant_trpaths,listpool,(void *) trpath
+				     listpool_trace(__FILE__,__LINE__));
+
+  query_compress_tr = trpath->tplusp == true ? query_compress_fwd : query_compress_rev;
+  if ((repaired_trpath =
+       Trpath_solve_tstart_adjacent_indels(trpath,querylength,query_compress_tr,stage1->indelinfo,
+					   intlistpool,uintlistpool,listpool,trpathpool,pathpool)) != NULL) {
+    debug(printf("Adding paired-scoped adjacent qstart indel trpath: "));
+    debug(Trpath_print(repaired_trpath));
+    concordant_trpaths = Listpool_push(concordant_trpaths,listpool,(void *) repaired_trpath
+				       listpool_trace(__FILE__,__LINE__));
+    *repaired_trpaths = Listpool_push(*repaired_trpaths,listpool,(void *) repaired_trpath
+				      listpool_trace(__FILE__,__LINE__));
+  }
+
+  return concordant_trpaths;
+}
+
+static void
+free_repaired_trpaths (List_T *repaired_trpaths,
+		       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+		       Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool) {
+  List_T p;
+  Trpath_T trpath;
+
+  for (p = *repaired_trpaths; p != NULL; p = List_next(p)) {
+    trpath = (Trpath_T) List_head(p);
+    Trpath_free(&trpath,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+  }
+  Listpool_free_list(&(*repaired_trpaths),listpool
+		     listpool_trace(__FILE__,__LINE__));
+
+  return;
+}
+
+static List_T
+do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_3,
+		  int *end_score_paired, int *end_score_5, int *end_score_3,
+		  List_T pathpairs, Trpath_T *trpaths5, int ntrpaths5, Trpath_T *trpaths3, int ntrpaths3,
 		  Stage1_T stage1_5, Stage1_T stage1_3, Knownsplicing_T knownsplicing,
 		  Shortread_T queryseq5, Shortread_T queryseq3,
 		  
@@ -109,15 +155,17 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 		  int nmismatches_filter_5, int nmismatches_filter_3,
 		  int mincoverage_filter_5, int mincoverage_filter_3,
 
-		  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
+		  Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
-		  Listpool_T listpool,  Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-		  Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir) {
+		  Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		  Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir,
+		  bool paired_tr_adjacent_indel_repair_p) {
   
   List_T concordant_trpaths5 = NULL, concordant_trpaths3 = NULL;
+  List_T repaired_trpaths5 = NULL, repaired_trpaths3 = NULL;
   List_T unresolved_pathpairs = NULL;
 
   List_T paths5_gplus, paths5_gminus, paths3_gplus, paths3_gminus;
@@ -128,6 +176,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
   T *allpaths5, *allpaths3;
 
   int i, j;
+  int ii, jj, k;
   T path5, path3;
   Pathpair_T pathpair;
 
@@ -146,76 +195,109 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
     } else if (trpath3->trnum < trpath5->trnum) {
       j++;
     } else {
-      concordant_trpaths5 = Listpool_push(concordant_trpaths5,listpool,(void *) trpath5
-					  listpool_trace(__FILE__,__LINE__));
-      concordant_trpaths3 = Listpool_push(concordant_trpaths3,listpool,(void *) trpath3
-					  listpool_trace(__FILE__,__LINE__));
-      i++;
-      j++;
+      ii = i + 1;
+      while (ii < ntrpaths5 && trpaths5[ii]->trnum == trpath5->trnum) {
+	ii++;
+      }
+      jj = j + 1;
+      while (jj < ntrpaths3 && trpaths3[jj]->trnum == trpath3->trnum) {
+	jj++;
+      }
+
+      if (paired_tr_adjacent_indel_repair_p == true) {
+	for (k = i; k < ii; k++) {
+	  concordant_trpaths5 =
+	    push_concordant_trpath_with_repair(concordant_trpaths5,&repaired_trpaths5,
+					       trpaths5[k],querylength5,stage1_5,
+					       query5_compress_fwd,query5_compress_rev,
+					       intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	}
+	for (k = j; k < jj; k++) {
+	  concordant_trpaths3 =
+	    push_concordant_trpath_with_repair(concordant_trpaths3,&repaired_trpaths3,
+					       trpaths3[k],querylength3,stage1_3,
+					       query3_compress_fwd,query3_compress_rev,
+					       intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	}
+      } else {
+	for (k = i; k < ii; k++) {
+	  concordant_trpaths5 = Listpool_push(concordant_trpaths5,listpool,(void *) trpaths5[k]
+					      listpool_trace(__FILE__,__LINE__));
+	}
+	for (k = j; k < jj; k++) {
+	  concordant_trpaths3 = Listpool_push(concordant_trpaths3,listpool,(void *) trpaths3[k]
+					      listpool_trace(__FILE__,__LINE__));
+	}
+      }
+      i = ii;
+      j = jj;
     }
   }
 
   if (sensedir == SENSE_FORWARD) {
     paths5_gplus = paths5_gminus = (List_T) NULL;
-    Trpath_convert_sense(&(*found_score_5),&paths5_gplus,&paths5_gminus,
+    Trpath_convert_sense(&(*found_score_5),&(*end_score_5),&paths5_gplus,&paths5_gminus,
 			 /*antisense_paths_gplus*/NULL,/*antisense_paths_gminus*/NULL,
 
 			 concordant_trpaths5,/*first_read_p*/true,
 			 queryseq5,querylength5,stage1_5,knownsplicing,
 			 query5_compress_fwd,query5_compress_rev,
 
-			 streamspace_max_alloc,streamspace_alloc,
 			 novel_univdiags_alloc,novel_diagonals_alloc,
-			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+			 localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+			 localdb,localdb_nmismatches_allowed,
 
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			 vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
 
     paths3_gplus = paths3_gminus = (List_T) NULL;
-    Trpath_convert_sense(&(*found_score_3),&paths3_gplus,&paths3_gminus,
+    Trpath_convert_sense(&(*found_score_3),&(*end_score_3),&paths3_gplus,&paths3_gminus,
 			 /*antisense_paths_gplus*/NULL,/*antisense_paths_gminus*/NULL,
 
 			 concordant_trpaths3,/*first_read_p*/false,
 			 queryseq3,querylength3,stage1_3,knownsplicing,
 			 query3_compress_fwd,query3_compress_rev,
 
-			 streamspace_max_alloc,streamspace_alloc,
 			 novel_univdiags_alloc,novel_diagonals_alloc,
-			 localdb_alloc,localdb,localdb_nmismatches_allowed,
+			 localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+			 localdb,localdb_nmismatches_allowed,
 
 			 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			 vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
   } else {
     paths5_gplus = paths5_gminus = (List_T) NULL;
-    Trpath_convert_antisense(&(*found_score_5),&paths5_gplus,&paths5_gminus,
+    Trpath_convert_antisense(&(*found_score_5),&(*end_score_5),&paths5_gplus,&paths5_gminus,
 			     /*sense_paths_gplus*/NULL,/*sense_paths_gminus*/NULL,
 
 			     concordant_trpaths5,/*first_read_p*/true,
 			     queryseq5,querylength5,stage1_5,knownsplicing,
 			     query5_compress_fwd,query5_compress_rev,
 
-			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,
-			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+			     localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+			     localdb,localdb_nmismatches_allowed,
 
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			     vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
 
     paths3_gplus = paths3_gminus = (List_T) NULL;
-    Trpath_convert_antisense(&(*found_score_3),&paths3_gplus,&paths3_gminus,
+    Trpath_convert_antisense(&(*found_score_3),&(*end_score_3),&paths3_gplus,&paths3_gminus,
 			     /*sense_paths_gplus*/NULL,/*sense_paths_gminus*/NULL,
 
 			     concordant_trpaths3,/*first_read_p*/false,
 			     queryseq3,querylength3,stage1_3,knownsplicing,
 			     query3_compress_fwd,query3_compress_rev,
 
-			     streamspace_max_alloc,streamspace_alloc,
 			     novel_univdiags_alloc,novel_diagonals_alloc,
-			     localdb_alloc,localdb,localdb_nmismatches_allowed,
+			     localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+			     localdb,localdb_nmismatches_allowed,
 
 			     intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,
 			     vectorpool,transcriptpool,hitlistpool,/*crossover_sense_p*/false);
   }
+
+  free_repaired_trpaths(&repaired_trpaths3,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+  free_repaired_trpaths(&repaired_trpaths5,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
 
 
   /* Analogous to do_genome, for gplus */
@@ -241,7 +323,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
     i = j = 0;
     while (i < npaths5) {
       path5 = allpaths5[i];
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
       printf("i=%d/%d ",i,npaths5);
       Path_print(path5);
 #endif
@@ -249,7 +331,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
       trnum_high_5 = Path_trnum_high(path5);
 
       while (j >= 0 && Path_trnum_high(allpaths3[j]) >= trnum_low_5) {
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 	printf("  backup: j=%d/%d ",j,npaths3);
 	Path_print(allpaths3[j]);
 #endif
@@ -259,7 +341,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 
       while (j < npaths3 && Path_trnum_low(allpaths3[j]) <= trnum_high_5) {
 	path3 = allpaths3[j];
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 	printf("  forward: j=%d/%d ",j,npaths3);
 	Path_print(path3);
 #endif
@@ -281,6 +363,9 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 	  debug(Path_print(path3));
 	  if (Pathpair_found_score(pathpair) < *found_score_paired) {
 	    *found_score_paired = Pathpair_found_score(pathpair);
+	  }
+	  if (Pathpair_end_score(pathpair) < *end_score_paired) {
+	    *end_score_paired = Pathpair_end_score(pathpair);
 	  }
 	  pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpair
 				   hitlistpool_trace(__FILE__,__LINE__));
@@ -325,7 +410,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
     i = j = 0;
     while (i < npaths5) {
       path5 = allpaths5[i];
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
       printf("i=%d/%d ",i,npaths5);
       Path_print(path5);
 #endif
@@ -333,7 +418,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
       trnum_high_5 = Path_trnum_high(path5);
 
       while (j >= 0 && Path_trnum_high(allpaths3[j]) >= trnum_low_5) {
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 	printf("  backup: j=%d/%d ",j,npaths3);
 	Path_print(allpaths3[j]);
 #endif
@@ -343,7 +428,7 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 
       while (j < npaths3 && Path_trnum_low(allpaths3[j]) <= trnum_high_5) {
 	path3 = allpaths3[j];
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
 	printf("  forward: j=%d/%d ",j,npaths3);
 	Path_print(path3);
 #endif
@@ -363,6 +448,9 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 	  debug(Path_print(path5));
 	  if (Pathpair_found_score(pathpair) < *found_score_paired) {
 	    *found_score_paired = Pathpair_found_score(pathpair);
+	  }
+	  if (Pathpair_end_score(pathpair) < *end_score_paired) {
+	    *end_score_paired = Pathpair_end_score(pathpair);
 	  }
 	  pathpairs = Hitlist_push(pathpairs,hitlistpool,(void *) pathpair
 				   hitlistpool_trace(__FILE__,__LINE__));
@@ -389,8 +477,10 @@ do_transcriptome (int *found_score_paired, int *found_score_5, int *found_score_
 
 
 List_T
-Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3, List_T pathpairs,
+Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
+		int *end_score_paired, int *end_score_5, int *end_score_3,
 
+		List_T pathpairs,
 		List_T newtrpaths5, List_T newtrpaths3,
 		List_T trpaths5, List_T trpaths3,
 		    
@@ -404,18 +494,19 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 		int nmismatches_filter_5, int nmismatches_filter_3,
 		int mincoverage_filter_5, int mincoverage_filter_3,
 
-		int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		Intlistpool_T intlistpool, Uintlistpool_T uintlistpool, Univcoordlistpool_T univcoordlistpool,
-		Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
-		Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir) {
+		Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
+		Vectorpool_T vectorpool, Hitlistpool_T hitlistpool, int sensedir,
+		bool paired_tr_adjacent_indel_repair_p) {
 
   Trpath_T *alltrpaths5, *alltrpaths3;
   int nnewtrpaths5, nnewtrpaths3, ntrpaths5, ntrpaths3;
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_PAIRED_FLOW)
   List_T p;
   printf("Entered Concordance_tr with %d pathpairs, newtrpaths5 %d, newtrpaths3 %d, trpaths5 %d, trpaths3 %d\n",
 	 List_length(pathpairs),List_length(newtrpaths5),List_length(newtrpaths3),
@@ -466,7 +557,9 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
     qsort(alltrpaths5,nnewtrpaths5,sizeof(Trpath_T),Trpath_trnum_cmp);
     qsort(alltrpaths3,nnewtrpaths3,sizeof(Trpath_T),Trpath_trnum_cmp);
 
-    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),pathpairs,
+    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),
+				 &(*end_score_paired),&(*end_score_5),&(*end_score_3),
+				 pathpairs,
 				 alltrpaths5,nnewtrpaths5,
 				 alltrpaths3,nnewtrpaths3,
 				 stage1_5,stage1_3,knownsplicing,
@@ -478,18 +571,21 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
 
-				 streamspace_max_alloc,streamspace_alloc,
 				 novel_univdiags_alloc,novel_diagonals_alloc,
-				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+				 localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+				 localdb,localdb_nmismatches_allowed,
 
-				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-				 vectorpool,hitlistpool,sensedir);
+				 intlistpool,uintlistpool,univcoordlistpool,listpool,trpathpool,pathpool,transcriptpool,
+				 vectorpool,hitlistpool,sensedir,
+				 paired_tr_adjacent_indel_repair_p);
 
     /* (2) New trpaths 5 vs Old trpaths 3 */
     List_fill_array((void **) &(alltrpaths3[nnewtrpaths3]),trpaths3);
     qsort(&(alltrpaths3[nnewtrpaths3]),ntrpaths3,sizeof(Trpath_T),Trpath_trnum_cmp);
     
-    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),pathpairs,
+    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),
+				 &(*end_score_paired),&(*end_score_5),&(*end_score_3),
+				 pathpairs,
 				 alltrpaths5,nnewtrpaths5,
 				 &(alltrpaths3[nnewtrpaths3]),ntrpaths3,
 				 stage1_5,stage1_3,knownsplicing,
@@ -501,18 +597,21 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
 
-				 streamspace_max_alloc,streamspace_alloc,
 				 novel_univdiags_alloc,novel_diagonals_alloc,
-				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+				 localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+				 localdb,localdb_nmismatches_allowed,
 
-				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-				 vectorpool,hitlistpool,sensedir);
+				 intlistpool,uintlistpool,univcoordlistpool,listpool,trpathpool,pathpool,transcriptpool,
+				 vectorpool,hitlistpool,sensedir,
+				 paired_tr_adjacent_indel_repair_p);
 
     /* (3) Old trpaths 5 vs New trpaths 3 */
     List_fill_array((void **) &(alltrpaths5[nnewtrpaths5]),trpaths5);
     qsort(&(alltrpaths5[nnewtrpaths5]),ntrpaths5,sizeof(T),Trpath_trnum_cmp);
 
-    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),pathpairs,
+    pathpairs = do_transcriptome(&(*found_score_paired),&(*found_score_5),&(*found_score_3),
+				 &(*end_score_paired),&(*end_score_5),&(*end_score_3),
+				 pathpairs,
 				 &(alltrpaths5[nnewtrpaths5]),ntrpaths5,
 				 alltrpaths3,nnewtrpaths3,
 				 stage1_5,stage1_3,knownsplicing,
@@ -524,12 +623,13 @@ Concordance_tr (int *found_score_paired, int *found_score_5, int *found_score_3,
 				 nmismatches_filter_5,nmismatches_filter_3,
 				 mincoverage_filter_5,mincoverage_filter_3,
 
-				 streamspace_max_alloc,streamspace_alloc,
 				 novel_univdiags_alloc,novel_diagonals_alloc,
-				 localdb_alloc,localdb,localdb_nmismatches_allowed,
+				 localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
+				 localdb,localdb_nmismatches_allowed,
 
-				 intlistpool,uintlistpool,univcoordlistpool,listpool,pathpool,transcriptpool,
-				 vectorpool,hitlistpool,sensedir);
+				 intlistpool,uintlistpool,univcoordlistpool,listpool,trpathpool,pathpool,transcriptpool,
+				 vectorpool,hitlistpool,sensedir,
+				 paired_tr_adjacent_indel_repair_p);
 
     FREE(alltrpaths3);
     FREE(alltrpaths5);
@@ -557,5 +657,3 @@ Concordance_setup (int subopt_levels_in, Chrpos_T pairmax_transcriptome_in,
 
   return;
 }
-
-

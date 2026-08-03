@@ -54,6 +54,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>		/* For munmap */
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+#include <sys/time.h>
+#endif
 
 #include "mem.h"
 #include "bool.h"
@@ -73,6 +76,8 @@
 #include "univdiag.h"
 #include "univdiagpool.h"
 #include "sedgesort.h"
+
+#include "segmentelt.h"
 
 #include "simd.h"
 
@@ -100,6 +105,7 @@
 #define MAX_NPOSITIONS 1000
 #define MAX_TOTAL_NPOSITIONS 3000
 #define MAX_INDEX1INTERVAL 6
+#define MAX_CHAIN_OVERLAP 25
 
 
 /* #define CHECK_OLIGOS 1 */
@@ -168,6 +174,16 @@ static Oligospace_T oligobase_mask;
 
 static int maxpaths_search;
 
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+static unsigned long long
+extension_now_us (void) {
+  struct timeval tv;
+
+  gettimeofday(&tv,(struct timezone *) NULL);
+  return (unsigned long long) tv.tv_sec * 1000000ULL + (unsigned long long) tv.tv_usec;
+}
+#endif
+
 
 #ifdef LARGE_GENOMES
 #define GETPOS(high,low) (((Univcoord_T) high << 32) + low)
@@ -234,47 +250,9 @@ Extension_search_setup (Mode_T mode_in,
 }
 
 
-/* Simplified version of Spanningelt_T */
-#define T Elt_T
-
+#define T Segmentelt_T
 
 #if 0
-/* Works only for queryfwd.  Use Elt_read functions instead */
-static T
-Elt_new (int querypos, int nmatches, Univcoord_T *all_diagonals, int n_all_diagonals) {
-  T new = (T) MALLOC(sizeof(*new));
-#ifdef DEBUG
-  int i;
-#endif
-
-  new->min_qstart = querypos;
-  new->max_qend = querypos + nmatches - 1;
-  new->nmatches = nmatches;
-  debug(printf("Making an Elt with querystart %d, nmatches %d => queryend %d\n",
-	       new->qstart,new->nmatches,new->qend));
-
-  new->all_diagonals = all_diagonals;
-  new->n_all_diagonals = n_all_diagonals;
-
-  new->diagonals = &(new->all_diagonals[0]);
-  new->ndiagonals = n_all_diagonals;
-
-#ifdef DEBUG
-  printf("Diagonals:");
-  for (i = 0; i < n_all_diagonals; i++) {
-    printf(" %llu",all_diagonals[i]);
-  }
-  printf("\n");
-#endif
-
-  new->lowi = 0;
-  new->highi = n_all_diagonals;
-
-  return new;
-}
-#endif
-
-
 static void
 Elt_free (T *old) {
 
@@ -297,6 +275,7 @@ Elt_gc (List_T *set, Listpool_T listpool) {
 		     listpool_trace(__FILE__,__LINE__)); /* allocated by Listpool_push */
   return;
 }
+#endif
 
 
 #if 0
@@ -371,37 +350,33 @@ oligo_nt (UINT4 oligo, int oligosize) {
 /* query is a substring of the original, starting with queryoffset */
 /* Performs the same function as Sarray_lookup, which returns the diagonals */
 /* When plusp is false, need to read from querypos_rc */
-static T
+static Segmentelt_T
 Elt_read_queryfwd (
 #ifdef LARGE_GENOMES
 		   unsigned char *positions_high,
 #endif
 		   UINT4 *positions, int n, int diagterm, int querylength, int querystart,
 		   Compress_T query_compress, bool plusp, int genestrand,
-		   Univdiagpool_T univdiagpool) {
-  T new;
+		   Segmenteltpool_T segmenteltpool) {
+  Segmentelt_T elt;
   int max_nmatches;
-  Univdiag_T *out, *best_univdiags, *univdiags;
-  Univcoord_T univdiagonal;
+  Univcoord_T *univdiagonals, univdiagonal;
 
   int best_trimpos, trimpos;
 
-  int *nmatches, pos3;
-  int i, k;
+  int nmatches, pos3;
+  int i;
   
 
   debug9(printf("Got %d positions at querystart %d, plusp %d\n",n,querystart,plusp));
   if (n == 0) {
-    return (T) NULL;
+    return (Segmentelt_T) NULL;
   } else if (querystart >= querylength - index1part) {
-    return (T) NULL;
+    return (Segmentelt_T) NULL;
   } else {
     max_nmatches = 0;
     best_trimpos = querystart;
-
-    nmatches = (int *) MALLOC(n*sizeof(int));
-    /* univdiags = (Univdiag_T *) MALLOC(n*sizeof(Univdiag_T)); */
-    univdiags = Univdiag_new_array(n);
+    univdiagonals = (Univcoord_T *) MALLOC(n*sizeof(Univcoord_T));
 
     for (i = 0; i < n; i++) {
 #ifdef LARGE_GENOMES
@@ -419,23 +394,14 @@ Elt_read_queryfwd (
 
 #ifdef CONSERVATIVE
       /* Use Genome_consecutive_matches_rightward, which is conservative */
-      nmatches[i] = index1part +
+      nmatches = index1part +
 	Genomebits_consecutive_matches_rightward(genomebits,query_compress,univdiagonal,querylength,
 						 /*pos5*/querystart+index1part,pos3,
 						 plusp,genestrand);
-#if 0
-      univdiags[i] = Univdiagpool_new_univdiag(univdiagpool,querystart,/*qend*/querystart+nmatches[i],
-					       /*nmismatches*/0,univdiagonal
-					       univdiagpool_trace(__FILE__,__LINE__));
-#else
-	univdiags[i]->univdiagonal = univdiagonal;
-	univdiags[i]->qstart = querystart;
-	univdiags[i]->qend = querystart + nmatches[i];
-	univdiags[i]->nmismatches = 0;
-#endif
-      trimpos = querystart + nmatches[i];
+      univdiagonals[i] = univdiagonal;
+      trimpos = querystart + nmatches;
       debug9(printf("rightward plusp %d, univdiagonal is %u, querystart is %d + nmatches %d => queryend is %d\n",
-		    plusp,univdiagonal,querystart,nmatches[i],querystart + nmatches[i]));
+		    plusp,univdiagonal,querystart,nmatches,querystart + nmatches));
 
 #else
       /* Try Genomebits_trim_qend, which can handle mismatches and maximize extension */ 
@@ -446,103 +412,53 @@ Elt_read_queryfwd (
 		    univdiagonal,querystart,pos3,nmatches[i],querystart+nmatches[i]));
       debug9(printf("qend aggressive: At univdiagonal %u, %d..%d, trimpos is %d with %d nmismatches (matches %d) => pos %d.\n",
 		    univdiagonal,querystart,pos3,trimpos,nmismatches,(trimpos - querystart) - nmismatches,trimpos));
-      nmatches[i] = (trimpos - querystart) - nmismatches;
-#if 0
-      univdiags[i] = Univdiagpool_new_univdiag(univdiagpool,querystart,/*qend*/trimpos,
-					       nmismatches,univdiagonal
-					       univdiagpool_trace(__FILE__,__LINE__));
-#else
-	univdiags[i]->univdiagonal = univdiagonal;
-	univdiags[i]->qstart = querystart;
-	univdiags[i]->qend = trimpos;
-	univdiags[i]->nmismatches = nmismatches;
+      nmatches = (trimpos - querystart) - nmismatches;
+      univdiagonals[i] = univdiagonal;
 #endif
 
-#endif
-
-      if (nmatches[i] > max_nmatches) {
-	max_nmatches = nmatches[i];
+      if (nmatches > max_nmatches) {
+	max_nmatches = nmatches;
 	best_trimpos = trimpos;
       }
     }
 
-    k = 0;
-    /* out = best_univdiags = MALLOC(n*sizeof(Univdiag_T)); */
-    for (i = 0; i < n; i++) {
-      /* Accept diagonals within a certain threshold of the maximum */
-      if (univdiags[i]->univdiagonal == (Univcoord_T) 0) {
-	/* Before beginning of genome */
-      } else if (nmatches[i] >= max_nmatches - index1interval + 1) {
-	Univdiag_transfer(univdiags[k++],univdiags[i]);
-      } else {
-	/* Univdiagpool_free_univdiag(&(univdiags[i]),univdiagpool
-   	                              univdiagpool_trace(__FILE__,__LINE__)); */
-      }
-    }
-    FREE(nmatches);
-   
-
-    new = (T) MALLOC(sizeof(*new));
-    new->min_qstart = querystart;
-    /* new->max_qend = querystart + max_nmatches; */
-    new->max_qend = best_trimpos;
-    new->nmatches = max_nmatches;
-
-    assert(new->max_qend <= (int) querylength);
+    elt = Segmentelt_new(/*qstart*/querystart,/*qend*/best_trimpos,
+			 univdiagonals,/*ndiagonals*/n,segmenteltpool);
     debug(printf("Making a queryfwd Elt %p with querystart %d, max_nmatches %d => max_queryend %d\n",
-		 new,new->min_qstart,new->nmatches,new->max_qend));
+		 elt,elt->qstart,elt->qend));
 
-    new->all_univdiags = new->univdiags = univdiags;
-    new->n_all_univdiags = new->nunivdiags = k;
-
-#ifdef DEBUG
-    printf("Univdiags:");
-    for (i = 0; i < new->nunivdiags; i++) {
-      printf("(%p) %u %d..%d",
-	     new,new->univdiags[i]->univdiagonal,new->univdiags[i]->qstart,new->univdiags[i]->qend);
-    }
-    printf("\n");
-#endif
-
-    new->lowi = 0;
-    new->highi = new->n_all_univdiags;
-
-    return new;
+    return elt;
   }
 }
 
 
-static T
+static Segmentelt_T
 Elt_read_queryrev (
 #ifdef LARGE_GENOMES
 		   unsigned char *positions_high,
 #endif
 		   UINT4 *positions, int n, int diagterm, int queryend, int querylength,
 		   Compress_T query_compress, bool plusp, int genestrand,
-		   Univdiagpool_T univdiagpool) {
-  T new;
+		   Segmenteltpool_T segmenteltpool) {
+  Segmentelt_T elt;
   int max_nmatches;
-  Univdiag_T *out, *best_univdiags, *univdiags;
-  Univcoord_T univdiagonal;
+  Univcoord_T *univdiagonals, univdiagonal;
 
   int best_trimpos, trimpos;
 
-  int *nmatches, pos5;
-  int i, k;
+  int nmatches, pos5;
+  int i;
   
 
   debug9(printf("Got %d positions at queryend %d, plusp %d\n",n,queryend,plusp));
   if (n == 0) {
-    return (T) NULL;
+    return (Segmentelt_T) NULL;
   } else if (queryend < index1part) {
-    return (T) NULL;
+    return (Segmentelt_T) NULL;
   } else {
     max_nmatches = 0;
     best_trimpos = queryend;
-
-    nmatches = (int *) MALLOC(n*sizeof(int));
-    /* univdiags = (Univdiag_T *) MALLOC(n*sizeof(Univdiag_T)); */
-    univdiags = Univdiag_new_array(n);
+    univdiagonals = (Univcoord_T *) MALLOC(n*sizeof(Univcoord_T));
 
     for (i = 0; i < n; i++) {
 #ifdef LARGE_GENOMES
@@ -559,22 +475,13 @@ Elt_read_queryrev (
       
 #ifdef CONSERVATIVE
       /* Use Genome_consecutive_matches_leftward, which is conservative */
-      nmatches[i] = index1part +
+      nmatches = index1part +
 	Genomebits_consecutive_matches_leftward(genomebits,query_compress,univdiagonal,querylength,
 						pos5,/*pos3*/queryend - index1part,plusp,genestrand);
-#if 0
-      univdiags[i] = Univdiagpool_new_univdiag(univdiagpool,/*qstart*/queryend - nmatches[i],queryend,
-					       /*nmismatches*/0,univdiagonal
-					       univdiagpool_trace(__FILE__,__LINE__));
-#else
-	univdiags[i]->univdiagonal = univdiagonal;
-	univdiags[i]->qstart = queryend - nmatches[i];
-	univdiags[i]->qend = queryend;
-	univdiags[i]->nmismatches = 0;
-#endif
-      trimpos = queryend - nmatches[i];
+      univdiagonals[i] = univdiagonal;
+      trimpos = queryend - nmatches;
       debug9(printf("leftward plusp %d, univdiagonal is %u, queryend is %d - nmatches %d => querystart is %d\n",
-		    plusp,univdiagonal,queryend,nmatches[i],queryend - nmatches[i]));
+		    plusp,univdiagonal,queryend,nmatches,queryend - nmatches));
 
 #else
       /* Try Genomebits_trim_qstart, which can handle mismatches and maximize extension */ 
@@ -585,156 +492,33 @@ Elt_read_queryrev (
 		    univdiagonal,pos5,queryend,nmatches[i],queryend-nmatches[i]));
       debug9(printf("qstart aggressive: At univdiagonal %u, %d..%d, trimpos is %d with %d nmismatches (matches %d) => pos %d.\n",
 		    univdiagonal,pos5,queryend,trimpos,nmismatches,(queryend - trimpos) - nmismatches,trimpos));
-      nmatches[i] = (queryend - trimpos) - nmismatches;
-#if 0
-      univdiags[i] = Univdiagpool_new_univdiag(univdiagpool,/*qstart*/trimpos,queryend,
-					       nmismatches,univdiagonal
-					       univdiagpool_trace(__FILE__,__LINE__));
-#else
-	univdiags[i]->univdiagonal = univdiagonal;
-	univdiags[i]->qstart = trimpos;
-	univdiags[i]->qend = queryend;
-	univdiags[i]->nmismatches = nmismatches;
+      nmatches = (queryend - trimpos) - nmismatches;
+      univdiagonals[i] = univdiagonal;
 #endif
 
-#endif
-
-      if (nmatches[i] > max_nmatches) {
-	max_nmatches = nmatches[i];
+      if (nmatches > max_nmatches) {
+	max_nmatches = nmatches;
 	best_trimpos = trimpos;
       }
     }
 
-    k = 0;
-    for (i = 0; i < n; i++) {
-      /* Accept diagonals within a certain threshold of the maximum */
-      if (univdiags[i]->univdiagonal == (Univcoord_T) 0) {
-	/* Before beginning of genome */
-      } else if (nmatches[i] >= max_nmatches - index1interval + 1) {
-	Univdiag_transfer(univdiags[k++],univdiags[i]);
-      } else {
-	/* Univdiagpool_free_univdiag(&(univdiags[i]),univdiagpool
-	   univdiagpool_trace(__FILE__,__LINE__)); */
-      }
-    }
-    FREE(nmatches);
-   
-
-    new = (T) MALLOC(sizeof(*new));
-    new->max_qend = queryend;
-    /* new->min_qstart = queryend - max_nmatches; */
-    new->min_qstart = best_trimpos;
-    new->nmatches = max_nmatches;
-
-    assert(new->min_qstart >= 0);
+    elt = Segmentelt_new(/*qstart*/best_trimpos,/*qend*/queryend,
+			 univdiagonals,/*ndiagonals*/n,segmenteltpool);
     debug(printf("Making a queryrev Elt %p with queryend %d, max_nmatches %d => min_querystart %d\n",
-		 new,new->max_qend,new->nmatches,new->min_qstart));
+		 elt,elt->qend,elt->qstart));
 
-    new->all_univdiags = new->univdiags = univdiags;
-    new->n_all_univdiags = new->nunivdiags = k;
-
-#ifdef DEBUG
-    printf("Univdiagonals:");
-    for (i = 0; i < new->nunivdiags; i++) {
-      printf(" %u %d..%d",
-	     new->univdiags[i]->univdiagonal,new->univdiags[i]->qstart,new->univdiags[i]->qend);
-    }
-    printf("\n");
-#endif
-
-    new->lowi = 0;
-    new->highi = new->n_all_univdiags;
-
-    return new;
+    return elt;
   }
 }
 
 
-static int
-binary_search_univdiag (int lowi, int highi, Univdiag_T *univdiags, Univcoord_T goal) {
-  int middlei;
-
-  debug10(printf("entered binary search with lowi=%d, highi=%d, goal=%u\n",lowi,highi,goal));
-
-  while (lowi < highi) {
-    middlei = lowi + ((highi - lowi) / 2);
-    debug10(printf("  binary: %d:%u %d:%u %d:%u   vs. %u\n",
-		   lowi,univdiags[lowi]->univdiagonal,middlei,univdiags[middlei]->univdiagonal,
-		   highi-1,univdiags[highi-1]->univdiagonal,goal));
-    if (goal < univdiags[middlei]->univdiagonal) {
-      highi = middlei;
-    } else if (goal > univdiags[middlei]->univdiagonal) {
-      lowi = middlei + 1;
-    } else {
-      debug10(printf("binary search returns %d\n",middlei));
-      return middlei;
-    }
-  }
-
-  debug10(printf("binary search returns %d\n",highi));
-  return highi;
-}
-
-
-static void
-Elt_filter_univdiags (T this, Univcoord_T low, Univcoord_T high) {
-  int lowi, highi;
 #ifdef DEBUG
-  int i;
-#endif
-
-  debug(printf("Entered Elt_filter_univdiags on %d..%d with %d univdiags with low %u and high %u, nmatches %d\n",
-	       this->min_qstart,this->max_qend,this->n_all_univdiags,low,high,this->nmatches));
-#ifdef DEBUG
-  for (i = 0; i < this->n_all_univdiags; i++) {
-    printf("Input: %u\n",this->all_univdiags[i]->univdiagonal);
-  }
-#endif
-
-  /* low_adj and high_adj are inclusive */
-  lowi = binary_search_univdiag(/*lowi*/0,/*highi*/this->n_all_univdiags,this->all_univdiags,/*goal*/low);
-  highi = binary_search_univdiag(lowi,/*highi*/this->n_all_univdiags,this->all_univdiags,/*goal*/high + 1) - 1;
-  if ((this->nunivdiags = highi - lowi + 1) == 0) {
-    this->univdiags = (Univdiag_T *) NULL;
-
-  } else {
-    this->univdiags = &(this->all_univdiags[lowi]);
-  }
-
-#ifdef DEBUG
-  printf("Setting lowi %d and highi %d\n",lowi,highi);
-  for (i = lowi; i <= highi; i++) {
-    printf("  %u %d..%d\n",
-	   this->all_univdiags[i]->univdiagonal,this->all_univdiags[i]->qstart,this->all_univdiags[i]->qend);
-  }
-#endif
-
-  return;
-}
-
-
-#ifdef DEBUG
-static void
-Elt_dump (T elt) {
-  int k;
-
-  printf("Elt %p with max querybounds %d..%d and %d univdiags:\n",
-	 elt,elt->min_qstart,elt->max_qend,elt->nunivdiags);
-  for (k = 0; k < elt->nunivdiags; k++) {
-    printf("  (%p) %u %d..%d\n",
-	   elt->univdiags[k],elt->univdiags[k]->univdiagonal,elt->univdiags[k]->qstart,elt->univdiags[k]->qend);
-  }
-  printf("\n");
-
-  return;
-}
-
 static void
 Elt_dump_set (List_T set) {
   List_T p;
 
   for (p = set; p != NULL; p = List_next(p)) {
-    Elt_dump((T) List_head(p));
+    Segmentelt_dump((Segmentelt_T) List_head(p));
   }
 
   return;
@@ -752,72 +536,14 @@ Elt_dump_set (List_T set) {
 #endif
 
 
-static bool
-elt_startp (T elt, int middle_qstart, int middle_qend) {
-  if (elt->min_qstart >= middle_qstart && elt->max_qend <= middle_qend) {
-    debug(printf("Not allowing left elt that is subsumed by middle elt: q %d..%d\n",
-		 elt->min_qstart,elt->max_qend));
-    return false;
-  } else if (elt->max_qend >= middle_qend) {
-    debug(printf("Not allowing left elt that extends right of middle elt: q %d..%d\n",
-		 elt->min_qstart,elt->max_qend));
-    return false;
-#if 0
-  } else if ((elt->max_qend - middle_qstart) > (middle_qend - middle_qstart) / 2) {
-    debug(printf("Not allowing left elt that mainly overlaps middle elt: q %d..%d\n",
-		 elt->min_qstart,elt->max_qend));
-    return false;
-#endif
-#if 0
-  } else if ((elt->max_qend - middle_qstart) > (elt->max_qend - elt->min_qstart) / 2) {
-    debug(printf("Not allowing left elt that mainly overlaps middle elt: q %d..%d\n",
-		 elt->min_qstart,elt->max_qend));
-    return false;
-#endif
-  } else {
-    return true;
-  }
-}
-
-
-static bool
-elt_endp (T elt, int middle_qstart, int middle_qend) {
-  if (elt->min_qstart >= middle_qstart && elt->max_qend <= middle_qend) {
-    debug(printf("Not allowing right elt that is subsumed by middle elt: qpos %d..%d\n",
-		   elt->min_qstart,elt->max_qend));
-    return false;
-  } else if (elt->min_qstart <= middle_qstart) {
-    debug(printf("Not allowing right elt that extends left of middle elt: qpos %d..%d\n",
-		   elt->min_qstart,elt->max_qend));
-    return false;
-#if 0
-  } else if ((middle_qend - elt->min_qstart) > (middle_qend - middle_qstart) / 2) {
-    debug(printf("Not allowing right elt that mainly overlaps middle elt: q %d..%d\n",
-		   elt->min_qstart,elt->max_qend));
-    return false;
-#endif
-#if 0
-  } else if ((middle_qend - elt->min_qstart) > (elt->max_qend - elt->min_qstart) / 2) {
-    debug(printf("Not allowing right elt that mainly overlaps middle elt: q %d..%d\n",
-		   elt->min_qstart,elt->max_qend));
-    return false;
-#endif
-  } else {
-    return true;
-  }
-}
-
-
 /* Caller needs to call Elt_gc(&plus_set) and Elt_gc(&minus_set) */
 static void
-get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_elts, List_T *best_minus_elts,
+get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set,
 		       Stage1_T stage1, int querylength,
 		       Compress_T query_compress_fwd, Compress_T query_compress_rev, 
-		       int max_iter, int genestrand, Listpool_T listpool,
-		       Univdiagpool_T univdiagpool) {
-  T elt;
-  List_T p;
-  int best_plus_nmatches, best_minus_nmatches;
+		       int max_iter, int genestrand,
+		       Segmenteltpool_T segmenteltpool, Listpool_T listpool) {
+  Segmentelt_T elt;
   int max_plus_qpos, max_minus_qpos, plus_qpos[MAX_INDEX1INTERVAL], minus_qpos[MAX_INDEX1INTERVAL];
 
   int mod;
@@ -842,8 +568,7 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 #endif
 
 
-  /* I.  Race from plus and minus start to end.  Compute best_plus_nmatches and best_plus_nmatches */
-  best_plus_nmatches = best_minus_nmatches = 0;
+  /* I.  Race from plus and minus start to end.  Compute best_plus_nmatches and best_minus_nmatches */
   max_plus_qpos = max_minus_qpos = 0;
   plus_qpos[0] = minus_qpos[0] = 0;
   plus_qpos[1] = minus_qpos[1] = 1;
@@ -877,11 +602,11 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 #ifdef LARGE_GENOMES
 	  mod_npositions += stage1->plus_npositions[queryoffset] =
 	    Indexdb_largeptr(&stage1->plus_positions_high[queryoffset],&stage1->plus_positions[queryoffset],
-			     indexdb,stage1->forward_oligos[queryoffset]);
+			     indexdb,stage1->forward_signatures[queryoffset]);
 #else
 	  mod_npositions += stage1->plus_npositions[queryoffset] =
 	    Indexdb_ptr(&stage1->plus_positions[queryoffset],indexdb,
-			stage1->forward_oligos[queryoffset]);
+			stage1->forward_signatures[queryoffset]);
 #endif
 	  stage1->plus_retrievedp[queryoffset] = true;
 	  debug(printf(" => retrieved %d positions\n",stage1->plus_npositions[queryoffset]));
@@ -923,19 +648,19 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 					 positions,npositions,/*diagterm*/querylength - queryoffset,
 					 querylength,/*querystart*/queryoffset,
 					 query_compress_fwd,/*plusp*/true,genestrand,
-					 univdiagpool)) == NULL) {
+					 segmenteltpool)) == NULL) {
 	      plus_qpos[mod] += index1interval;
 	    
 	    } else {
-	      if (elt->nmatches > best_plus_nmatches && elt->n_all_univdiags <= maxpaths_search &&
-		  elt->nunivdiags > 0) { /* Could be 0 if there are too many trdiags */
-		best_plus_nmatches = elt->nmatches;
+#if 0
+	      if (elt->nmatches > *best_plus_nmatches && elt->ndiagonals <= maxpaths_search) {
+		*best_plus_nmatches = elt->nmatches;
 	      }
-
+#endif
 	      debug(printf("Pushing elt %p onto plus set\n",elt));
 	      *plus_set = Listpool_push(*plus_set,listpool,(void *) elt
 					listpool_trace(__FILE__,__LINE__));
-	      plus_qpos[mod] += elt->nmatches;
+	      plus_qpos[mod] += (elt->qend - elt->qstart);
 	    }
 	  }
 
@@ -972,11 +697,11 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 #ifdef LARGE_GENOMES
 	  mod_npositions += stage1->minus_npositions[querypos_rc] =
 	    Indexdb_largeptr(&stage1->minus_positions_high[querypos_rc],&stage1->minus_positions[querypos_rc],
-			     indexdb_nonstd,stage1->revcomp_oligos[querypos_rc]);
+			     indexdb_nonstd,stage1->revcomp_signatures[querypos_rc]);
 #else
 	  mod_npositions = stage1->minus_npositions[querypos_rc] =
 	    Indexdb_ptr(&stage1->minus_positions[querypos_rc],indexdb_nonstd,
-			stage1->revcomp_oligos[querypos_rc]);
+			stage1->revcomp_signatures[querypos_rc]);
 #endif
 	  stage1->minus_retrievedp[querypos_rc] = true;
 	  debug(printf(" => retrieved %d positions\n",stage1->minus_npositions[querypos_rc]));
@@ -1018,19 +743,20 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 					 positions,npositions,/*diagterm*/querylength - queryoffset,
 					 querylength,/*querystart*/queryoffset,
 					 query_compress_rev,/*plusp*/false,genestrand,
-					 univdiagpool)) == NULL) {
+					 segmenteltpool)) == NULL) {
 	      minus_qpos[mod] += index1interval;
 	    
 	    } else {
-	      if (elt->nmatches > best_minus_nmatches && elt->n_all_univdiags <= maxpaths_search &&
-		  elt->nunivdiags > 0) { /* Could be 0 if there are too many univdiags */
-		best_minus_nmatches = elt->nmatches;
+#if 0
+	      if (elt->nmatches > *best_minus_nmatches && elt->ndiagonals <= maxpaths_search) {
+		*best_minus_nmatches = elt->nmatches;
 	      }
-
+#endif
 	      debug(printf("Pushing elt %p onto minus set\n",elt));
 	      *minus_set = Listpool_push(*minus_set,listpool,(void *) elt
 					 listpool_trace(__FILE__,__LINE__));
-	      minus_qpos[mod] += elt->nmatches;
+
+	      minus_qpos[mod] += (elt->qend - elt->qstart);
 	    }
 	  }
 
@@ -1074,32 +800,6 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
   }
 
 
-  /* II.  Fill best_plus_elts and best_minus_elts */
-  *best_plus_elts = *best_minus_elts = (List_T) NULL;
-  for (p = *plus_set; p != NULL; p = List_next(p)) {
-    elt = (T) List_head(p);
-    if (elt->nmatches > best_plus_nmatches - 3 && elt->n_all_univdiags <= maxpaths_search) {
-      if (elt->nunivdiags > 0) {
-	/* Could be 0 if there are too many univdiagonals */
-	debug(printf("Pushing elt %p onto best_plus_elts\n",elt));
-	*best_plus_elts = Listpool_push(*best_plus_elts,listpool,(void *) elt
-					listpool_trace(__FILE__,__LINE__));
-      }
-    }
-  }
-
-  for (p = *minus_set; p != NULL; p = List_next(p)) {
-    elt = (T) List_head(p);
-    if (elt->nmatches > best_minus_nmatches - 3 && elt->n_all_univdiags <= maxpaths_search) {
-      if (elt->nunivdiags > 0) {
-	/* Could be 0 if there are too many univdiags */
-	debug(printf("Pushing elt %p onto best_minus_elts\n",elt));
-	*best_minus_elts = Listpool_push(*best_minus_elts,listpool,(void *) elt
-					 listpool_trace(__FILE__,__LINE__));
-      }
-    }
-  }
-
 
   *plus_set = List_reverse(*plus_set);
   *minus_set = List_reverse(*minus_set);
@@ -1113,71 +813,6 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
   printf("\n");
 #endif
 
-#ifdef DEBUG
-  printf("QUERYFWD PLUS HAS BEST ELTS:\n");
-  Elt_dump_set(*best_plus_elts);
-  printf("\n");
-
-  printf("QUERYFWD MINUS HAS BEST ELTS:\n");
-  Elt_dump_set(*best_minus_elts);
-  printf("\n");
-#endif
-
-#ifdef PICK_SIDE
-  if (max_minus_qpos >= query_lastpos && max_plus_qpos >= query_lastpos) {
-    debug(printf("QUERYFWD: both sides won (max_minus_qpos %d, max_plus_qpos %d), so use both sides\n",
-		 max_minus_qpos,max_plus_qpos));
-    debug(printf("QUERYFWD PLUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_plus_elts));
-    debug(printf("\n"));
-
-    debug(printf("QUERYFWD MINUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_minus_elts));
-    debug(printf("\n"));
-
-  } else if (max_minus_qpos >= query_lastpos) {
-    /* This branch is critical for high speed (about 4x faster),
-       although we could miss some hits that need to be solved by
-       another method */
-    debug(printf("QUERYFWD PLUS: minus side won (max_minus_qpos %d), so skip plus side\n",
-		 max_minus_qpos));
-    Listpool_free_list(&(*best_plus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_plus_elts = (List_T) NULL;
-
-  } else if (max_plus_qpos >= query_lastpos) {
-    /* This branch is critical for high speed (about 4x faster),
-       although we could miss some hits that need to be solved by
-       another method */
-    debug(printf("QUERYFWD MINUS: plus side won (max_plus_qpos %d), so skip minus side\n",
-		 max_plus_qpos));
-    Listpool_free_list(&(*best_minus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_minus_elts = (List_T) NULL;
-    
-  } else {
-#if 0
-    /* This code also has a high cost in speed */
-    debug(printf("QUERYFWD: both sides lost (max_minus_qpos %d, max_plus_qpos %d), so use both sides\n",
-		 max_minus_qpos,max_plus_qpos));
-    debug(printf("QUERYFWD PLUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_plus_elts));
-    debug(printf("\n"));
-
-    debug(printf("QUERYFWD MINUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_minus_elts));
-    debug(printf("\n"));
-#else
-    Listpool_free_list(&(*best_plus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    Listpool_free_list(&(*best_minus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_plus_elts = (List_T) NULL;
-    *best_minus_elts = (List_T) NULL;
-#endif
-  }
-#endif
-
   return;
 }
 
@@ -1189,14 +824,12 @@ get_elt_sets_queryfwd (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 
 /* Caller needs to call Elt_gc(&plus_set) and Elt_gc(&minus_set) */
 static void
-get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_elts, List_T *best_minus_elts,
+get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set,
 		       Stage1_T stage1, int querylength,
 		       Compress_T query_compress_fwd, Compress_T query_compress_rev, 
-		       int max_iter, int genestrand, Listpool_T listpool,
-		       Univdiagpool_T univdiagpool) {
-  T elt;
-  List_T p;
-  int best_plus_nmatches, best_minus_nmatches;
+		       int max_iter, int genestrand,
+		       Segmenteltpool_T segmenteltpool, Listpool_T listpool) {
+  Segmentelt_T elt;
   int min_plus_qpos, min_minus_qpos, plus_qpos[MAX_INDEX1INTERVAL], minus_qpos[MAX_INDEX1INTERVAL];
 
   int mod;
@@ -1221,7 +854,6 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 
 
   /* I.  Race from plus and minus end to start.  Compute best_plus_nmatches and best_minus_nmatches */
-  best_plus_nmatches = best_minus_nmatches = 0;
   min_plus_qpos = min_minus_qpos = query_lastpos;
   plus_qpos[0] = minus_qpos[0] = query_lastpos;
   plus_qpos[1] = minus_qpos[1] = query_lastpos-1;
@@ -1260,12 +892,12 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 #ifdef LARGE_GENOMES
 	    npositions = stage1->plus_npositions[queryoffset] =
 	      Indexdb_largeptr(&stage1->plus_positions_high[queryoffset],&stage1->plus_positions[queryoffset],
-			       indexdb,stage1->forward_oligos[queryoffset]);
+			       indexdb,stage1->forward_signatures[queryoffset]);
 	    positions_high = stage1->plus_positions_high[queryoffset];
 #else
 	    npositions = stage1->plus_npositions[queryoffset] =
 	      Indexdb_ptr(&stage1->plus_positions[queryoffset],indexdb,
-			  stage1->forward_oligos[queryoffset]);
+			  stage1->forward_signatures[queryoffset]);
 #endif
 	    positions = stage1->plus_positions[queryoffset];
 	    stage1->plus_retrievedp[queryoffset] = true;
@@ -1273,7 +905,7 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 	  }
 	  
 	  
-	  /* debug9(Stage1_dump(stage1,querylength)); */
+	  debug(Stage1_dump(stage1,querylength));
 	  if (npositions > MAX_NPOSITIONS) {
 	    /* Skip */
 	    plus_qpos[mod] -= index1interval;
@@ -1285,21 +917,20 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 					      positions,npositions,/*diagterm*/querylength - queryoffset,
 					      /*queryend*/queryoffset + index1part,querylength,
 					      query_compress_fwd,/*plusp*/true,genestrand,
-					      univdiagpool)) == NULL) {
+					      segmenteltpool)) == NULL) {
 	    total_npositions_plus += npositions;
 	    plus_qpos[mod] -= index1interval;
 	    
 	  } else {
-	    if (elt->nmatches > best_plus_nmatches && elt->n_all_univdiags <= maxpaths_search) {
-	      if (elt->nunivdiags > 0) {
-		/* Could be 0 if there are too many univdiags */
-		best_plus_nmatches = elt->nmatches;
-	      }
+#if 0
+	    if (elt->nmatches > *best_plus_nmatches && elt->ndiagonals <= maxpaths_search) {
+	      *best_plus_nmatches = elt->nmatches;
 	    }
-	    debug(printf("Pushing elt %p onto plus_set\n",elt));
+#endif
 	    *plus_set = Listpool_push(*plus_set,listpool,(void *) elt
 				      listpool_trace(__FILE__,__LINE__));
-	    plus_qpos[mod] -= elt->nmatches;
+
+	    plus_qpos[mod] -= (elt->qend - elt->qstart);
 	    total_npositions_plus += npositions;
 	    niter_plus++;
 	  }
@@ -1339,12 +970,12 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 #ifdef LARGE_GENOMES
 	    npositions = stage1->minus_npositions[querypos_rc] =
 	      Indexdb_largeptr(&stage1->minus_positions_high[querypos_rc],&stage1->minus_positions[querypos_rc],
-			       indexdb_nonstd,stage1->revcomp_oligos[querypos_rc]);
+			       indexdb_nonstd,stage1->revcomp_signatures[querypos_rc]);
 	    positions_high = stage1->minus_positions_high[querypos_rc];
 #else
 	    npositions = stage1->minus_npositions[querypos_rc] =
 	      Indexdb_ptr(&stage1->minus_positions[querypos_rc],indexdb_nonstd,
-			  stage1->revcomp_oligos[querypos_rc]);
+			  stage1->revcomp_signatures[querypos_rc]);
 #endif
 	    positions = stage1->minus_positions[querypos_rc];
 	    stage1->minus_retrievedp[querypos_rc] = true;
@@ -1352,7 +983,7 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 	  }
 	  
 	  
-	  /* debug9(Stage1_dump(stage1,querylength)); */
+	  debug(Stage1_dump(stage1,querylength));
 	  if (npositions > MAX_NPOSITIONS) {
 	    /* Skip */
 	    minus_qpos[mod] -= index1interval;
@@ -1364,21 +995,20 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
 					      positions,npositions,/*diagterm*/querylength - queryoffset,
 					      /*queryend*/queryoffset + index1part,querylength,
 					      query_compress_rev,/*plusp*/false,genestrand,
-					      univdiagpool)) == NULL) {
+					      segmenteltpool)) == NULL) {
 	    total_npositions_minus += npositions;
 	    minus_qpos[mod] -= index1interval;
 	    
 	  } else {
-	    if (elt->nmatches > best_minus_nmatches && elt->n_all_univdiags <= maxpaths_search) {
-	      if (elt->nunivdiags > 0) {
-		/* Could be 0 if there are too many univdiags */
-		best_minus_nmatches = elt->nmatches;
-	      }
+#if 0
+	    if (elt->nmatches > *best_minus_nmatches && elt->ndiagonals <= maxpaths_search) {
+	      *best_minus_nmatches = elt->nmatches;
 	    }
-	    debug(printf("Pushing elt %p onto minus_set\n",elt));
+#endif
 	    *minus_set = Listpool_push(*minus_set,listpool,(void *) elt
 				       listpool_trace(__FILE__,__LINE__));
-	    minus_qpos[mod] -= elt->nmatches;
+
+	    minus_qpos[mod] -= (elt->qend - elt->qstart);
 	    total_npositions_minus += npositions;
 	    niter_minus++;
 	  }
@@ -1416,820 +1046,6 @@ get_elt_sets_queryrev (List_T *plus_set, List_T *minus_set, List_T *best_plus_el
     minus_qpos[2] = min_minus_qpos - 2;
   }
 
-
-  /* II.  Fill best_plus_elts and best_minus_elts */
-  *best_plus_elts = *best_minus_elts = (List_T) NULL;
-  for (p = *plus_set; p != NULL; p = List_next(p)) {
-    elt = (T) List_head(p);
-    if (elt->nmatches > best_plus_nmatches - 3 && elt->n_all_univdiags <= maxpaths_search) {
-      if (elt->nunivdiags > 0) {
-	/* Could be 0 if there are too many univdiags */
-	debug(printf("Pushing elt %p onto best_plus_elts\n",elt));
-	*best_plus_elts = Listpool_push(*best_plus_elts,listpool,(void *) elt
-					listpool_trace(__FILE__,__LINE__));
-      }
-    }
-  }
-
-  for (p = *minus_set; p != NULL; p = List_next(p)) {
-    elt = (T) List_head(p);
-    if (elt->nmatches > best_minus_nmatches - 3 && elt->n_all_univdiags <= maxpaths_search) {
-      if (elt->nunivdiags > 0) {
-	/* Could be 0 if there are too many univdiags */
-	debug(printf("Pushing elt %p onto best_minus_elts\n",elt));
-	*best_minus_elts = Listpool_push(*best_minus_elts,listpool,(void *) elt
-					 listpool_trace(__FILE__,__LINE__));
-      }
-    }
-  }
-  
-
-#if 0
-  /* Not needed for queryrev */
-  *plus_set = List_reverse(*plus_set);
-  *minus_set = List_reverse(*minus_set);
-#endif
-
-#ifdef DEBUG
-  printf("queryrev plus set:\n");
-  Elt_dump_set(*plus_set);
-  printf("\n");
-  printf("queryrev minus set:\n");
-  Elt_dump_set(*minus_set);
-  printf("\n");
-#endif
-
-#ifdef DEBUG
-  printf("QUERYREV PLUS HAS BEST ELTS:\n");
-  Elt_dump_set(*best_plus_elts);
-  printf("\n");
-
-  printf("QUERYREV MINUS HAS BEST ELTS:\n");
-  Elt_dump_set(*best_minus_elts);
-  printf("\n");
-#endif
-
-#ifdef PICK_SIDE
-  if (min_minus_qpos <= 0 && min_plus_qpos <= 0) {
-    debug(printf("QUERYREV: both sides won (min_minus_qpos %d, min_plus_qpos %d), so use both sides\n",
-		 min_minus_qpos,min_plus_qpos));
-    debug(printf("QUERYREV PLUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_plus_elts));
-    debug(printf("\n"));
-
-    debug(printf("QUERYREV MINUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_minus_elts));
-    debug(printf("\n"));
-
-  } else if (min_minus_qpos <= 0) {
-    /* This branch is critical for high speed (about 4x faster),
-       although we could miss some hits that need to be solved by
-       another method */
-    debug(printf("QUERYREV PLUS: minus side won (min_minus_qpos %d), so skip plus side\n",
-		 min_minus_qpos));
-    Listpool_free_list(&(*best_plus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_plus_elts = (List_T) NULL;
-
-  } else if (min_plus_qpos <= 0) {
-    /* This branch is critical for high speed (about 4x faster),
-       although we could miss some hits that need to be solved by
-       another method */
-    debug(printf("QUERYREV MINUS: plus side won (min_plus_qpos %d), so skip minus side\n",
-		 min_plus_qpos));
-    Listpool_free_list(&(*best_minus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_minus_elts = (List_T) NULL;
-
-  } else {
-#if 0
-    /* This code also has a high cost in speed */
-    debug(printf("QUERYREV: both sides lost (min_minus_qpos %d, min_plus_qpos %d), so use both sides\n",
-		 min_minus_qpos,min_plus_qpos));
-    debug(printf("QUERYREV PLUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_plus_elts));
-    debug(printf("\n"));
-
-    debug(printf("QUERYREV MINUS HAS BEST ELTS:\n"));
-    debug(Elt_dump_set(*best_minus_elts));
-    debug(printf("\n"));
-#else
-    Listpool_free_list(&(*best_plus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    Listpool_free_list(&(*best_minus_elts),listpool
-		       listpool_trace(__FILE__,__LINE__));
-    *best_plus_elts = (List_T) NULL;
-    *best_minus_elts = (List_T) NULL;
-#endif
-  }
-#endif
-
-  return;
-}
-
-
-static void
-process_seed (Univcoordlist_T *univdiagonals_list, List_T *auxinfo_list,
-
-	      Univcoord_T middle_univdiagonal, int middle_qstart, int middle_qend, int middle_nmismatches,
-	      List_T queryfwd_set, List_T queryrev_set, T queryfwd_best_elt, T queryrev_best_elt,
-	      int querylength, Auxinfopool_T auxinfopool, Univdiagpool_T univdiagpool,
-	      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool) {
-
-  Auxinfo_T auxinfo;
-
-  List_T left_univdiags = NULL, right_univdiags = NULL, p;
-  Univdiag_T *left_univdiag_array, *right_univdiag_array;
-  Univcoord_T univdiagonal, start_low, start_high, end_low, end_high;
-  int qstart, qend;
-  Elt_T elt;
-  int nleft, nright, i, j, k;
-
-  /* Chrnum_T chrnum; */
-  Univcoord_T chroffset, chrhigh;
-
-
-  /* Previously computed middle_qstart and middle_qend are the maximum
-     bounds for the entire elt.  But now, in order to set
-     path->nmismatches to be 0, we are computing the minimum bounds */
-  /* When we were computing maximum bounds for the entire elt, for an individual univdiagonal,
-     they might go past the chromosome boundaries */
-
-  /* left = middle_univdiagonal - querylength; */
-  debug(printf("Entering process_seed with middle_univdiagonal %u\n",middle_univdiagonal));
-
-#ifdef TRIM_AT_GENOME_BOUNDS
-  middle_qstart = (middle_univdiagonal + middle_qstart >= 0 + (Univcoord_T) querylength) ? middle_qstart : (int) (querylength - middle_univdiagonal);
-  middle_qend = (middle_univdiagonal + middle_qend <= genomelength + (Univcoord_T) querylength) ? middle_qend : (int) (genomelength - middle_univdiagonal + querylength);
-#endif
-
-#if 0
-  /* No longer works now that we have sets of best elts */
-  /* Need to update chrnum, chroffset, chrhigh, chrlength through multiple calls to process_seed */
-  *chrhigh = Univ_IIT_update_chrnum(&(*chrnum),&(*chroffset),*chrhigh,&(*chrlength),chromosome_iit,
-				    /*low*/left + middle_qstart,/*high*/left + middle_qend,circular_typeint);
-#endif
-#ifdef USE_CHROMOSOME_IIT
-  /* chrnum = */ Univ_IIT_get_chrnum(&chroffset,&chrhigh,&chrlength,chromosome_iit,
-			       /*low*/left + middle_qstart,/*high*/left + middle_qend,circular_typeint);
-#else
-  /* chrnum = */ EF64_chrnum(&chroffset,&chrhigh,chromosome_ef64,
-			     middle_univdiagonal - querylength + middle_qstart,
-			     middle_univdiagonal - querylength + middle_qend);
-#endif
-
-  
-#ifdef TRIM_AT_CHROMOSOME_BOUNDS
-  middle_qstart = (middle_univdiagonal + middle_qstart >= chroffset + (Univcoord_T) querylength) ? middle_qstart : (int) (chroffset - left);
-  middle_qend = (middle_univdiagonal + middle_qend <= chrhigh + (Univcoord_T) querylength) ? middle_qend : (int) (chrhigh - left);
-#endif
-  debug(printf("PROCESS SEED at %u, qstart %d, qend %d\n",
-	       middle_univdiagonal,middle_qstart,middle_qend));
-
-
-  start_low = subtract_bounded(middle_univdiagonal,/*minusterm*/(Univcoord_T) positive_gap_distance);
-  start_high = add_bounded(middle_univdiagonal,/*plusterm*/(Univcoord_T) negative_gap_distance);
-
-  end_low = subtract_bounded(middle_univdiagonal,/*minusterm*/(Univcoord_T) negative_gap_distance);
-  end_high = add_bounded(middle_univdiagonal,/*plusterm*/(Univcoord_T) positive_gap_distance);
-
-  debug(printf("Computing start %u..%u and end %u..%u\n",start_low,start_high,end_low,end_high));
-
-
-  for (p = queryfwd_set; p != NULL; p = List_next(p)) {
-    elt = (Elt_T) List_head(p);
-    if (elt != queryfwd_best_elt && elt != queryrev_best_elt) {
-      if (elt_startp(elt,middle_qstart,middle_qend) == true) {
-	Elt_filter_univdiags(elt,start_low,start_high);
-	for (k = 0; k < elt->nunivdiags; k++) {
-	  left_univdiags = Univdiagpool_push_existing(left_univdiags,univdiagpool,elt->univdiags[k]
-						      univdiagpool_trace(__FILE__,__LINE__));
-	  debug(printf("Pushing univdiag %u %d..%d onto left of query fwd\n",
-		       elt->univdiags[k]->univdiagonal,elt->univdiags[k]->qstart,elt->univdiags[k]->qend));
-	}
-      }
-      
-      if (elt_endp(elt,middle_qstart,middle_qend) == true) {
-	Elt_filter_univdiags(elt,end_low,end_high);
-	for (k = 0; k < elt->nunivdiags; k++) {
-	  right_univdiags = Univdiagpool_push_existing(right_univdiags,univdiagpool,elt->univdiags[k]
-						       univdiagpool_trace(__FILE__,__LINE__));
-	  debug(printf("Pushing univdiag %u %d..%d onto right of query fwd\n",
-		       elt->univdiags[k]->univdiagonal,elt->univdiags[k]->qstart,elt->univdiags[k]->qend));
-	}
-      }
-    }
-  }
-  
-  for (p = queryrev_set; p != NULL; p = List_next(p)) {
-    elt = (Elt_T) List_head(p);
-    if (elt != queryfwd_best_elt && elt != queryrev_best_elt) {
-      if (elt_startp(elt,middle_qstart,middle_qend) == true) {
-	Elt_filter_univdiags(elt,start_low,start_high);
-	for (k = 0; k < elt->nunivdiags; k++) {
-	  left_univdiags = Univdiagpool_push_existing(left_univdiags,univdiagpool,elt->univdiags[k]
-						      univdiagpool_trace(__FILE__,__LINE__));
-	  debug(printf("Pushing univdiag %u %d..%d onto left of query rev\n",
-		       elt->univdiags[k]->univdiagonal,elt->univdiags[k]->qstart,elt->univdiags[k]->qend));
-	}
-      }
-      
-      if (elt_endp(elt,middle_qstart,middle_qend) == true) {
-	Elt_filter_univdiags(elt,end_low,end_high);
-	for (k = 0; k < elt->nunivdiags; k++) {
-	  right_univdiags = Univdiagpool_push_existing(right_univdiags,univdiagpool,elt->univdiags[k]
-						       univdiagpool_trace(__FILE__,__LINE__));
-	  debug(printf("Pushing univdiag %u %d..%d onto right of query rev\n",
-		       elt->univdiags[k]->univdiagonal,elt->univdiags[k]->qstart,elt->univdiags[k]->qend));
-	}
-      }
-    }
-  }
-
-  /* At this point, left_univdiags and right_univdiags are a subset of those in Elt_T objects */
-  /* Below, the contents of left_univdiags and right_univdiags changes */
-
-  if (left_univdiags != NULL) {
-    /* Sort the left univdiagonals and unique them */
-    /* left_univdiag_array = (Univdiag_T *) List_to_array_n(&nleft,left_univdiags); */
-    nleft = List_length(left_univdiags);
-    left_univdiag_array = Univdiag_new_array(nleft);
-    Univdiag_transfer_list_to_array(left_univdiag_array,left_univdiags);
-    qsort(left_univdiag_array[0],nleft,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_fwd_cmp);
-    Univdiagpool_free_list(&left_univdiags,univdiagpool
-			   univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
-    debug(printf("left univdiagonals is not NULL => %d\n",nleft));
-
-    /* Combine left univdiagonals to expand their qstart and qend range */
-    left_univdiags = (List_T) NULL;
-    i = 0;
-    while (i < nleft) {
-      univdiagonal = left_univdiag_array[i]->univdiagonal;
-      qstart = left_univdiag_array[i]->qstart;
-      qend = left_univdiag_array[i]->qend;
-      
-      j = i+1;
-      while (j < nleft && left_univdiag_array[j]->univdiagonal == univdiagonal) {
-	debug(printf("At left diagonal %u, combining %d..%d with %d..%d\n",
-		     univdiagonal,qstart,qend,left_univdiag_array[j]->qstart,left_univdiag_array[j]->qend));
-	if (left_univdiag_array[j]->qstart < qstart) {
-	  qstart = left_univdiag_array[j]->qstart;
-	}
-	if (left_univdiag_array[j]->qend > qend) {
-	  qend = left_univdiag_array[j]->qend;
-	}
-	j++;
-      }
-      
-      if (qstart == left_univdiag_array[i]->qstart && qend == left_univdiag_array[i]->qend) {
-#if 0
-	/* This shortcut confuses existing Univdiag_T objects with newly created ones */
-	left_univdiags = Univdiagpool_push_existing(left_univdiags,univdiagpool,left_univdiag_array[i]
-						    univdiagpool_trace(__FILE__,__LINE__));
-#else
-	left_univdiags = Univdiagpool_push(left_univdiags,univdiagpool,qstart,qend,
-					   left_univdiag_array[i]->nmismatches,univdiagonal
-					   univdiagpool_trace(__FILE__,__LINE__));
-#endif
-      } else {
-	left_univdiags = Univdiagpool_push(left_univdiags,univdiagpool,qstart,qend,/*nmismatches*/-1,univdiagonal
-					   univdiagpool_trace(__FILE__,__LINE__));
-      }	
-
-      i = j;
-    }
-    Univdiag_free_array(&left_univdiag_array);
-  }
-
-  if (right_univdiags != NULL) {
-    /* Sort the right univdiagonals and unique them */
-    nright = List_length(right_univdiags);
-    right_univdiag_array = Univdiag_new_array(nright);
-    Univdiag_transfer_list_to_array(right_univdiag_array,right_univdiags);
-    qsort(right_univdiag_array[0],nright,sizeof(struct Univdiag_T),Univdiag_struct_diagonal_fwd_cmp);
-    Univdiagpool_free_list(&right_univdiags,univdiagpool
-			   univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
-    debug(printf("right univdiagonals is not NULL => %d\n",nright));
-
-    /* Combine right univdiagonals to expand their qstart and qend range */
-    right_univdiags = (List_T) NULL;
-    i = 0;
-    while (i < nright) {
-      univdiagonal = right_univdiag_array[i]->univdiagonal;
-      qstart = right_univdiag_array[i]->qstart;
-      qend = right_univdiag_array[i]->qend;
-      
-      j = i+1;
-      while (j < nright && right_univdiag_array[j]->univdiagonal == univdiagonal) {
-	debug(printf("At right diagonal %u, combining %d..%d with %d..%d\n",
-		     univdiagonal,qstart,qend,right_univdiag_array[j]->qstart,right_univdiag_array[j]->qend));
-	if (right_univdiag_array[j]->qstart < qstart) {
-	  qstart = right_univdiag_array[j]->qstart;
-	}
-	if (right_univdiag_array[j]->qend > qend) {
-	  qend = right_univdiag_array[j]->qend;
-	}
-	j++;
-      }
-      
-      if (qstart == right_univdiag_array[i]->qstart && qend == right_univdiag_array[i]->qend) {
-#if 0
-	/* This shortcut confuses existing Univdiag_T objects with newly created ones */
-	right_univdiags = Univdiagpool_push_existing(right_univdiags,univdiagpool,right_univdiag_array[i]
-						     univdiagpool_trace(__FILE__,__LINE__));
-#else
-	right_univdiags = Univdiagpool_push(right_univdiags,univdiagpool,qstart,qend,
-					    right_univdiag_array[i]->nmismatches,univdiagonal
-					    univdiagpool_trace(__FILE__,__LINE__));
-#endif	
-      } else {
-	right_univdiags = Univdiagpool_push(right_univdiags,univdiagpool,qstart,qend,/*nmismatches*/-1,univdiagonal
-					    univdiagpool_trace(__FILE__,__LINE__));
-      }	
-
-      i = j;
-    }
-    Univdiag_free_array(&right_univdiag_array);
-  }
-
-  /* At this point, left_univdiags and right_univdiags are new Univdiag_T objects, not in any Elt_T object */
-
-
-#if 0
-
-#ifdef DEBUG
-  Univdiag_T univdiag;
-  printf("Calling Path_solve_from_diagonals with middle diagonal %u [%u], %d..%d, and %d left and %d right diagonals.  chroffset %u, chrhigh %u\n",
-	 middle_univdiagonal,middle_univdiagonal - chroffset,middle_qstart,middle_qend,
-	 List_length(left_univdiags),List_length(right_univdiags),chroffset,chrhigh);
-  for (p = left_univdiags; p != NULL; p = List_next(p)) {
-    univdiag = (Univdiag_T) List_head(p);
-    printf("Left %u, %d..%d\n",univdiag->univdiagonal,univdiag->qstart,univdiag->qend);
-  }
-  for (p = right_univdiags; p != NULL; p = List_next(p)) {
-    univdiag = (Univdiag_T) List_head(p);
-    printf("Right %u, %d..%d\n",univdiag->univdiagonal,univdiag->qstart,univdiag->qend);
-  }
-#endif
-
-  Path_solve_from_diagonals(&(*found_score),
-			    &(*unextended_sense_paths),&(*unextended_antisense_paths),
-			    &(*sense_paths),&(*antisense_paths),
-			    middle_univdiagonal,middle_qstart,middle_qend,middle_nmismatches,
-			    /*qend_univdiags*/right_univdiags,/*qstart_univdiags*/left_univdiags,
-			    queryseq,queryptr,querylength,
-			    mismatch_positions_alloc,novel_diagonals_alloc,localdb_alloc,
-			    stage1,knownsplicing,knownindels,
-			    query_compress,query_compress_fwd,query_compress_rev,
-			    chrnum,chroffset,chrhigh,plusp,genestrand,
-			    nmismatches_allowed,paired_end_p,first_read_p,
-			    intlistpool,uintlistpool,univcoordlistpool,listpool,
-			    pathpool,transcriptpool,vectorpool,hitlistpool,spliceendsgen,method,
-			    find_splices_p);
-
-  debug(printf("Path_solve_from_diagonals now at %d + %d unextended, %d sense paths and %d antisense paths\n\n",
-	       List_length(*unextended_sense_paths),List_length(*unextended_sense_paths),
-	       List_length(*sense_paths),List_length(*antisense_paths)));
-  Univdiagpool_gc(&right_univdiags,univdiagpool
-		  univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
-  Univdiagpool_gc(&left_univdiags,univdiagpool
-		  univdiagpool_trace(__FILE__,__LINE__)); /* allocated by Univdiagpool_push */
-
-#else
-  
-  /* New algorithm: Instead of calling Path_solve_from_diagonals here,
-     try return univdiagonals.  But also need indices to
-     qend_univdiags and qstart_univdiags */
-  debug(printf("Pushing middle univdiagonal %u\n",middle_univdiagonal));
-  *univdiagonals_list = Univcoordlistpool_push(*univdiagonals_list,univcoordlistpool,middle_univdiagonal
-					       univcoordlistpool_trace(__FILE__,__LINE__));
-  auxinfo = Auxinfo_new_univdiags(/*method*/EXT,middle_qstart,middle_qend,middle_nmismatches,
-				  right_univdiags,left_univdiags,auxinfopool);
-  *auxinfo_list = Listpool_push(*auxinfo_list,listpool,(void *) auxinfo
-				listpool_trace(__FILE__,__LINE__));
-#endif
-
-  return;
-}
-
-
-#define min(a,b) (a < b) ? a : b
-#define max(a,b) (a > b) ? a : b
-
-
-static void
-extend_seeds_union (Univcoordlist_T *univdiagonals_list, List_T *auxinfo_list,
-
-		    List_T queryfwd_best_elts, List_T queryrev_best_elts,
-		    List_T queryfwd_set, List_T queryrev_set, int querylength,
-
-		    Auxinfopool_T auxinfopool, Univdiagpool_T univdiagpool,
-		    Univcoordlistpool_T univcoordlistpool, Listpool_T listpool) {
-  
-  List_T univdiags = NULL, queryfwd_elt_list = NULL, queryrev_elt_list = NULL;
-  Univcoordlist_T univdiagonals = NULL; /* To determine order and avoid duplicates */
-  Univcoord_T *array;
-
-  int *order;
-  Univdiag_T *univdiag_array, queryfwd_univdiag, queryrev_univdiag, univdiag;
-
-  int qstart, qend;
-  int queryfwd_nseeds, queryrev_nseeds, n, i, j;
-  List_T p, q;
-  T *queryfwd_elt_array, *queryrev_elt_array, queryfwd_elt, queryrev_elt;
-
-  
-  debug(printf("Entering extend_seeds_union with %d queryfwd_best_elts and %d queryrev_best_elts\n",
-	       List_length(queryfwd_best_elts),List_length(queryrev_best_elts)));
-
-  /* Create a union of seeds */
-  for (p = queryfwd_best_elts; p != NULL; p = List_next(p)) {
-    queryfwd_elt = (T) List_head(p);
-    queryfwd_nseeds = queryfwd_elt->n_all_univdiags;
-
-    for (q = queryrev_best_elts; q != NULL; q = List_next(q)) {
-      queryrev_elt = (T) List_head(q);
-      queryrev_nseeds = queryrev_elt->n_all_univdiags;
-    
-#ifdef DEBUG
-      printf("queryfwd_elt: ");
-      Elt_dump(queryfwd_elt);
-      printf("\n");
-      printf("queryrev_elt: ");
-      Elt_dump(queryrev_elt);
-      printf("\n\n");
-#endif
-
-      i = j = 0;
-      while (i < queryfwd_nseeds && j < queryrev_nseeds) {
-	queryfwd_univdiag = queryfwd_elt->all_univdiags[i];
-	queryrev_univdiag = queryrev_elt->all_univdiags[j];
-	
-	if (queryfwd_univdiag->univdiagonal == queryrev_univdiag->univdiagonal) {
-	  /* Combine the queryfwd and queryrev univdiags */
-	  debug(printf("At middle diagonal %u, combining %d..%d with %d..%d\n",
-		       queryfwd_univdiag->univdiagonal,
-		       queryfwd_univdiag->qstart,queryfwd_univdiag->qend,
-		       queryrev_univdiag->qstart,queryrev_univdiag->qend));
-	  qstart = min(queryfwd_univdiag->qstart,queryrev_univdiag->qstart);
-	  qend = max(queryfwd_univdiag->qend,queryrev_univdiag->qend);
-	  univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryfwd_univdiag->univdiagonal
-						 univcoordlistpool_trace(__FILE__,__LINE__));
-	  univdiags = Univdiagpool_push(univdiags,univdiagpool,qstart,qend,
-					/*nmismatches*/-1,queryfwd_univdiag->univdiagonal
-					univdiagpool_trace(__FILE__,__LINE__));
-	  
-	  i++; j++;
-	  
-	} else if (queryfwd_univdiag->univdiagonal < queryrev_univdiag->univdiagonal) {
-	  univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryfwd_univdiag->univdiagonal
-						 univcoordlistpool_trace(__FILE__,__LINE__));
-#if 0
-	  /* This shortcut confuses newly created Univdiag_T objects with those in Elt_T objects */
-	  univdiags = Univdiagpool_push_existing(univdiags,univdiagpool,queryfwd_univdiag
-						 univdiagpool_trace(__FILE__,__LINE__));
-#else
-	  univdiags = Univdiagpool_push(univdiags,univdiagpool,queryfwd_univdiag->qstart,queryfwd_univdiag->qend,
-					queryfwd_univdiag->nmismatches,queryfwd_univdiag->univdiagonal
-					univdiagpool_trace(__FILE__,__LINE__));
-#endif
-	  i++;
-	  
-	} else {
-	  univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryrev_univdiag->univdiagonal
-						 univcoordlistpool_trace(__FILE__,__LINE__));
-#if 0
-	  /* This shortcut confuses newly created Univdiag_T objects with those in Elt_T objects */
-	  univdiags = Univdiagpool_push_existing(univdiags,univdiagpool,queryrev_univdiag
-						 univdiagpool_trace(__FILE__,__LINE__));
-#else
-	  univdiags = Univdiagpool_push(univdiags,univdiagpool,queryrev_univdiag->qstart,queryrev_univdiag->qend,
-					queryrev_univdiag->nmismatches,queryrev_univdiag->univdiagonal
-					univdiagpool_trace(__FILE__,__LINE__));
-#endif
-	  j++;
-	}
-	
-	queryfwd_elt_list = Listpool_push(queryfwd_elt_list,listpool,(void *) queryfwd_elt
-					  listpool_trace(__FILE__,__LINE__));
-	queryrev_elt_list = Listpool_push(queryrev_elt_list,listpool,(void *) queryrev_elt
-					  listpool_trace(__FILE__,__LINE__));
-      }
-      
-      if (i < queryfwd_nseeds) {
-	/* qstart = queryfwd_elt->min_qstart; */
-	/* qend = queryfwd_elt->max_qend; */
-	while (i < queryfwd_nseeds) {
-	  queryfwd_univdiag = queryfwd_elt->all_univdiags[i++];
-	  
-	  /* Allow univdiagonals from queryrev_elt */
-	  univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryfwd_univdiag->univdiagonal
-						 univcoordlistpool_trace(__FILE__,__LINE__));
-#if 0
-	  /* This shortcut confuses newly created Univdiag_T objects with those in Elt_T objects */
-	  univdiags = Univdiagpool_push_existing(univdiags,univdiagpool,queryfwd_univdiag
-						 univdiagpool_trace(__FILE__,__LINE__));
-#else
-	  univdiags = Univdiagpool_push(univdiags,univdiagpool,queryfwd_univdiag->qstart,queryfwd_univdiag->qend,
-					queryfwd_univdiag->nmismatches,queryfwd_univdiag->univdiagonal
-					univdiagpool_trace(__FILE__,__LINE__));
-#endif
-	  
-	  queryfwd_elt_list = Listpool_push(queryfwd_elt_list,listpool,(void *) queryfwd_elt
-					    listpool_trace(__FILE__,__LINE__));
-	  queryrev_elt_list = Listpool_push(queryrev_elt_list,listpool,(void *) NULL
-					    listpool_trace(__FILE__,__LINE__));
-	}
-      }
-      
-      if (j < queryrev_nseeds) {
-	/* qstart = queryrev_elt->min_qstart; */
-	/* qend = queryrev_elt->max_qend; */
-	while (j < queryrev_nseeds) {
-	  queryrev_univdiag = queryrev_elt->all_univdiags[j++];
-	  
-	  /* Allow univdiagonals from queryfwd_elt */
-	  univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryrev_univdiag->univdiagonal
-						 univcoordlistpool_trace(__FILE__,__LINE__));
-#if 0
-	  /* This shortcut confuses newly created Univdiag_T objects with those in Elt_T objects */
-	  univdiags = Univdiagpool_push_existing(univdiags,univdiagpool,queryrev_univdiag
-						 univdiagpool_trace(__FILE__,__LINE__));
-#else
-	  univdiags = Univdiagpool_push(univdiags,univdiagpool,queryrev_univdiag->qstart,queryrev_univdiag->qend,
-					queryrev_univdiag->nmismatches,queryrev_univdiag->univdiagonal
-					univdiagpool_trace(__FILE__,__LINE__));
-#endif
-	  queryfwd_elt_list = Listpool_push(queryfwd_elt_list,listpool,(void *) NULL
-					    listpool_trace(__FILE__,__LINE__));
-	  queryrev_elt_list = Listpool_push(queryrev_elt_list,listpool,(void *) queryrev_elt
-					    listpool_trace(__FILE__,__LINE__));
-	}
-      }
-    }
-  }
-      
-  /* univdiags contains newly created Univdiag_T objects, not in Elt_T objects */
-
-
-  /* Want to sort three arrays simultaneously: univdiags,
-     queryfwd_elts, and queryrev_elts.  Use order on the univdiagonals
-     to do this. */
-  n = Univcoordlist_length(univdiagonals);
-  array = Univcoordlist_to_array(univdiagonals,/*end*/0);
-
-  /* univdiag_array = (Univdiag_T *) List_to_array(univdiags,NULL); */
-  univdiag_array = Univdiag_new_array(n);
-  Univdiag_transfer_list_to_array(univdiag_array,univdiags);
-
-  queryfwd_elt_array = (T *) List_to_array(queryfwd_elt_list,NULL);
-  queryrev_elt_array = (T *) List_to_array(queryrev_elt_list,NULL);
-
-  Listpool_free_list(&queryrev_elt_list,listpool
-		     listpool_trace(__FILE__,__LINE__)); /* Allocated by Listpool_push */
-  Listpool_free_list(&queryfwd_elt_list,listpool
-		     listpool_trace(__FILE__,__LINE__)); /* Allocated by Listpool_push */
-  Univdiagpool_free_list(&univdiags,univdiagpool
-			 univdiagpool_trace(__FILE__,__LINE__)); /* Allocated by Univdiagpool_push */
-  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
-			      univcoordlistpool_trace(__FILE__,__LINE__)); /* Allocated by Univcoordlistpool_push */
-
-#ifdef LARGE_GENOMES
-  order = Sedgesort_order_uint8(array,n);
-#else
-  order = Sedgesort_order_uint4(array,n);
-#endif
-  
-  /* univdiag_array contains newly created Univdiag_T objects, not in Elt_T objects */
-
-  i = 0;
-  while (i < n) {
-    /* Skip duplicates */
-    j = i + 1;
-    while (array[order[j]] == array[order[i]]) {
-      j++;
-    }
-
-    univdiag = univdiag_array[order[i]];
-    process_seed(&(*univdiagonals_list),&(*auxinfo_list),
-
-		 univdiag->univdiagonal,univdiag->qstart,univdiag->qend,univdiag->nmismatches,
-		 queryfwd_set,queryrev_set,
-		 /*queryfwd_best_elt*/queryfwd_elt_array[order[i]],
-		 /*queryrev_best_elt*/queryrev_elt_array[order[i]],
-		 querylength,auxinfopool,univdiagpool,univcoordlistpool,listpool);
-    i = j;
-  }
-
-  Univdiag_free_array(&univdiag_array);
-
-  FREE(order);
-  FREE(queryrev_elt_array);
-  FREE(queryfwd_elt_array);
-  FREE(array);
-
-  return;
-}
-
-
-static void
-extend_seeds_queryfwd (Univcoordlist_T *univdiagonals_list, List_T *auxinfo_list,
-		       List_T queryfwd_best_elts, List_T queryfwd_set, int querylength,
-
-		       Auxinfopool_T auxinfopool, Univdiagpool_T univdiagpool,
-		       Univcoordlistpool_T univcoordlistpool, Listpool_T listpool) {
-  
-  List_T univdiags = NULL, queryfwd_elt_list = NULL;
-  Univcoordlist_T univdiagonals = NULL; /* To determine order and avoid duplicates */
-  Univcoord_T *array;
-
-  int *order;
-  Univdiag_T *univdiag_array, queryfwd_univdiag, univdiag;
-
-  int queryfwd_nseeds, n, i, j;
-  List_T p;
-  T *queryfwd_elt_array, queryfwd_elt;
-
-  
-  debug(printf("Entering extend_seeds_queryfwd with %d queryfwd_best_elts\n",
-	       List_length(queryfwd_best_elts)));
-
-  /* Handle only queryfwd_best_elts */
-  for (p = queryfwd_best_elts; p != NULL; p = List_next(p)) {
-    queryfwd_elt = (T) List_head(p);
-    queryfwd_nseeds = queryfwd_elt->n_all_univdiags;
-
-    i = 0;
-    while (i < queryfwd_nseeds) {
-      queryfwd_univdiag = queryfwd_elt->all_univdiags[i++];
-	    
-      /* Allow univdiagonals from queryrev_elt */
-      univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryfwd_univdiag->univdiagonal
-					     univcoordlistpool_trace(__FILE__,__LINE__));
-      univdiags = Univdiagpool_push(univdiags,univdiagpool,queryfwd_univdiag->qstart,queryfwd_univdiag->qend,
-				    queryfwd_univdiag->nmismatches,queryfwd_univdiag->univdiagonal
-				    univdiagpool_trace(__FILE__,__LINE__));
-	    
-      queryfwd_elt_list = Listpool_push(queryfwd_elt_list,listpool,(void *) queryfwd_elt
-					listpool_trace(__FILE__,__LINE__));
-    }
-  }
-      
-  /* univdiags contains newly created Univdiag_T objects, not in Elt_T objects */
-
-
-  /* Want to sort two arrays simultaneously: univdiags and
-    queryfwd_elts.  Use order on the univdiagonals to do this. */
-  n = Univcoordlist_length(univdiagonals);
-  array = Univcoordlist_to_array(univdiagonals,/*end*/0);
-
-  /* univdiag_array = (Univdiag_T *) List_to_array(univdiags,NULL); */
-  univdiag_array = Univdiag_new_array(n);
-  Univdiag_transfer_list_to_array(univdiag_array,univdiags);
-
-  queryfwd_elt_array = (T *) List_to_array(queryfwd_elt_list,NULL);
-
-  Listpool_free_list(&queryfwd_elt_list,listpool
-		     listpool_trace(__FILE__,__LINE__)); /* Allocated by Listpool_push */
-  Univdiagpool_free_list(&univdiags,univdiagpool
-			 univdiagpool_trace(__FILE__,__LINE__)); /* Allocated by Univdiagpool_push */
-  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
-			      univcoordlistpool_trace(__FILE__,__LINE__)); /* Allocated by Univcoordlistpool_push */
-
-#ifdef LARGE_GENOMES
-  order = Sedgesort_order_uint8(array,n);
-#else
-  order = Sedgesort_order_uint4(array,n);
-#endif
-  
-  /* univdiag_array contains newly created Univdiag_T objects, not in Elt_T objects */
-
-  i = 0;
-  while (i < n) {
-    /* Skip duplicates */
-    j = i + 1;
-    while (array[order[j]] == array[order[i]]) {
-      j++;
-    }
-
-    univdiag = univdiag_array[order[i]];
-    process_seed(&(*univdiagonals_list),&(*auxinfo_list),
-
-		 univdiag->univdiagonal,univdiag->qstart,univdiag->qend,univdiag->nmismatches,
-		 queryfwd_set,/*queryrev_set*/NULL,
-		 /*queryfwd_best_elt*/queryfwd_elt_array[order[i]],
-		 /*queryrev_best_elt*/NULL,
-		 querylength,auxinfopool,univdiagpool,univcoordlistpool,listpool);
-    i = j;
-  }
-
-  Univdiag_free_array(&univdiag_array);
-
-  FREE(order);
-  FREE(queryfwd_elt_array);
-  FREE(array);
-
-  return;
-}
-
-
-static void
-extend_seeds_queryrev (Univcoordlist_T *univdiagonals_list, List_T *auxinfo_list,
-		       List_T queryrev_best_elts, List_T queryrev_set, int querylength,
-
-		       Auxinfopool_T auxinfopool, Univdiagpool_T univdiagpool,
-		       Univcoordlistpool_T univcoordlistpool, Listpool_T listpool) {
-  
-  List_T univdiags = NULL, queryrev_elt_list = NULL;
-  Univcoordlist_T univdiagonals = NULL; /* To determine order and avoid duplicates */
-  Univcoord_T *array;
-
-  int *order;
-  Univdiag_T *univdiag_array, queryrev_univdiag, univdiag;
-
-  int queryrev_nseeds, n, i, j;
-  List_T q;
-  T *queryrev_elt_array, queryrev_elt;
-
-  
-  debug(printf("Entering extend_seeds_queryrev with %d queryrev_best_elts\n",
-	       List_length(queryrev_best_elts)));
-
-  /* Handle only queryrev_best_elts */
-  for (q = queryrev_best_elts; q != NULL; q = List_next(q)) {
-    queryrev_elt = (T) List_head(q);
-    queryrev_nseeds = queryrev_elt->n_all_univdiags;
-
-    j = 0;
-    while (j < queryrev_nseeds) {
-      queryrev_univdiag = queryrev_elt->all_univdiags[j++];
-	    
-      /* Allow univdiagonals from queryfwd_elt */
-      univdiagonals = Univcoordlistpool_push(univdiagonals,univcoordlistpool,queryrev_univdiag->univdiagonal
-					     univcoordlistpool_trace(__FILE__,__LINE__));
-      univdiags = Univdiagpool_push(univdiags,univdiagpool,queryrev_univdiag->qstart,queryrev_univdiag->qend,
-				    queryrev_univdiag->nmismatches,queryrev_univdiag->univdiagonal
-				    univdiagpool_trace(__FILE__,__LINE__));
-      queryrev_elt_list = Listpool_push(queryrev_elt_list,listpool,(void *) queryrev_elt
-					listpool_trace(__FILE__,__LINE__));
-    }
-  }
-      
-  /* univdiags contains newly created Univdiag_T objects, not in Elt_T objects */
-
-
-  /* Want to sort two arrays simultaneously: univdiags and
-     queryrev_elts.  Use order on the univdiagonals to do this. */
-  n = Univcoordlist_length(univdiagonals);
-  array = Univcoordlist_to_array(univdiagonals,/*end*/0);
-
-  /* univdiag_array = (Univdiag_T *) List_to_array(univdiags,NULL); */
-  univdiag_array = Univdiag_new_array(n);
-  Univdiag_transfer_list_to_array(univdiag_array,univdiags);
-
-  queryrev_elt_array = (T *) List_to_array(queryrev_elt_list,NULL);
-
-  Listpool_free_list(&queryrev_elt_list,listpool
-		     listpool_trace(__FILE__,__LINE__)); /* Allocated by Listpool_push */
-  Univdiagpool_free_list(&univdiags,univdiagpool
-			 univdiagpool_trace(__FILE__,__LINE__)); /* Allocated by Univdiagpool_push */
-  Univcoordlistpool_free_list(&univdiagonals,univcoordlistpool
-			      univcoordlistpool_trace(__FILE__,__LINE__)); /* Allocated by Univcoordlistpool_push */
-
-#ifdef LARGE_GENOMES
-  order = Sedgesort_order_uint8(array,n);
-#else
-  order = Sedgesort_order_uint4(array,n);
-#endif
-  
-  /* univdiag_array contains newly created Univdiag_T objects, not in Elt_T objects */
-
-  i = 0;
-  while (i < n) {
-    /* Skip duplicates */
-    j = i + 1;
-    while (array[order[j]] == array[order[i]]) {
-      j++;
-    }
-
-    univdiag = univdiag_array[order[i]];
-    process_seed(&(*univdiagonals_list),&(*auxinfo_list),
-
-		 univdiag->univdiagonal,univdiag->qstart,univdiag->qend,univdiag->nmismatches,
-		 /*queryfwd_set*/NULL,queryrev_set,
-		 /*queryfwd_best_elt*/NULL,
-		 /*queryrev_best_elt*/queryrev_elt_array[order[i]],
-
-		 querylength,auxinfopool,univdiagpool,univcoordlistpool,listpool);
-    i = j;
-  }
-
-  Univdiag_free_array(&univdiag_array);
-
-  FREE(order);
-  FREE(queryrev_elt_array);
-  FREE(array);
-
   return;
 }
 
@@ -2243,7 +1059,8 @@ check_ascending (Univcoord_T *coords, int n) {
   if (n > 0) {
     prev_coord = coords[0];
     for (i = 1; i < n; i++) {
-      if (coords[i] <= prev_coord) {
+      if (coords[i] < prev_coord) {
+	/* Using < and not <=, because now allowing for duplicates */
 	printf("Expecting ascending, but at %d, got %u <= %u\n",
 	       i,coords[i],prev_coord);
 	abort();
@@ -2258,190 +1075,134 @@ check_ascending (Univcoord_T *coords, int n) {
 
 
 /* _univdiagonals_gplus and _univdiagonals_gminus should be aligned to match Kmer_exact1 */
+/* May want to store chain in auxinfo, or use auxinfo only for segment search */
 void
-Extension_search (Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,
+Extension_search (int ***indices_by_nsplices_gplus, int **nindices_by_nsplices_gplus,
+		  int ***indices_by_nsplices_gminus, int **nindices_by_nsplices_gminus,
+
+		  Univcoord_T **_univdiagonals_gplus, Auxinfo_T **auxinfo_gplus,
 		  Pathstore_T **pathstores_gplus, int *nunivdiagonals_gplus,
 		  Univcoord_T **_univdiagonals_gminus, Auxinfo_T **auxinfo_gminus,
 		  Pathstore_T **pathstores_gminus, int *nunivdiagonals_gminus,
-
+		      
 		  Stage1_T stage1, Compress_T query_compress_fwd, Compress_T query_compress_rev,
+		  int querylength, int max_nsplices, bool first_read_p, bool retain_terminal_p,
+		  bool prune_equal_score_p,
 
-		  int querylength, Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
-		  Univdiagpool_T univdiagpool, Univcoordlistpool_T univcoordlistpool,
-		  Listpool_T listpool) {
+		  Segmenteltpool_T segmenteltpool,
+		  Auxinfopool_T auxinfopool, Pathstorepool_T pathstorepool,
+		  Univcoordlistpool_T univcoordlistpool, Univdiagpool_T univdiagpool,
+		  Intlistpool_T intlistpool, Listpool_T listpool) {
 
-  Univcoordlist_T univdiagonals_gplus_list = NULL, univdiagonals_gminus_list = NULL;
-  List_T auxinfo_gplus_list = NULL, auxinfo_gminus_list = NULL;
-  Auxinfo_T auxinfo;
+  Segmentelt_T *plus_eltarray, *minus_eltarray;
+  int plus_narray, minus_narray;
+  List_T plus_elt_set = NULL, minus_elt_set = NULL;
 
-  List_T queryfwd_best_plus_elts, queryrev_best_plus_elts, queryfwd_best_minus_elts, queryrev_best_minus_elts;
   int max_iter = querylength / index1part;
-  int i;
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  unsigned long long stage_start_us;
+#endif
 
-  get_elt_sets_queryfwd(&stage1->queryfwd_plus_set,&stage1->queryfwd_minus_set,
-			&queryfwd_best_plus_elts,&queryfwd_best_minus_elts,
+  debug(printf("Extension_search starting.  Stage1_T status:\n"));
+  debug(Stage1_dump(stage1,querylength));
+
+  /* Previously saved as stage1->extension_plus_set */
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  stage_start_us = extension_now_us();
+#endif
+  get_elt_sets_queryfwd(&plus_elt_set,&minus_elt_set,
 			stage1,querylength,query_compress_fwd,query_compress_rev,
-			max_iter,/*genestrand*/0,listpool,univdiagpool);
+			max_iter,/*genestrand*/0,segmenteltpool,listpool);
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  fprintf(stderr,"[EXTENSION_STATS] queryfwd_us=%llu plus_set=%d minus_set=%d\n",
+	  extension_now_us() - stage_start_us,List_length(plus_elt_set),List_length(minus_elt_set));
+  stage_start_us = extension_now_us();
+#endif
   
-  get_elt_sets_queryrev(&stage1->queryrev_plus_set,&stage1->queryrev_minus_set,
-			&queryrev_best_plus_elts,&queryrev_best_minus_elts,
+  get_elt_sets_queryrev(&plus_elt_set,&minus_elt_set,
 			stage1,querylength,query_compress_fwd,query_compress_rev,
-			max_iter,/*genestrand*/0,listpool,univdiagpool);
+			max_iter,/*genestrand*/0,segmenteltpool,listpool);
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+  fprintf(stderr,"[EXTENSION_STATS] queryrev_us=%llu plus_set=%d minus_set=%d prune_equal=%d\n",
+	  extension_now_us() - stage_start_us,List_length(plus_elt_set),List_length(minus_elt_set),
+	  prune_equal_score_p);
+#endif
 
-  if (queryfwd_best_plus_elts == NULL && queryrev_best_plus_elts == NULL) {
-    /* Skip */
-  } else if (queryrev_best_plus_elts == NULL) {
-    extend_seeds_queryfwd(&univdiagonals_gplus_list,&auxinfo_gplus_list,
-
-			  queryfwd_best_plus_elts,stage1->queryfwd_plus_set,
-
-			  querylength,auxinfopool,
-			  univdiagpool,univcoordlistpool,listpool);
-
-  } else if (queryfwd_best_plus_elts == NULL) {
-    extend_seeds_queryrev(&univdiagonals_gplus_list,&auxinfo_gplus_list,
-
-			  queryrev_best_plus_elts,stage1->queryrev_plus_set,
-
-			  querylength,auxinfopool,
-			  univdiagpool,univcoordlistpool,listpool);
-
-  } else {
-    extend_seeds_union(&univdiagonals_gplus_list,&auxinfo_gplus_list,
-
-		       queryfwd_best_plus_elts,queryrev_best_plus_elts,
-		       stage1->queryfwd_plus_set,stage1->queryrev_plus_set,
-		       
-		       querylength,auxinfopool,
-		       univdiagpool,univcoordlistpool,listpool);
-  }
-
-  if (queryfwd_best_minus_elts == NULL && queryrev_best_minus_elts == NULL) {
-    /* Skip */
-  } else if (queryrev_best_minus_elts == NULL) {
-    extend_seeds_queryfwd(&univdiagonals_gminus_list,&auxinfo_gminus_list,
-
-			  queryfwd_best_minus_elts,stage1->queryfwd_minus_set,
-
-			  querylength,auxinfopool,
-			  univdiagpool,univcoordlistpool,listpool);
-
-  } else if (queryfwd_best_minus_elts == NULL) {
-    extend_seeds_queryrev(&univdiagonals_gminus_list,&auxinfo_gminus_list,
-
-			  queryrev_best_minus_elts,stage1->queryrev_minus_set,
-
-			  querylength,auxinfopool,
-			  univdiagpool,univcoordlistpool,listpool);
-
-  } else {
-    extend_seeds_union(&univdiagonals_gminus_list,&auxinfo_gminus_list,
-
-		       queryfwd_best_minus_elts,queryrev_best_minus_elts,
-
-		       stage1->queryfwd_minus_set,stage1->queryrev_minus_set,
-
-		       querylength,auxinfopool,
-		       univdiagpool,univcoordlistpool,listpool);
-  }
-
-  /* Allocated by listpool */
-  Listpool_free_list(&queryfwd_best_plus_elts,listpool
-		     listpool_trace(__FILE__,__LINE__));
-  Listpool_free_list(&queryrev_best_plus_elts,listpool
-		     listpool_trace(__FILE__,__LINE__));
-  Listpool_free_list(&queryfwd_best_minus_elts,listpool
-		     listpool_trace(__FILE__,__LINE__));
-  Listpool_free_list(&queryrev_best_minus_elts,listpool
-		     listpool_trace(__FILE__,__LINE__));
-
-  assert(Univcoordlist_length(univdiagonals_gplus_list) == List_length(auxinfo_gplus_list));
-  assert(Univcoordlist_length(univdiagonals_gminus_list) == List_length(auxinfo_gminus_list));
-
-  if ((*nunivdiagonals_gplus = Univcoordlist_length(univdiagonals_gplus_list)) == 0) {
+  if ((plus_narray = List_length(plus_elt_set)) == 0) {
+    *nunivdiagonals_gplus = 0;
     *_univdiagonals_gplus = (Univcoord_T *) NULL;
     *auxinfo_gplus = (Auxinfo_T *) NULL;
     *pathstores_gplus = (Pathstore_T *) NULL;
+    *indices_by_nsplices_gplus = (int **) CALLOC(max_nsplices + 1,sizeof(int *));
+    *nindices_by_nsplices_gplus = (int *) CALLOC(max_nsplices + 1,sizeof(int));
+
+  } else if (first_read_p == true) {
+    /* For first read, plus is low end, so compute left chains */
+    plus_eltarray = (Segmentelt_T *) List_to_array(plus_elt_set,NULL);
+    qsort(plus_eltarray,plus_narray,sizeof(Segmentelt_T),Segmentelt_cmp);
+
+    *indices_by_nsplices_gplus =
+      Segmentelt_left_chains(&(*nindices_by_nsplices_gplus),max_nsplices,
+			     &(*_univdiagonals_gplus),&(*auxinfo_gplus),&(*pathstores_gplus),
+			     &(*nunivdiagonals_gplus),plus_eltarray,plus_narray,querylength,retain_terminal_p,
+			     prune_equal_score_p,
+			     univcoordlistpool,auxinfopool,pathstorepool,
+			     univdiagpool,intlistpool,listpool);
+    FREE(plus_eltarray);
+    Segmentelt_gc(plus_elt_set,segmenteltpool,intlistpool,listpool);
 
   } else {
-    univdiagonals_gplus_list = Univcoordlist_reverse(univdiagonals_gplus_list);
-    auxinfo_gplus_list = List_reverse(auxinfo_gplus_list);
+    plus_eltarray = (Segmentelt_T *) List_to_array(plus_elt_set,NULL);
+    qsort(plus_eltarray,plus_narray,sizeof(Segmentelt_T),Segmentelt_cmp);
 
-    *_univdiagonals_gplus = (Univcoord_T *) MALLOC_ALIGN((*nunivdiagonals_gplus)*sizeof(UINT4));
-    Univcoordlist_fill_array(*_univdiagonals_gplus,univdiagonals_gplus_list);
-    *auxinfo_gplus = (Auxinfo_T *) List_to_array(auxinfo_gplus_list,NULL); /* Returns n+1 elts */
-    *pathstores_gplus = (Pathstore_T *) MALLOC((*nunivdiagonals_gplus)*sizeof(Pathstore_T));
-    for (i = 0; i < *nunivdiagonals_gplus; i++) {
-      (*pathstores_gplus)[i] = Pathstore_new(pathstorepool);
-    }
+    *indices_by_nsplices_gplus =
+      Segmentelt_right_chains(&(*nindices_by_nsplices_gplus),max_nsplices,
+			      &(*_univdiagonals_gplus),&(*auxinfo_gplus),&(*pathstores_gplus),
+			      &(*nunivdiagonals_gplus),plus_eltarray,plus_narray,querylength,retain_terminal_p,
+			      prune_equal_score_p,
+			      univcoordlistpool,auxinfopool,pathstorepool,
+			      univdiagpool,intlistpool,listpool);
+    FREE(plus_eltarray);
+    Segmentelt_gc(plus_elt_set,segmenteltpool,intlistpool,listpool);
   }
 
-  if ((*nunivdiagonals_gminus = Univcoordlist_length(univdiagonals_gminus_list)) == 0) {
+  if ((minus_narray = List_length(minus_elt_set)) == 0) {
+    *nunivdiagonals_gminus = 0;
     *_univdiagonals_gminus = (Univcoord_T *) NULL;
     *auxinfo_gminus = (Auxinfo_T *) NULL;
     *pathstores_gminus = (Pathstore_T *) NULL;
+    *indices_by_nsplices_gminus = (int **) CALLOC(max_nsplices + 1,sizeof(int *));
+    *nindices_by_nsplices_gminus = (int *) CALLOC(max_nsplices + 1,sizeof(int));
+
+  } else if (first_read_p == true) {
+    /* For first read, minus is high end, so compute right chains */
+    minus_eltarray = (Segmentelt_T *) List_to_array(minus_elt_set,NULL);
+    qsort(minus_eltarray,minus_narray,sizeof(Segmentelt_T),Segmentelt_cmp);
+
+    *indices_by_nsplices_gminus =
+      Segmentelt_right_chains(&(*nindices_by_nsplices_gminus),max_nsplices,
+			      &(*_univdiagonals_gminus),&(*auxinfo_gminus),&(*pathstores_gminus),
+			      &(*nunivdiagonals_gminus),minus_eltarray,minus_narray,querylength,retain_terminal_p,
+			      prune_equal_score_p,
+			      univcoordlistpool,auxinfopool,pathstorepool,
+			      univdiagpool,intlistpool,listpool);
+    FREE(minus_eltarray);
+    Segmentelt_gc(minus_elt_set,segmenteltpool,intlistpool,listpool);
 
   } else {
-    univdiagonals_gminus_list = Univcoordlist_reverse(univdiagonals_gminus_list);
-    auxinfo_gminus_list = List_reverse(auxinfo_gminus_list);
+    minus_eltarray = (Segmentelt_T *) List_to_array(minus_elt_set,NULL);
+    qsort(minus_eltarray,minus_narray,sizeof(Segmentelt_T),Segmentelt_cmp);
 
-    *_univdiagonals_gminus = (Univcoord_T *) MALLOC_ALIGN((*nunivdiagonals_gminus)*sizeof(UINT4));
-    Univcoordlist_fill_array(*_univdiagonals_gminus,univdiagonals_gminus_list);
-    *auxinfo_gminus = (Auxinfo_T *) List_to_array(auxinfo_gminus_list,NULL); /* Returns n+1 elts */
-    *pathstores_gminus = (Pathstore_T *) MALLOC((*nunivdiagonals_gminus)*sizeof(Pathstore_T));
-    for (i = 0; i < *nunivdiagonals_gminus; i++) {
-      (*pathstores_gminus)[i] = Pathstore_new(pathstorepool);
-    }
+    *indices_by_nsplices_gminus =
+      Segmentelt_left_chains(&(*nindices_by_nsplices_gminus),max_nsplices,
+			     &(*_univdiagonals_gminus),&(*auxinfo_gminus),&(*pathstores_gminus),
+			     &(*nunivdiagonals_gminus),minus_eltarray,minus_narray,querylength,retain_terminal_p,
+			     prune_equal_score_p,
+			     univcoordlistpool,auxinfopool,pathstorepool,
+			     univdiagpool,intlistpool,listpool);
+    FREE(minus_eltarray);
+    Segmentelt_gc(minus_elt_set,segmenteltpool,intlistpool,listpool);
   }
-
-#ifdef CHECK_ASSERTIONS
-  check_ascending(*_univdiagonals_gplus,*nunivdiagonals_gplus);
-  check_ascending(*_univdiagonals_gminus,*nunivdiagonals_gminus);
-#endif
-
-  if (*nunivdiagonals_gplus > 0) {
-    stage1->extension_gplus = (Univcoord_T *) MALLOC((*nunivdiagonals_gplus)*sizeof(Univcoord_T));
-    memcpy(stage1->extension_gplus,*_univdiagonals_gplus,(*nunivdiagonals_gplus)*sizeof(Univcoord_T));
-
-    stage1->extension_qstart_gplus = (int *) MALLOC((*nunivdiagonals_gplus)*sizeof(int));
-    stage1->extension_qend_gplus = (int *) MALLOC((*nunivdiagonals_gplus)*sizeof(int));
-    for (i = 0; i < *nunivdiagonals_gplus; i++) {
-      auxinfo = (*auxinfo_gplus)[i];
-      stage1->extension_qstart_gplus[i] = auxinfo->qstart;
-      stage1->extension_qend_gplus[i] = auxinfo->qend;
-    }
-
-    stage1->nextension_gplus = *nunivdiagonals_gplus;
-  }
-
-  if (*nunivdiagonals_gminus > 0) {
-    stage1->extension_gminus = (Univcoord_T *) MALLOC((*nunivdiagonals_gminus)*sizeof(Univcoord_T));
-    memcpy(stage1->extension_gminus,*_univdiagonals_gminus,(*nunivdiagonals_gminus)*sizeof(Univcoord_T));
-
-    stage1->extension_qstart_gminus = (int *) MALLOC((*nunivdiagonals_gminus)*sizeof(int));
-    stage1->extension_qend_gminus = (int *) MALLOC((*nunivdiagonals_gminus)*sizeof(int));
-    for (i = 0; i < *nunivdiagonals_gminus; i++) {
-      auxinfo = (*auxinfo_gminus)[i];
-      stage1->extension_qstart_gminus[i] = auxinfo->qstart;
-      stage1->extension_qend_gminus[i] = auxinfo->qend;
-    }
-
-    stage1->nextension_gminus = *nunivdiagonals_gminus;
-  }
-
-  Univcoordlistpool_free_list(&univdiagonals_gplus_list,univcoordlistpool
-			      univcoordlistpool_trace(__FILE__,__LINE__));
-  Listpool_free_list(&auxinfo_gplus_list,listpool
-		     listpool_trace(__FILE__,__LINE__));
-
-  Univcoordlistpool_free_list(&univdiagonals_gminus_list,univcoordlistpool
-			      univcoordlistpool_trace(__FILE__,__LINE__));
-  Listpool_free_list(&auxinfo_gminus_list,listpool
-		     listpool_trace(__FILE__,__LINE__));
-
-  debug(Stage1_dump(stage1,querylength));
 
   return;
 }
-
-

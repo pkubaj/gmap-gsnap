@@ -155,6 +155,11 @@ Hitlistpool_new (void) {
   return new;
 }
 
+int
+Hitlistpool_nchunks (T this) {
+  return List_length(this->chunks);
+}
+
 
 #ifdef HITLISTPOOL_REUSE
 void
@@ -289,4 +294,3 @@ Hitlistpool_init (T this) {
 
   return;
 }
-

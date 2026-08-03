@@ -23,6 +23,7 @@
 #include "fopen.h"
 #include "getline.h"
 #include "filesuffix.h"
+#include "signature.h"		/* For Signature_setup */
 
 #include "table.h"
 #ifdef HAVE_64_BIT
@@ -106,11 +107,14 @@ static Action_T action = NONE;
 static char *destdir = ".";
 static char *fileroot = NULL;
 static char *filesuffix = NULL;
-static int compression_types = BITPACK64_COMPRESSION;
+/* static int compression_types = BITPACK64_COMPRESSION; */
 static int compression_type;
 
 static int index1part = 15;
 static int index1interval = 3;	/* Interval for storing 15-mers */
+static int msize = 0;		/* Default is not to use minimizers */
+static int pure_minimizer_stats_m = 0; /* Default is not to write pure minimizer stats */
+
 /* static int region1part = 6; */
 /* static int region1interval = 1; */
 /* static int required_region1part = 0; */
@@ -1300,6 +1304,7 @@ remove_slashes (char *buffer) {
 #endif
 
 
+#if 0
 static int
 add_compression_type (char *string) {
   if (!strcmp(string,"none")) {
@@ -1313,17 +1318,20 @@ add_compression_type (char *string) {
       compression_types |= BITPACK64_COMPRESSION;
     } else {
       fprintf(stderr,"Don't recognize compression type %s\n",string);
-      fprintf(stderr,"Allowed values are: none, all, bitpack64\n");
+      fprintf(stderr,"Allowed values are: none, all, bitpack64, signature\n");
       exit(9);
     }
     return 1;
   }
 }
+#endif
 
+#if 0
 static Oligospace_T
 standard_local (Oligospace_T oligo) {
   return oligo;
 }
+#endif
 
 
 /* Needed for suffix array */
@@ -1354,7 +1362,7 @@ main (int argc, char *argv[]) {
   char *source_genome, *source_dbroot, **inputfiles, *outputfile;
   int nfiles;
 
-  Indexdb_filenames_T ifilenames;
+  Indexdb_filenames_T idx_filenames;
   Chrpos_T seglength;
   bool coord_values_8p;
 
@@ -1394,12 +1402,13 @@ main (int argc, char *argv[]) {
   extern char *optarg;
   char *string;
 
-  while ((c = getopt(argc,argv,"D:d:x:z:k:q:A0rlGZCUNHOPQRSLWw:e:Ss:n:m9")) != -1) {
+  while ((c = getopt(argc,argv,"D:d:x:k:q:j:y:A0rlGZCUNHOPQRSLWw:e:Ss:n:M9")) != -1) {
     switch (c) {
     case 'D': destdir = optarg; break;
     case 'd': fileroot = optarg; break;
     case 'x': filesuffix = optarg; break;
 
+#if 0
     case 'z':
       compression_types = NO_COMPRESSION; /* Initialize */
       string = strtok(optarg,",");
@@ -1408,6 +1417,7 @@ main (int argc, char *argv[]) {
 	}
       }
       break;
+#endif
 
     case 'k': index1part = atoi(optarg);
       if (index1part > MAXIMUM_KMER) {
@@ -1416,6 +1426,15 @@ main (int argc, char *argv[]) {
       }
       break;
     case 'q': index1interval = atoi(optarg); break;
+    case 'j': msize = atoi(optarg); break;
+    case 'y':
+      pure_minimizer_stats_m = atoi(optarg);
+      if (pure_minimizer_stats_m <= 0) {
+	fprintf(stderr,"Selected pure minimizer stats size %d is not allowed.  Use a positive value\n",
+		pure_minimizer_stats_m);
+	exit(9);
+      }
+      break;
 
 #if 0
     case 'j': region1part = atoi(optarg);
@@ -1470,7 +1489,7 @@ main (int argc, char *argv[]) {
 
     case 'n': sortfilename = optarg; break;
 
-    case 'm': mask_lowercase_p = true; break;
+    case 'M': mask_lowercase_p = true; break;
 
     case '9': /* check_compiler_assumptions(); */ return 0; break;
 
@@ -1876,25 +1895,50 @@ main (int argc, char *argv[]) {
     }
     FREE(chromosomefile);
 
+    if (pure_minimizer_stats_m > 0) {
+      if (argc == 0) {
+	fprintf(stderr,"Pure minimizer stats require a seekable genomecomp file argument\n");
+	exit(9);
+      } else {
+	Indexdb_write_pure_minimizer_stats(destdir,fp,chromosome_iit,
+					   index1part,index1interval,pure_minimizer_stats_m,
+					   genome_lc_p,fileroot,mask_lowercase_p);
+	if (fseek(fp,0L,SEEK_SET) != 0) {
+	  perror("Cannot rewind genomecomp file after writing pure minimizer stats");
+	  exit(9);
+	}
+      }
+    }
+
+    if (msize == 0) {
+      /* Minimizer not specified */
+      msize = index1part;
+    }
+    Signature_setup(/*ksize*/index1part,msize);
+
     if (huge_offsets_p == false) {
+#if 0
       fprintf(stderr,"Offset compression types:");
       if ((compression_types & BITPACK64_COMPRESSION) != 0) {
 	fprintf(stderr," bitpack64");
       }
       fprintf(stderr,"\n");
+#endif
       
       Indexdb_write_offsets(destdir,interval_char,fp,chromosome_iit,
-			    index1part,index1interval,
+			    index1part,index1interval,msize,
 			    genome_lc_p,fileroot,mask_lowercase_p);
     } else {
+#if 0
       fprintf(stderr,"Offset compression types:");
       if ((compression_types & BITPACK64_COMPRESSION) != 0) {
 	fprintf(stderr," bitpack64");
       }
       fprintf(stderr,"\n");
+#endif
       
       Indexdb_write_offsets_huge(destdir,interval_char,fp,chromosome_iit,
-				 index1part,index1interval,
+				 index1part,index1interval,msize,
 				 genome_lc_p,fileroot,mask_lowercase_p);
     }
 
@@ -1926,52 +1970,84 @@ main (int argc, char *argv[]) {
     genomelength = Univ_IIT_genomelength(chromosome_iit,/*with_circular_alias_p*/true);
     FREE(chromosomefile);
 
-    ifilenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,
-				       destdir,fileroot,IDX_FILESUFFIX,/*snps_root*/NULL,
-				       /*required_index1part*/index1part,
-				       /*required_interval*/index1interval,/*offsets_only_p*/true);
+    idx_filenames = Indexdb_get_filenames(&compression_type,&index1part,&index1interval,&msize,
+					  destdir,fileroot,IDX_FILESUFFIX,/*snps_root*/NULL,
+					  /*required_index1part*/index1part,
+					  /*required_interval*/index1interval,
+					  /*required_msize*/msize,/*offsets_only_p*/true);
 
     if (Univ_IIT_coord_values_8p(chromosome_iit) == true) {
       coord_values_8p = true;
 
-      positionsfile_high = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-					   strlen(".")+strlen(IDX_FILESUFFIX)+
-					   /*for kmer*/2+/*for interval char*/1+
-					   strlen(POSITIONS_HIGH_FILESUFFIX)+1,sizeof(char));
-      sprintf(positionsfile_high,"%s/%s.%s%02d%c%s",
-	      destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_HIGH_FILESUFFIX);
+      if (msize == index1part) {
+	positionsfile_high = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					     strlen(".")+strlen(IDX_FILESUFFIX)+
+					     /*for kmer*/2+/*for interval char*/1+
+					     strlen(POSITIONS_HIGH_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_high,"%s/%s.%s%02d%c%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_HIGH_FILESUFFIX);
 
-      positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-					   strlen(".")+strlen(IDX_FILESUFFIX)+
-					   /*for kmer*/2+/*for interval char*/1+
-					   strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
-      sprintf(positionsfile_low,"%s/%s.%s%02d%c%s",
-	      destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_FILESUFFIX);
+	positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					    strlen(".")+strlen(IDX_FILESUFFIX)+
+					    /*for kmer*/2+/*for interval char*/1+
+					    strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_low,"%s/%s.%s%02d%c%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_FILESUFFIX);
+      } else {
+	/* Using minimizers */
+	positionsfile_high = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					     strlen(".")+strlen(IDX_FILESUFFIX)+
+					     /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+					     strlen(POSITIONS_HIGH_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_high,"%s/%s.%s%02d%c%02d%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,msize,
+		POSITIONS_HIGH_FILESUFFIX);
+
+	positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					    strlen(".")+strlen(IDX_FILESUFFIX)+
+					    /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+					    strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_low,"%s/%s.%s%02d%c%02d%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,msize,
+		POSITIONS_FILESUFFIX);
+      }
 
     } else {
       coord_values_8p = false;
-      
       positionsfile_high = (char *) NULL;
 
-      positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
-					   strlen(".")+strlen(IDX_FILESUFFIX)+
-					   /*for kmer*/2+/*for interval char*/1+
-					   strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
-      sprintf(positionsfile_low,"%s/%s.%s%02d%c%s",
-	    destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_FILESUFFIX);
+      if (msize == index1part) {
+	positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					    strlen(".")+strlen(IDX_FILESUFFIX)+
+					    /*for kmer*/2+/*for interval char*/1+
+					    strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_low,"%s/%s.%s%02d%c%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,POSITIONS_FILESUFFIX);
+
+      } else {
+	/* Using minimizers */
+	positionsfile_low = (char *) CALLOC(strlen(destdir)+strlen("/")+strlen(fileroot)+
+					    strlen(".")+strlen(IDX_FILESUFFIX)+
+					    /*for kmer*/2+/*for interval char*/1+/*for mmer*/2+
+					    strlen(POSITIONS_FILESUFFIX)+1,sizeof(char));
+	sprintf(positionsfile_low,"%s/%s.%s%02d%c%02d%s",
+		destdir,fileroot,IDX_FILESUFFIX,index1part,interval_char,msize,
+		POSITIONS_FILESUFFIX);
+      }
     }
 
+    Signature_setup(/*ksize*/index1part,msize);
     if (huge_offsets_p == false) {
-      Indexdb_write_positions(positionsfile_high,positionsfile_low,ifilenames->pointers_filename,
-			      ifilenames->offsets_filename,fp,chromosome_iit,
-			      index1part,index1interval,genomelength,
+      Indexdb_write_positions(positionsfile_high,positionsfile_low,idx_filenames->pointers_filename,
+			      idx_filenames->offsets_filename,fp,chromosome_iit,
+			      index1part,index1interval,msize,genomelength,
 			      genome_lc_p,writefilep,fileroot,mask_lowercase_p,
 			      coord_values_8p);
     } else {
       Indexdb_write_positions_huge_offsets(positionsfile_high,positionsfile_low,
-					   ifilenames->pages_filename,ifilenames->pointers_filename,
-					   ifilenames->offsets_filename,fp,chromosome_iit,
-					   index1part,index1interval,genomelength,
+					   idx_filenames->pages_filename,idx_filenames->pointers_filename,
+					   idx_filenames->offsets_filename,fp,chromosome_iit,
+					   index1part,index1interval,msize,genomelength,
 					   genome_lc_p,writefilep,fileroot,mask_lowercase_p,
 					   coord_values_8p);
     }
@@ -1980,7 +2056,7 @@ main (int argc, char *argv[]) {
       fclose(fp);
     }
 
-    Indexdb_filenames_free(&ifilenames);
+    Indexdb_filenames_free(&idx_filenames);
 
     FREE(positionsfile_high);
     FREE(positionsfile_low);
@@ -2387,4 +2463,3 @@ main (int argc, char *argv[]) {
 
   return 0;
 }
-

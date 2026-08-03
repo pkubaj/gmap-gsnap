@@ -77,55 +77,20 @@ Indexdb_get_filenames (int *compression_type,
 #ifdef PMAP
 		       Alphabet_T *alphabet, Alphabet_T required_alphabet,
 #endif
-		       Width_T *index1part, Width_T *index1interval, char *genomesubdir,
+		       Width_T *index1part, Width_T *index1interval, Width_T *msize, char *genomesubdir,
 		       char *fileroot, char *idx_filesuffix, char *snps_root,
-		       Width_T required_index1part, Width_T required_interval,
+		       Width_T required_index1part, Width_T required_interval, Width_T required_msize,
 		       bool offsets_only_p);
 #endif
 
-extern Univcoord_T *
-Indexdb_point_one_shift (int *nentries, T this, Oligospace_T subst);
-extern int
-Indexdb_count_one_shift (T this, Oligospace_T subst, int nadjacent);
-
-
-extern Positionsptr_T *
-Indexdb_offsets_from_bitpack (char *offsetsmetafile, char *offsetsstrmfile, 
-#ifdef PMAP
-			      int alphabet_size, Width_T index1part_aa
-#else
-			      Width_T index1part
-#endif
-			      );
-
-#if defined(HAVE_64_BIT) && defined(UTILITYP)
-extern Hugepositionsptr_T *
-Indexdb_offsets_from_bitpack_huge (char *bitpackpagesfile, char *offsetsmetafile, char *offsetsstrmfile,
-#ifdef PMAP
-				   int alphabet_size, Width_T index1part_aa
-#else
-				   Width_T index1part
-#endif
-				   );
-#endif
-
-#if 0
-extern void
-Indexdb_shmem_remove (char *genomesubdir, char *fileroot, char *idx_filesuffix, char *snps_root,
-#ifdef PMAP
-		      Alphabet_T *alphabet, int *alphabet_size, Alphabet_T required_alphabet,
-#endif
-		      Width_T required_index1part, Width_T required_interval, bool expand_offsets_p);
-#endif
-
 extern T
-Indexdb_new_genome (Width_T *index1part, Width_T *index1interval,
+Indexdb_new_genome (Width_T *index1part, Width_T *index1interval, Width_T *msize,
 		    char *genomesubdir, char *snpsdir,
 		    char *fileroot, char *idx_filesuffix, char *snps_root,
 #ifdef PMAP
 		    Alphabet_T *alphabet, int *alphabet_size, Alphabet_T required_alphabet,
 #endif
-		    Width_T required_index1part, Width_T required_interval,
+		    Width_T required_index1part, Width_T required_interval, Width_T required_msize,
 		    Access_mode_T offsetsstrm_access, Access_mode_T positions_access, bool sharedp,
 		    bool multiple_sequences_p, bool preload_shared_memory_p, bool unload_shared_memory_p);
 
@@ -143,39 +108,29 @@ Indexdb_new_transcriptome (Width_T *index1part, Width_T *index1interval,
 extern T
 Indexdb_new_segment (char *genomicseg,
 #ifdef PMAP
-		     int alphabet_size, Width_T index1part_aa, bool watsonp,
+		     int alphabet_size, Width_T index1part_aa, Width_T msize, bool watsonp,
 #else
-		     Width_T index1part,
+		     Width_T index1part, Width_T msize,
 #endif
 		     Width_T index1interval);
 #endif
 
 #ifdef PMAP
-extern Univcoord_T *
-Indexdb_read (int *nentries, T this, Oligospace_T aaindex);
-#else
-extern Univcoord_T *
-Indexdb_read (int *nentries, T this, Oligospace_T oligo);
-extern UINT4 *
-Indexdb_read_inplace (int *nentries,
-#ifdef LARGE_GENOMES
-		      unsigned char **positions_high,
-#endif
-		      T this, Oligospace_T oligo);
-#endif
+
+#elif defined(GSNAP) || defined(GFILTER)
+extern int
+Indexdb_ptr (UINT4 **positions, T this, Signature_T signature);
 
 #ifdef LARGE_GENOMES
 extern int
 Indexdb_largeptr (unsigned char **positions_high, UINT4 **positions_low,
-		  T this, Oligospace_T oligo);
+		  T this, Signature_T signature);
 #endif
 
-extern int
-Indexdb_ptr (UINT4 **positions, T this, Oligospace_T oligo);
-
-#if defined(UTILITYP)
-#elif defined(GSNAP) || defined(GFILTER)
 #else
+/* GMAP only */
+extern Univcoord_T *
+Indexdb_read (int *nentries, T this, Oligospace_T oligo);
 extern Univcoord_T *
 Indexdb_read_with_diagterm (int *nentries, T this, Oligospace_T oligo, int diagterm);
 #endif

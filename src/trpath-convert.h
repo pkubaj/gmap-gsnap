@@ -23,7 +23,7 @@
 
 
 extern void
-Trpath_convert_sense (int *found_score,
+Trpath_convert_sense (int *found_score, int *end_score,
 		      List_T *sense_paths_gplus, List_T *sense_paths_gminus,
 		      List_T *antisense_paths_gplus, List_T *antisense_paths_gminus,
 
@@ -33,9 +33,9 @@ Trpath_convert_sense (int *found_score,
 
 		      Compress_T query_compress_fwd, Compress_T query_compress_rev,
 
-		      int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 		      Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-		      unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+		      unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+		      int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 		      Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 		      Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,
@@ -43,7 +43,7 @@ Trpath_convert_sense (int *found_score,
 		      Hitlistpool_T hitlistpool, bool crossover_sense_p);
 
 extern void
-Trpath_convert_antisense (int *found_score,
+Trpath_convert_antisense (int *found_score, int *end_score,
 			  List_T *antisense_paths_gplus, List_T *antisense_paths_gminus,
 			  List_T *sense_paths_gplus, List_T *sense_paths_gminus,
 
@@ -53,9 +53,9 @@ Trpath_convert_antisense (int *found_score,
 
 			  Compress_T query_compress_fwd, Compress_T query_compress_rev,
 			  
-			  int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
 			  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc,
-			  unsigned short *localdb_alloc, Localdb_T localdb, int localdb_nmismatches_allowed,
+			  unsigned short *localdb_alloc, int16_t *localdb_tally, int16_t *localdb_overflowp,
+			  int max_nblocks, Localdb_T localdb, int localdb_nmismatches_allowed,
 
 			  Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
 			  Univcoordlistpool_T univcoordlistpool, Listpool_T listpool,

@@ -24,6 +24,9 @@
 
 #define T Pathpool_T
 struct T {
+#ifdef PATHPOOL_REUSE
+  bool path_reusep;
+#endif
   List_T path_chunks;
 #ifdef PATHPOOL_REUSE
   List_T path_free_cells;
@@ -230,13 +233,8 @@ Pathpool_reset_memory (T this) {
   }
 
 #ifdef PATHPOOL_REUSE
-  int celli;
-  path_chunk = (struct Path_T *) List_head(this->path_chunks);
   List_free_keep(&this->path_free_cells);
   this->path_free_cells = (List_T) NULL;
-  for (celli = PATH_CHUNKSIZE - 1; celli >= 0; celli--) {
-    this->path_free_cells = List_push_keep(this->path_free_cells,(void *) &(path_chunk[celli]));
-  }
 #else
   /* this->path_cellptr = (struct Path_T *) List_head(this->path_chunks); */
   this->path_cellptr = (struct Path_T *) NULL;
@@ -252,12 +250,8 @@ Pathpool_reset_memory (T this) {
   }
 
 #ifdef PATHPOOL_REUSE
-  junction_chunk = (struct Junction_T *) List_head(this->junction_chunks);
   List_free_keep(&this->junction_free_cells);
   this->junction_free_cells = (List_T) NULL;
-  for (celli = JUNCTION_CHUNKSIZE - 1; celli >= 0; celli--) {
-    this->junction_free_cells = List_push_keep(this->junction_free_cells,(void *) &(junction_chunk[celli]));
-  }
 #else
   /* this->junction_cellptr = (struct Junction_T *) List_head(this->junction_chunks); */
   this->junction_cellptr = (struct Junction_T *) NULL;
@@ -272,12 +266,8 @@ Pathpool_reset_memory (T this) {
     FREE(altsplice_chunk);
   }
 #ifdef PATHPOOL_REUSE
-  altsplice_chunk = (struct Altsplice_T *) List_head(this->altsplice_chunks);
   List_free_keep(&this->altsplice_free_cells);
   this->altsplice_free_cells = (List_T) NULL;
-  for (celli = ALTSPLICE_CHUNKSIZE - 1; celli >= 0; celli--) {
-    this->altsplice_free_cells = List_push_keep(this->altsplice_free_cells,(void *) &(altsplice_chunk[celli]));
-  }
 #else
   /* this->altsplice_cellptr = (struct Altsplice_T *) List_head(this->altsplice_chunks); */
   this->altsplice_cellptr = (struct Altsplice_T *) NULL;
@@ -345,6 +335,9 @@ T
 Pathpool_new (void) {
   T new = (T) MALLOC_KEEP(sizeof(*new));
 
+#ifdef PATHPOOL_REUSE
+  new->path_reusep = false;
+#endif
   new->path_chunks = (List_T) NULL;
 #ifdef PATHPOOL_REUSE
   new->path_free_cells = (List_T) NULL;
@@ -372,6 +365,27 @@ Pathpool_new (void) {
   return new;
 }
 
+void
+Pathpool_nchunks (int *path_chunks, int *junction_chunks, int *altsplice_chunks,
+		  int *string_chunks, T this) {
+  *path_chunks = List_length(this->path_chunks);
+  *junction_chunks = List_length(this->junction_chunks);
+  *altsplice_chunks = List_length(this->altsplice_chunks);
+  *string_chunks = List_length(this->string_chunks);
+  return;
+}
+
+void
+Pathpool_set_path_reuse (T this, bool reusep) {
+#ifdef PATHPOOL_REUSE
+  this->path_reusep = reusep;
+#else
+  (void) this;
+  (void) reusep;
+#endif
+  return;
+}
+
 
 #ifdef PATHPOOL_REUSE
 void
@@ -380,7 +394,10 @@ Pathpool_free_path (Path_T *old, T this
 		    , const char *file, int line
 #endif
 		    ) {
-  this->path_free_cells = List_push_keep(this->path_free_cells,(void *) *old);
+  if (this->path_reusep == true && (*old)->pathpool_free_p == false) {
+    (*old)->pathpool_free_p = true;
+    this->path_free_cells = List_push_keep(this->path_free_cells,(void *) *old);
+  }
 #ifdef PATHPOOL_TRACE
   printf("Pathpool/path: Freed %p -- Pathpool_free_path called by %s:%d\n",*old,file,line);
 #endif
@@ -399,7 +416,7 @@ Pathpool_free_junction (Junction_T *old, T this
 			, const char *file, int line
 #endif
 			) {
-  this->junction_free_cells = List_push_keep(this->junction_free_cells,(void *) *old);
+  (void) this;
 #ifdef PATHPOOL_TRACE
   printf("Pathpool/junction: Freed %p -- Pathpool_free_junction called by %s:%d\n",*old,file,line);
 #endif
@@ -417,7 +434,7 @@ Pathpool_free_altsplice (Altsplice_T *old, T this
 			 , const char *file, int line
 #endif
 			 ) {
-  this->altsplice_free_cells = List_push_keep(this->altsplice_free_cells,(void *) *old);
+  (void) this;
 #ifdef PATHPOOL_TRACE
   printf("Pathpool/altsplice: Freed %p -- Pathpool_free_altsplice called by %s:%d\n",*old,file,line);
 #endif
@@ -535,8 +552,10 @@ Pathpool_new_path (T this
   printf("Pathpool/path: Allocated %p -- Pathpool_new_path called by %s:%d\n",new,file,line);
 #endif
 
+  new->pathpool_free_p = false;
+
   return new;
-}  
+}
 
 
 Junction_T
@@ -663,4 +682,3 @@ Pathpool_init (T this) {
 
   return;
 }
-

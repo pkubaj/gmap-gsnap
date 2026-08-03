@@ -31,7 +31,16 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 #else
 		       Width_T index1part,
 #endif
-		       Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
+		       Width_T index1interval, Width_T msize,
+		       bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
+
+#ifndef PMAP
+extern void
+Indexdb_write_pure_minimizer_stats (char *destdir, FILE *sequence_fp, Univ_IIT_T chromosome_iit,
+				    Width_T index1part, Width_T index1interval,
+				    Width_T pure_minimizer_stats_m,
+				    bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
+#endif
 
 #ifdef HAVE_64_BIT
 extern void
@@ -41,7 +50,8 @@ Indexdb_write_offsets_huge (char *destdir, char interval_char, FILE *sequence_fp
 #else
 			    Width_T index1part,
 #endif
-			    Width_T index1interval, bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
+			    Width_T index1interval, Width_T msize,
+			    bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
 #endif
 
 
@@ -50,7 +60,7 @@ Indexdb_bitpack_counter (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #ifdef PMAP
 			 int alphabet_size, Width_T index1part_aa
 #else
-			 Width_T index1part
+			 Width_T index1part, Width_T msize
 #endif
 			 );
 
@@ -60,7 +70,7 @@ Indexdb_bitpack_counter_huge (UINT4 **counterstrm, UINT4 *offsetsmeta,
 #ifdef PMAP
 			      int alphabet_size, Width_T index1part_aa
 #else
-			      Width_T index1part
+			      Width_T index1part, Width_T msize
 #endif
 			      );
 #endif
@@ -72,9 +82,10 @@ Indexdb_write_positions (char *positionsfile_high, char *positionsfile_low, char
 #ifdef PMAP
 			 Alphabet_T alphabet, int index1part_aa, bool watsonp,
 #else
-			 int index1part,
+			 Width_T index1part,
 #endif
-			 int index1interval, Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
+			 int index1interval, Width_T msize,
+			 Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
 			 char *fileroot, bool mask_lowercase_p, bool coord_values_8p);
 
 #ifdef HAVE_64_BIT
@@ -84,9 +95,10 @@ Indexdb_write_positions_huge_offsets (char *positionsfile_high, char *positionsf
 #ifdef PMAP
 				      Alphabet_T alphabet, int index1part_aa, bool watsonp,
 #else
-				      int index1part,
+				      Width_T index1part,
 #endif
-				      int index1interval, Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
+				      int index1interval, Width_T msize,
+				      Univcoord_T genomelength, bool genome_lc_p, bool writefilep,
 				      char *fileroot, bool mask_lowercase_p, bool coord_values_8p);
 
 #endif

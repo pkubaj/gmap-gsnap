@@ -71,6 +71,11 @@ Pathpair_found_score (T this) {
   return this->path5->found_score + this->path3->found_score;
 }
 
+static inline int
+Pathpair_end_score (T this) {
+  return this->path5->end_score + this->path3->end_score;
+}
+
 extern bool
 Pathpair_insertlength_knownp (T this);
 
@@ -145,13 +150,14 @@ Pathpair_new_inner_fusion (Path_T pathL, Path_T pathH, Shortread_T queryseqL, Sh
 			   bool copyLp, bool copyHp);
 
 extern void
-Pathpair_resolve (int *found_score_5, int *found_score_3,
+Pathpair_resolve (int *found_score_5, int *found_score_3, int *end_score_5, int *end_score_3,
 		  T this, bool plusp, int genestrand,
 		  Compress_T query_compress_L, Compress_T queryL_compress_fwd, Compress_T queryL_compress_rev,
 		  Compress_T query_compress_H, Compress_T queryH_compress_fwd, Compress_T queryH_compress_rev,
 		  Shortread_T queryseqL, Shortread_T queryseqH, char *queryptrL, char *queryptrH,
-		  int querylengthL, int querylengthH, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		  int querylengthL, int querylengthH,
 		  Univdiag_T *novel_univdiags_alloc, Univcoord_T *novel_diagonals_alloc, unsigned short *localdb_alloc,
+		  int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		  int localdb_nmismatches_allowed,
 		  
 		  Stage1_T stage1L, Stage1_T stage1H, Knownsplicing_T knownsplicing,

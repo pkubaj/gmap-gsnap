@@ -15,6 +15,11 @@ typedef enum {METHOD_INIT,
 
 	      TR_END,		/* TR   AUX              Transcriptome_search_end */
 	      TR_EXT,         	/* TR   AUX              Tr_extension_search */
+	      TR_CHAIN,		/* TR   AUX              Trchain_search */
+	      TR_CHAIN_K13,	/* TR   AUX              Trchain_search, k13 seeds */
+	      TR_CHAIN_K11,	/* TR   AUX              Trchain_search, k11 rescue seeds */
+	      TR_CHAIN_FM_TRDIAG,	/* TR   AUX              Trchain_search, FM seeds + TR diag chain */
+	      TR_CHAIN_FM_LCHAIN,	/* TR   AUX              Trchain_search, FM seeds + FM chain */
 
 	      TR_METHOD,
 
@@ -56,4 +61,3 @@ extern void
 Method_print (Filestring_T fp, Method_T method);
 
 #endif
-

@@ -130,6 +130,8 @@ Uintlist_to_uint8_array (T list, UINT8 end);
 extern unsigned int *
 Uintlist_to_array (T list, unsigned int end);
 extern unsigned int *
+Uintlist_to_array_aligned (T list, unsigned int end);
+extern unsigned int *
 Uintlist_to_array_n (int *n, T list);
 extern void
 Uintlist_fill_array (unsigned int *array, T list);

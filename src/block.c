@@ -40,8 +40,8 @@ struct T {
   Oligospace_T aaindex;
 #else
   int leftreadshift;
-  Oligospace_T forward;
-  Oligospace_T revcomp;
+  Oligospace_T forward_oligo;
+  Oligospace_T revcomp_oligo;
   Oligospace_T oligomask;
 #endif
 
@@ -76,18 +76,18 @@ Block_aaindex (T this) {
 Oligospace_T
 Block_forward (T this) {
   if (this->cdnaend == FIVE) {
-    return this->forward & this->oligomask;
+    return this->forward_oligo & this->oligomask;
   } else {
-    return (this->forward >> this->leftreadshift) & this->oligomask;
+    return (this->forward_oligo >> this->leftreadshift) & this->oligomask;
   }
 }
 
 Oligospace_T
 Block_revcomp (T this) {
   if (this->cdnaend == FIVE) {
-    return (this->revcomp >> this->leftreadshift) & this->oligomask;
+    return (this->revcomp_oligo >> this->leftreadshift) & this->oligomask;
   } else {
-    return this->revcomp & this->oligomask;
+    return this->revcomp_oligo & this->oligomask;
   }
 }
 #endif
@@ -113,10 +113,10 @@ Block_save (T this) {
   this->aaindex_save = this->aaindex;
   debug(printf("Saving block at last_querypos %d, aaindex %u\n",this->last_querypos,this->aaindex));
 #else
-  this->forward_save = this->forward;
-  this->revcomp_save = this->revcomp;
+  this->forward_save = this->forward_oligo;
+  this->revcomp_save = this->revcomp_oligo;
   debug(printf("Saving block at last_querypos %d, forward %u, revcomp %u\n",
-	       this->last_querypos,this->forward,this->revcomp));
+	       this->last_querypos,this->forward_oligo,this->revcomp_oligo));
 #endif
 
   return;
@@ -138,8 +138,8 @@ Block_restore (T this) {
 #ifdef PMAP
   this->aaindex = this->aaindex_save;
 #else
-  this->forward = this->forward_save;
-  this->revcomp = this->revcomp_save;
+  this->forward_oligo = this->forward_save;
+  this->revcomp_oligo = this->revcomp_save;
 #endif
   return;
 }
@@ -158,8 +158,8 @@ Block_reset_ends (T this) {
 #ifdef PMAP  
   this->aaindex = 0U;
 #else
-  this->forward = 0U;
-  this->revcomp = 0U;
+  this->forward_oligo = 0U;
+  this->revcomp_oligo = 0U;
 #endif
 
   return;
@@ -201,8 +201,8 @@ Block_new (cDNAEnd_T cdnaend, Width_T oligosize,
 #ifdef PMAP  
   new->aaindex = 0U;
 #else
-  new->forward = 0U;
-  new->revcomp = 0U;
+  new->forward_oligo = 0U;
+  new->revcomp_oligo = 0U;
 #endif
 
   new->last_querypos_save = new->last_querypos;
@@ -210,8 +210,8 @@ Block_new (cDNAEnd_T cdnaend, Width_T oligosize,
 #ifdef PMAP
   new->aaindex_save = new->aaindex;
 #else
-  new->forward_save = new->forward;
-  new->revcomp_save = new->revcomp;
+  new->forward_save = new->forward_oligo;
+  new->revcomp_save = new->revcomp_oligo;
 #endif
 
   return new;
@@ -243,15 +243,18 @@ Block_next_5 (T this, int genestrand) {
 		 this->aaindex,this->last_querypos));
 #else
     this->last_state = Oligo_next_5(this->last_state,&this->last_querypos,
-				    &this->forward,&this->revcomp,this->reader,genestrand);
+				    &this->forward_oligo,&this->revcomp_oligo,this->reader,genestrand);
+    /* this->forward_signature = Signature_get(this->forward_oligo); */
+    /* this->revcomp_signature = Signature_get(this->revcomp_oligo); */
+
     debug(
 	  if (this->cdnaend == THREE) {
-	    nt_fwd = Oligo_one_nt(this->forward >> this->leftreadshift,this->oligosize);
-	    nt_rev = Oligo_one_nt(this->revcomp,this->oligosize);
+	    nt_fwd = Oligo_one_nt(this->forward_oligo >> this->leftreadshift,this->oligosize);
+	    nt_rev = Oligo_one_nt(this->revcomp_oligo,this->oligosize);
 	  }
 	  if (this->cdnaend == FIVE) {
-	    nt_fwd = Oligo_one_nt(this->forward,this->oligosize);
-	    nt_rev = Oligo_one_nt(this->revcomp >> this->leftreadshift,this->oligosize);
+	    nt_fwd = Oligo_one_nt(this->forward_oligo,this->oligosize);
+	    nt_rev = Oligo_one_nt(this->revcomp_oligo >> this->leftreadshift,this->oligosize);
 	  }
 	  printf("Block has oligo forward %s, revcomp %s at querypos %d\n",
 		 nt_fwd,nt_rev,this->last_querypos);
@@ -286,15 +289,18 @@ Block_next_3 (T this, int genestrand) {
 		 this->aaindex,this->last_querypos));
 #else
     this->last_state = Oligo_next_3(this->last_state,&this->last_querypos,
-				    &this->forward,&this->revcomp,this->reader,genestrand);
+				    &this->forward_oligo,&this->revcomp_oligo,this->reader,genestrand);
+    /* this->forward_signature = Signature_get(this->forward_oligo);*/
+    /* this->revcomp_signature = Signature_get(this->revcomp_oligo); */
+
     debug(
 	  if (this->cdnaend == THREE) {
-	    nt_fwd = Oligo_one_nt(this->forward >> this->leftreadshift,this->oligosize);
-	    nt_rev = Oligo_one_nt(this->revcomp,this->oligosize);
+	    nt_fwd = Oligo_one_nt(this->forward_oligo >> this->leftreadshift,this->oligosize);
+	    nt_rev = Oligo_one_nt(this->revcomp_oligo,this->oligosize);
 	  }
 	  if (this->cdnaend == FIVE) {
-	    nt_fwd = Oligo_one_nt(this->forward,this->oligosize);
-	    nt_rev = Oligo_one_nt(this->revcomp >> this->leftreadshift,this->oligosize);
+	    nt_fwd = Oligo_one_nt(this->forward_oligo,this->oligosize);
+	    nt_rev = Oligo_one_nt(this->revcomp_oligo >> this->leftreadshift,this->oligosize);
 	  }
 	  printf("Block has oligo forward %s, revcomp %s at querypos %d\n",
 		 nt_fwd,nt_rev,this->last_querypos);
@@ -329,10 +335,13 @@ Block_skip_5 (T this, int genestrand, int nskip) {
 		 this->aaindex,this->last_querypos));
 #else
     this->last_state = Oligo_skip_5(this->last_state,&this->last_querypos,
-				    &this->forward,&this->revcomp,
+				    &this->forward_oligo,&this->revcomp_oligo,
 				    this->reader,genestrand,nskip);
+    /* this->forward_signature = Signature_get(this->forward_oligo); */
+    /* this->revcomp_signature = Signature_get(this->revcomp_oligo); */
+
     debug(printf("Block has oligo %08X at querypos %d\n",
-		 this->forward,this->last_querypos));
+		 this->forward_oligo,this->last_querypos));
 #endif
 
     if (this->last_state != VALID) {
@@ -362,10 +371,13 @@ Block_skip_3 (T this, int genestrand, int nskip) {
 		 this->aaindex,this->last_querypos));
 #else
     this->last_state = Oligo_skip_3(this->last_state,&this->last_querypos,
-				    &this->forward,&this->revcomp,
+				    &this->forward_oligo,&this->revcomp_oligo,
 				    this->reader,genestrand,nskip);
+    /* this->forward_signature = Signature_get(this->forward_oligo); */
+    /* this->revcomp_signature = Signature_get(this->revcomp_oligo); */
+
     debug(printf("Block has oligo %08X at querypos %d\n",
-		 this->forward,this->last_querypos));
+		 this->forward_oligo,this->last_querypos));
 #endif
 
     if (this->last_state != VALID) {
@@ -424,11 +436,11 @@ Block_process_oligo_5 (Univcoord_T **fwdpositions, int *nfwdhits,
 		       Univcoord_T **revpositions, int *nrevhits,
 		       T this, Indexdb_T indexdb_fwd, Indexdb_T indexdb_rev) {
 #if 0
-  printf("block_process: Querypos %d, oligos are %06X and %06X\n",this->last_querypos,this->forward,this->revcomp >> this->leftreadshift);
+  printf("block_process: Querypos %d, oligos are %06X and %06X\n",this->last_querypos,this->forward_oligo,this->revcomp_oligo >> this->leftreadshift);
 #endif
-  *fwdpositions = Indexdb_read_with_diagterm(&(*nfwdhits),indexdb_fwd,this->forward & this->oligomask,
+  *fwdpositions = Indexdb_read_with_diagterm(&(*nfwdhits),indexdb_fwd,this->forward_oligo & this->oligomask,
 					     /*diagterm*/this->querylength-this->last_querypos);
-  *revpositions = Indexdb_read_with_diagterm(&(*nrevhits),indexdb_rev,(this->revcomp >> this->leftreadshift) & this->oligomask,
+  *revpositions = Indexdb_read_with_diagterm(&(*nrevhits),indexdb_rev,(this->revcomp_oligo >> this->leftreadshift) & this->oligomask,
 					     /*diagterm*/this->last_querypos);
 
   return this->last_querypos;
@@ -440,11 +452,11 @@ Block_process_oligo_3 (Univcoord_T **fwdpositions, int *nfwdhits,
 		       Univcoord_T **revpositions, int *nrevhits,
 		       T this, Indexdb_T indexdb_fwd, Indexdb_T indexdb_rev) {
 #if 0
-  printf("block_process Querypos %d, oligos are %06X and %06X\n",this->last_querypos,this->forward >> this->leftreadshift,this->revcomp);
+  printf("block_process Querypos %d, oligos are %06X and %06X\n",this->last_querypos,this->forward_oligo >> this->leftreadshift,this->revcomp_oligo);
 #endif
-  *fwdpositions = Indexdb_read_with_diagterm(&(*nfwdhits),indexdb_fwd,(this->forward >> this->leftreadshift) & this->oligomask,
+  *fwdpositions = Indexdb_read_with_diagterm(&(*nfwdhits),indexdb_fwd,(this->forward_oligo >> this->leftreadshift) & this->oligomask,
 					     /*diagterm*/this->querylength-this->last_querypos);
-  *revpositions = Indexdb_read_with_diagterm(&(*nrevhits),indexdb_rev,this->revcomp & this->oligomask,
+  *revpositions = Indexdb_read_with_diagterm(&(*nrevhits),indexdb_rev,this->revcomp_oligo & this->oligomask,
 					     /*diagterm*/this->last_querypos);
 
   return this->last_querypos;

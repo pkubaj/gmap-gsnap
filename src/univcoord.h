@@ -27,6 +27,7 @@ typedef Uint8list_T Univcoordlist_T;
 #define Univcoordlist_min Uint8list_min
 #define Univcoordlist_max Uint8list_max
 #define Univcoordlist_to_array Uint8list_to_array
+#define Univcoordlist_to_array_aligned Uint8list_to_array_aligned
 #define Univcoordlist_to_array_n Uint8list_to_array_n
 #define Univcoordlist_to_array_out Uint8list_to_array_out
 #define Univcoordlist_fill_array Uint8list_fill_array
@@ -114,6 +115,7 @@ typedef Uintlist_T Univcoordlist_T;
 #define Univcoordlist_min Uintlist_min
 #define Univcoordlist_max Uintlist_max
 #define Univcoordlist_to_array Uintlist_to_array
+#define Univcoordlist_to_array_aligned Uintlist_to_array_aligned
 #define Univcoordlist_to_array_n Uintlist_to_array_n
 #define Univcoordlist_to_array_out Uintlist_to_array_out
 #define Univcoordlist_fill_array Uintlist_fill_array

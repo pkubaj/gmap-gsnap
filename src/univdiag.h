@@ -56,6 +56,11 @@ Univdiag_struct_diagonal_rev_cmp (const void *a, const void *b);
 extern int
 Univdiag_struct_cmp (const void *a, const void *b);
 
+extern void
+Univdiag_chain_print_left (List_T chain);
+extern void
+Univdiag_chain_print_right (List_T chain);
+
 #undef T
 #endif
 

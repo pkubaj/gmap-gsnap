@@ -16,6 +16,8 @@ typedef struct Stage1_T *Stage1_T;
 #include "iit-read-univ.h"
 #include "ef64.h"
 
+#include "singleelt.h"
+
 #include "auxinfo.h"
 #include "pathstore.h"
 
@@ -42,6 +44,8 @@ typedef struct Stage1_T *Stage1_T;
 #include "pathpool.h"
 #include "trpathpool.h"
 #include "hitlistpool.h"
+
+#define STAGE1_MINPURE_SPECIFICITY_SCALE 1000000U
 
 
 #define T Stage1_T
@@ -78,28 +82,31 @@ struct T {
   /* Univdiagonals */
   bool exact_paths_computed_p;
 
-  /* Additional result from Extension_search, used for fusions */
-  Univcoord_T *extension_gplus;
-  int *extension_qstart_gplus;
-  int *extension_qend_gplus;
-  int nextension_gplus;
-
-  Univcoord_T *extension_gminus;
-  int *extension_qstart_gminus;
-  int *extension_qend_gminus;
-  int nextension_gminus;
-
-  /* Additional result from Kmer_prevalent, used for anchoring */
+  /* Result from Kmer_segment */
   Univcoord_T *exhaustive_gplus; /* Memory is aligned */
-  int *exhaustive_qstart_gplus;
-  int *exhaustive_qend_gplus;
   int *exhaustive_counts_gplus;
+  Singleelt_T *exhaustive_eltarray_gplus;
+  unsigned int *exhaustive_minpure_specificity_gplus;
+  int *exhaustive_minpure_observations_gplus;
+  unsigned int *exhaustive_minpure_specificity_min_gplus;
+  unsigned int *exhaustive_minpure_specificity_max_gplus;
+  unsigned int *exhaustive_minpure_frequency_min_gplus;
+  unsigned int *exhaustive_minpure_frequency_max_gplus;
+  unsigned long long *exhaustive_minpure_frequency_sum_gplus;
+  Auxinfo_T *exhaustive_auxinfo_gplus;
   int nexhaustive_gplus;
 
   Univcoord_T *exhaustive_gminus; /* Memory is aligned */
-  int *exhaustive_qstart_gminus;
-  int *exhaustive_qend_gminus;
   int *exhaustive_counts_gminus;
+  Singleelt_T *exhaustive_eltarray_gminus;
+  unsigned int *exhaustive_minpure_specificity_gminus;
+  int *exhaustive_minpure_observations_gminus;
+  unsigned int *exhaustive_minpure_specificity_min_gminus;
+  unsigned int *exhaustive_minpure_specificity_max_gminus;
+  unsigned int *exhaustive_minpure_frequency_min_gminus;
+  unsigned int *exhaustive_minpure_frequency_max_gminus;
+  unsigned long long *exhaustive_minpure_frequency_sum_gminus;
+  Auxinfo_T *exhaustive_auxinfo_gminus;
   int nexhaustive_gminus;
 
   /* From all search methods */
@@ -162,6 +169,9 @@ struct T {
 				   forward_oligos[querypos] and
 				   revcomp_oligos[querypos] at same
 				   time */
+  bool *segment_positions_filterp;
+  int *segment_positions_filter_plus_npositions;
+  int *segment_positions_filter_minus_npositions;
   bool *tr_validp;
 
   bool all_oligos_gen_filledp;
@@ -171,6 +181,9 @@ struct T {
   Oligospace_T *revcomp_oligos;
   Oligospace_T *tr_forward_oligos;
   Oligospace_T *tr_revcomp_oligos;
+
+  Signature_T *forward_signatures;
+  Signature_T *revcomp_signatures;
 
   /* Need plus_retrievedp and minus_retrievedp because
      Extension_search and Tr_extension_search can retrieve either plus
@@ -211,6 +224,8 @@ struct T {
   int *tr_minus_npositions;
   int *tr_plus_diagterms;
   int *tr_minus_diagterms;
+
+  int segment_positions_filter_removed;
   
   int *mismatch_positions_alloc; /* Non-pool, based on querylength */
   int *positions_alloc;		 /* Non-pool, based on querylength */
@@ -258,12 +273,6 @@ struct T {
   int *gplus_diagterm_array_5, *gminus_diagterm_array_5, *gplus_diagterm_array_3, *gminus_diagterm_array_3;
 #endif
 
-
-  /* Returned from Extension_search and used for distant splicing */
-  List_T queryfwd_plus_set;
-  List_T queryfwd_minus_set;
-  List_T queryrev_plus_set;
-  List_T queryrev_minus_set;
 
   /* Returned from Tr_extension_search */
   List_T tr_queryfwd_plus_set;
@@ -340,16 +349,23 @@ Stage1_fill_all_oligos_tr (T this, int querylength);
 extern void
 Stage1_fill_all_positions_gen (int *total_npositions_plus, int *total_npositions_minus,
 			       T this, int querylength, int genestrand);
+extern int
+Stage1_filter_segment_kmer_positions_gen (T this, int querylength,
+					  int max_avg_kmer_positions, const char *label);
+#ifdef GSNAP_DEBUG_SEGMENT_STREAM_STATS
+extern void
+Stage1_print_segment_kmer_positions_gen (T this, int querylength, const char *label);
+#endif
 extern void
 Stage1_fill_all_positions_tr (T this, int querylength);
 
 extern void
 Stage1hr_setup (Indexdb_T indexdb_fwd_in, Indexdb_T indexdb_rev_in, Indexdb_T indexdb_tr_in,
-		EF64_T repetitive_ef64_in, int index1part_in, int index1interval_in,
+		EF64_T repetitive_ef64_in, bool segment_repetitive_kmer_filter_p_in,
+		int index1part_in, int index1interval_in, int msize_in,
 		int index1part_tr_in, int index1interval_tr_in, 
 		int max_deletionlen, Chrpos_T shortsplicedist,
 		Transcriptome_T transcriptome_in);
 
 #undef T
 #endif
-

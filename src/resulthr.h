@@ -12,6 +12,7 @@ typedef struct Result_T *Result_T;
 #include "pathpool.h"
 #include "transcriptpool.h"
 #include "hitlistpool.h"
+#include "cascade-timing.h"
 
 
 /* PAIRED_UNSPECIFIED assigned only by Stage1hr_paired_read */
@@ -44,6 +45,10 @@ extern int
 Result_id (T this);
 extern int
 Result_worker_id (T this);
+extern const Cascade_Timing_T *
+Result_cascade_timing (T this);
+extern void
+Result_set_cascade_timing (T this, const Cascade_Timing_T *timing);
 extern void **
 Result_array (int *npaths_primary, int *npaths_altloc, int *first_absmq, int *second_absmq, T this);
 extern void **
@@ -67,4 +72,3 @@ Result_free (T *old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlis
 
 #undef T
 #endif
-

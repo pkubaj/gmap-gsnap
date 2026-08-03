@@ -5,6 +5,7 @@
 #include "types.h"
 
 /* Kmer_segment wants the indices of set2 */
+/* Writes only the indices for set 2 */
 extern int
 Intersect_indices2_large (int *indices,
 			 const unsigned char *set1_high, const UINT4 *set1_low, const int length1, int diagterm1,

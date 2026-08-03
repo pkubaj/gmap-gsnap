@@ -23,6 +23,8 @@ extern void
 Listpool_free (T *old);
 extern T
 Listpool_new (void);
+extern int
+Listpool_nchunks (T this);
 
 #ifdef LISTPOOL_REUSE
 extern void

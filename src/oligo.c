@@ -1,9 +1,9 @@
-static char rcsid[] = "$Id: 0bc64f4955c10bafc32b5d76af1a51a584ec1baa $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "oligo.h" 
+#include "oligo.h"
+#include "debug_groups.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>		/* For memcpy */
@@ -19,7 +19,7 @@ static char rcsid[] = "$Id: 0bc64f4955c10bafc32b5d76af1a51a584ec1baa $";
 #endif
 
 /* For Oligo_one_nt */
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_PAIRED_FLOW) || defined(DEBUG_SINGLE_FLOW)
 #define debug1(x) x
 #else
 #define debug1(x)
@@ -34,7 +34,7 @@ static char rcsid[] = "$Id: 0bc64f4955c10bafc32b5d76af1a51a584ec1baa $";
 #define LOW_TWO_BITS  0x00000003
 
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_PAIRED_FLOW) || defined(DEBUG_SINGLE_FLOW)
 /* For debugging purposes only.  Called by Kmer_search procedures */
 char *
 Oligo_one_nt (Oligospace_T oligo, int oligosize) {

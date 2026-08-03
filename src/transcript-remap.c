@@ -1,4 +1,3 @@
-static char rcsid[] = "$Id: d20f49dc738fb3527d24196da4db83d8701ae09b $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -167,8 +166,8 @@ Transcript_remap_endpoint_coords (Intlist_T endpoints, Univcoordlist_T univdiago
 
   /* Start first exon */
   univdiagonal = Univcoordlist_head(univdiagonals);
-  if (circularp[chrnum] == true &&
-      univdiagonal > (chrmidpoint = chroffset + (chrhigh - chroffset)/2) + querylength) {
+  chrmidpoint = chroffset + (chrhigh - chroffset)/2;
+  if (circularp[chrnum] == true && univdiagonal > chrmidpoint + querylength) {
     chr_left = (univdiagonal - chrmidpoint) - querylength;
   } else {    
     chr_left = (univdiagonal - chroffset) - querylength;
@@ -444,7 +443,7 @@ Transcript_remap_geneplus (int *overall_trstart, int *overall_trend,
 	trstart = exonbounds[exoni] - (/*exonends[exoni]*/exonend_exoni - chr_alignstart);
 	firstchar = (p == coords) ? '.' : 'y';
       
-      } else if (exoni >= transcript_nexons) {
+      } else if (exoni >= transcript_nexons - 1) { /* was >= transcript_nexons */
 	debug10(printf("Start case N: Segment starts after transcript\n"));
 	trstart = trlength + 1;
 	firstchar = 'u';
@@ -673,7 +672,7 @@ Transcript_remap_geneminus (int *overall_trstart, int *overall_trend,
 	trstart = exonbounds[exoni] - (chr_alignstart - /*exonends[exoni]*/exonend_exoni);
 	firstchar = (p == coords) ? '.' : 'y';
       
-      } else if (exoni >= transcript_nexons) {
+      } else if (exoni >= transcript_nexons - 1) /* was >= transcript_nexons */ {
 	debug10(printf("Start case N: Segment starts after transcript\n"));
 	trstart = trlength + 1;
 	firstchar = 'u';
@@ -1012,8 +1011,9 @@ Transcript_remap_all (List_T *transcripts, List_T *invalid_transcripts,
   debug10(printf("coords %s\n",Uintlist_to_string(coords)));
 
   univdiagonal = Univcoordlist_head(univdiagonals);
-  if (circularp[chrnum] == true &&
-      univdiagonal > chroffset + (chrlength = (chrhigh - chroffset)/2) + querylength) {
+  chrlength = (chrhigh - chroffset)/2;
+
+  if (circularp[chrnum] == true && univdiagonal > chroffset + chrlength + querylength) {
     genomicstart = univdiagonal - chrlength - querylength;
   } else {
     genomicstart = univdiagonal - querylength;

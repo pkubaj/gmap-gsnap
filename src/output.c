@@ -153,7 +153,7 @@ Output_setup (Univ_IIT_T chromosome_iit_in,
 /* Taken from print_result_sam from old outbuffer.c */
 static Filestring_T
 filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
-			   Result_T result, Request_T request, Listpool_T listpool) {
+			   Result_T result, Request_T request, double worker_runtime, Listpool_T listpool) {
   Filestring_T fp;
   Resulttype_T resulttype;
   Shortread_T headerseq, single_cell_infoseq, queryseq;
@@ -183,7 +183,8 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 			       /*acc1*/Shortread_accession(headerseq),/*acc2*/NULL,chromosome_iit,resulttype,
 			       /*first_read_p*/true,/*pathnum*/0,/*npaths_primary*/0,/*npaths_altloc*/0,
 			       /*artificial_mate_p*/false,/*npaths_mate*/0,
-			       /*mate*/NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+			       /*mate*/NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+			       worker_runtime);
       if (failedinput_root != NULL) {
 	*fp_failedinput = Filestring_new();
 	headerseq = Request_queryseq1(request);
@@ -241,7 +242,7 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 		     /*pairedlength*/0,/*pair_relationship*/0,/*mate*/NULL,resulttype,
 		     /*paired_read_p*/false,/*first_read_p*/true,/*artificial_mate_p*/false,
 		     /*npaths_mate*/0,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
-		     listpool);
+		     worker_runtime,listpool);
     }
 
   } else if (resulttype == SINGLEEND_TRANSLOC) {
@@ -295,7 +296,7 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 		       /*pairedlength*/0,/*pair_relationship*/0,/*mate*/NULL,resulttype,
 		       /*paired_read_p*/false,/*first_read_p*/true,/*artificial_mate_p*/false,
 		       /*npaths_mate*/0,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
-		       listpool);
+		       worker_runtime,listpool);
       }
     }
 
@@ -330,7 +331,8 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 				 /*acc1*/Shortread_accession(headerseq),/*acc2*/NULL,chromosome_iit,resulttype,
 				 /*first_read_p*/true,/*pathnum*/1,npaths_primary,npaths_altloc,
 				 /*artificial_mate_p*/false,/*npaths_mate*/0,
-				 /*mate*/NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p);
+				 /*mate*/NULL,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
+				 worker_runtime);
 	/* Don't treat XS output as a failed input */
       }
 
@@ -355,7 +357,7 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 		       /*pairedlength*/0,/*pair_relationship*/0,/*mate*/NULL,resulttype,
 		       /*paired_read_p*/false,/*first_read_p*/true,/*artificial_mate_p*/false,
 		       /*npaths_mate*/0,quality_shift,sam_read_group_id,invert_first_p,invert_second_p,
-		       listpool);
+		       worker_runtime,listpool);
       }
     }
 
@@ -365,7 +367,7 @@ filestring_fromresult_sam (Filestring_T *fp_failedinput, Filestring_T *fp_failed
 			  result,resulttype,chromosome_iit,
 			  Request_queryseq1(request),Request_queryseq2(request),
 			  invert_first_p,invert_second_p,nofailsp,failsonlyp,
-			  quality_shift,sam_read_group_id,listpool);
+			  quality_shift,sam_read_group_id,worker_runtime,listpool);
   }
 
   return fp;
@@ -804,10 +806,10 @@ filestring_fromresult_m8 (Filestring_T *fp_failedinput, Filestring_T *fp_failedi
 
 Filestring_T
 Output_filestring_fromresult (Filestring_T *fp_failedinput, Filestring_T *fp_failedinput_1, Filestring_T *fp_failedinput_2,
-			      Result_T result, Request_T request, Listpool_T listpool) {
+			      Result_T result, Request_T request, double worker_runtime, Listpool_T listpool) {
   if (output_type == SAM_OUTPUT) {
     return filestring_fromresult_sam(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
-				     result,request,listpool);
+				     result,request,worker_runtime,listpool);
   } else if (output_type == M8_OUTPUT) {
     return filestring_fromresult_m8(&(*fp_failedinput),&(*fp_failedinput_1),&(*fp_failedinput_2),
 				    result,request,listpool);

@@ -282,6 +282,8 @@ Univ_IIT_altlocp (Univcoord_T **alias_starts, Univcoord_T **alias_ends, T chromo
 #ifdef WORDS_BIGENDIAN
     /* chromosome_iit should be version 1 */
     start = Bigendian_convert_uint(chromosome_iit->labelpointers[chri]);
+#elif 0
+    memcpy(&start,&chromosome_iit->labelpointers[chri],sizeof(start));
 #else
     start = chromosome_iit->labelpointers[chri];
 #endif
@@ -486,6 +488,8 @@ Univ_IIT_divint_crosstable (T chromosome_iit, IIT_T iit) {
 #ifdef WORDS_BIGENDIAN
     /* chromosome_iit should be version 1 */
     start = Bigendian_convert_uint(chromosome_iit->labelpointers[chrnum]);
+#elif 0
+    memcpy(&start,&chromosome_iit->labelpointers[chrnum],sizeof(start));
 #else
     start = chromosome_iit->labelpointers[chrnum];
 #endif
@@ -576,6 +580,8 @@ Univ_IIT_label (T this, int index, bool *allocp) {
 
 #ifdef WORDS_BIGENDIAN
   start = Bigendian_convert_uint(this->labelpointers[recno]);
+#elif 0
+  memcpy(&start,&this->labelpointers[recno],sizeof(start));
 #else
   start = this->labelpointers[recno];
 #endif
@@ -599,6 +605,8 @@ Univ_IIT_annotation (char **restofheader, T this, int index, bool *alloc_header_
   recno = index - 1; /* Convert to 0-based */
 #ifdef WORDS_BIGENDIAN
   start = Bigendian_convert_uint(this->annotpointers[recno]);
+#elif 0
+  memcpy(&start,&this->annotpointers[recno],sizeof(start));
 #else
   start = this->annotpointers[recno];
 #endif
@@ -816,6 +824,8 @@ Univ_IIT_dump_labels (FILE *fp, T this) {
   for (i = 0; i < this->total_nintervals; i++) {
 #ifdef WORDS_BIGENDIAN
     start = Bigendian_convert_uint(this->labelpointers[i]);
+#elif 0
+    memcpy(&start,&this->labelpointers[i],sizeof(start));
 #else
     start = this->labelpointers[i];
 #endif
@@ -839,6 +849,8 @@ Univ_IIT_annotation_firstchar (T this, int index) {
 
 #ifdef WORDS_BIGENDIAN
   start = Bigendian_convert_uint(this->annotpointers[recno]);
+#elif 0
+  memcpy(&start,&this->annotpointers[recno],sizeof(start));
 #else
   start = this->annotpointers[recno];
 #endif

@@ -17,7 +17,7 @@
 
 
 /* Resolve indels */ 
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
 #define debug2(x) x
 #else
 #define debug2(x)
@@ -92,7 +92,7 @@ Indel_resolve_middle_insertion (int *best_nmismatches_i, int *best_nmismatches_j
 
   int best_indel_pos, best_indel_pos_case1, best_indel_pos_case2,
     indel_qpos_low, indel_qpos_high, indel_pos;
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
   Univcoord_T left;
   char *gbuffer, *queryseq;
   int i;
@@ -216,7 +216,7 @@ Indel_resolve_middle_insertion (int *best_nmismatches_i, int *best_nmismatches_j
   /* query has insertion.  Get |indels| less from genome; trim from left. */
   /* left = ptr->diagonal - querylength; */
 
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
   gbuffer = (char *) CALLOC(querylength-indels+1,sizeof(char));
   left = univdiagonal_i - querylength;
   Genome_fill_buffer(left+indels,querylength-indels,gbuffer);
@@ -385,7 +385,7 @@ Indel_resolve_middle_deletion (int *best_nmismatches_i, int *best_nmismatches_j,
 			       bool plusp, int genestrand, bool want_lowest_coordinate_p) {
   int best_indel_pos, best_indel_pos_case1, best_indel_pos_case2,
     indel_qpos_low, indel_qpos_high, indel_pos;
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
   Univcoord_T left;
   char *gbuffer, *queryseq;
   int i;
@@ -509,7 +509,7 @@ Indel_resolve_middle_deletion (int *best_nmismatches_i, int *best_nmismatches_j,
   /* query has deletion.  Get |indels| more from genome; add to right. */
   /* left = ptr->diagonal - querylength; */
 
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
   gbuffer = (char *) CALLOC(querylength-indels+1,sizeof(char));
   left = univdiagonal_i - querylength;
   Genome_fill_buffer(left,querylength-indels,gbuffer);
@@ -672,8 +672,8 @@ Indel_resolve_middle_deletion_or_splice (int *best_introntype, int *best_nmismat
   int best_indel_pos, best_indel_pos_case1, best_indel_pos_case2,
     indel_qpos_low, indel_qpos_high, indel_pos;
   int nmismatches_left, nmismatches_right;
-#ifdef DEBUG2
-  char *gbuffer2;
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
+  char *gbuffer2, *queryseq;
   int querystart, queryend;
   int i;
 #endif
@@ -704,7 +704,7 @@ Indel_resolve_middle_deletion_or_splice (int *best_introntype, int *best_nmismat
 
   assert(indels < 0);		/* Deletions and splices are negative */
 
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
   queryend = querylength - indels; /* Extends past querylength */
   gbuffer2 = (char *) CALLOC(queryend+1,sizeof(char));
 
@@ -1044,5 +1044,3 @@ Indel_resolve_middle_deletion_or_splice (int *best_introntype, int *best_nmismat
   return best_indel_pos;
 }
 #endif
-
-

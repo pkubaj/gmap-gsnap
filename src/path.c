@@ -1,5 +1,3 @@
-#define DEBUG1 1
-static char rcsid[] = "$Id: 752f22be04232dfdc0bba011a1fcd4f9511a71b3 $";
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -8,6 +6,8 @@ static char rcsid[] = "$Id: 752f22be04232dfdc0bba011a1fcd4f9511a71b3 $";
 #endif
 
 #include "path.h"
+#include "debug_groups.h"
+#include "parameters.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +28,16 @@ static bool *altlocp;
 #define ENDTRIM_ALLOWED 4
 
 
-#ifdef DEBUG0
+static void
+Path_final_score_clear (Path_T path) {
+  path->final_score_p = false;
+  path->final_read_score = 0;
+  path->final_pair_score = 0;
+  return;
+}
+
+
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
 #define debug0(x) x
 #else
 #define debug0(x)
@@ -36,42 +45,42 @@ static bool *altlocp;
 
 /* Path_print */
 /* Also, need to define DEBUG1 in junction.c */
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_PATH_CORE)
 #define debug1(x) x
 #else
 #define debug1(x)
 #endif
 
 /* Path_endpoints_acceptable_p */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_PATH_CORE)
 #define debug2(x) x
 #else
 #define debug2(x)
 #endif
 
 /* Path_filter */
-#ifdef DEBUG4
+#if defined(DEBUG4) || defined(DEBUG_PATH_CORE)
 #define debug4(x) x
 #else
 #define debug4(x)
 #endif
 
 /* Getting unique genomic coords */
-#ifdef DEBUG6
+#if defined(DEBUG6) || defined(DEBUG_PATH_CORE)
 #define debug6(x) x
 #else
 #define debug6(x)
 #endif
 
 /* Setdiff univdiagonals auxinfo */
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
 #define debug9(x) x
 #else
 #define debug9(x)
 #endif
 
 /* Merge univdiagonals auxinfo */
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_PATH_CORE)
 #define debug11(x) x
 #else
 #define debug11(x)
@@ -1092,15 +1101,21 @@ Path_filter (List_T paths, Intlistpool_T intlistpool, Univcoordlistpool_T univco
 
 
 static int
-setdiff_scalar (Univcoord_T *old, Univcoord_T *end_old,
+setdiff_scalar (int **duplicate_old_indices, int *nduplicates,
+		Univcoord_T *old, Univcoord_T *end_old,
 		Auxinfo_T *old_auxinfo, Pathstore_T *old_pathstores,
 		Univcoord_T *new, Univcoord_T *end_new,
 		Auxinfo_T *new_auxinfo, Pathstore_T *new_pathstores,
 		Pathstorepool_T pathstorepool, Intlistpool_T intlistpool) {
 
-  Univcoord_T *new_start, *ptr = new;
+  Univcoord_T *old_start = old, *new_start, *ptr = new;
   Auxinfo_T *ptr_auxinfo = new_auxinfo;
   Pathstore_T *ptr_pathstores = new_pathstores;
+  int *indices = NULL, nindices = 0, old_index;
+
+  if (duplicate_old_indices != NULL) {
+    indices = (int *) MALLOC((end_new - new)*sizeof(int));
+  }
 
   new_start = new;
   while (old < end_old && new < end_new) {
@@ -1118,6 +1133,10 @@ setdiff_scalar (Univcoord_T *old, Univcoord_T *end_old,
 
     } else {
       /* Equal: Do not put into the list, but merge new auxinfo into old */
+      old_index = old - old_start;
+      if (indices != NULL && (nindices == 0 || indices[nindices - 1] != old_index)) {
+	indices[nindices++] = old_index;
+      }
       old++; new++;
       *old_auxinfo = Auxinfo_append(*old_auxinfo,*new_auxinfo);
       old_auxinfo++; new_auxinfo++;
@@ -1127,10 +1146,20 @@ setdiff_scalar (Univcoord_T *old, Univcoord_T *end_old,
   }
       
   while (new < end_new) {
-    debug9(printf("Observed new %u: Keeping\n"));
+    debug9(printf("Observed new %u: Keeping\n",*new));
     *ptr++ = *new++;
     *ptr_auxinfo++ = *new_auxinfo++;
     *ptr_pathstores++ = *new_pathstores++;
+  }
+
+  if (duplicate_old_indices != NULL) {
+    if (nindices == 0) {
+      FREE(indices);
+      *duplicate_old_indices = (int *) NULL;
+    } else {
+      *duplicate_old_indices = indices;
+    }
+    *nduplicates = nindices;
   }
 
   return (ptr - new_start);
@@ -1141,14 +1170,20 @@ setdiff_scalar (Univcoord_T *old, Univcoord_T *end_old,
 /* Modifies old_auxinfo by appending the new_auxinfo to its end.
    Overwrites new_univdiagonals and new_auxinfo.  Returns nnovel */
 int
-Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *old_auxinfo,
+Path_setdiff_univdiagonals_auxinfo (int **duplicate_old_indices, int *nduplicates,
+				    Univcoord_T *old_univdiagonals, Auxinfo_T *old_auxinfo,
 				    Pathstore_T *old_pathstores, int nold,
 				    Univcoord_T *new_univdiagonals, Auxinfo_T *new_auxinfo,
 				    Pathstore_T *new_pathstores, int nnew,
 				    Pathstorepool_T pathstorepool, Intlistpool_T intlistpool) {
   int nnovel;
 
-#ifdef DEBUG9
+  if (duplicate_old_indices != NULL) {
+    *duplicate_old_indices = (int *) NULL;
+    *nduplicates = 0;
+  }
+
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
   printf("Entering Path_setdiff_univdiagonals_auxinfo with\n");
   for (int i = 0; i < nold; i++) {
     printf("old univdiagonal %u, auxinfo ",old_univdiagonals[i]);
@@ -1166,7 +1201,7 @@ Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *o
 
   if (nold == 0) {
     /* No change */
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
     printf("(1) Exiting Path_setdiff_univdiagonals_auxinfo with\n");
     for (int i = 0; i < nnew; i++) {
       printf("new univdiagonal %u, auxinfo ",new_univdiagonals[i]);
@@ -1180,7 +1215,7 @@ Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *o
 
   } else if (nnew == 0) {
     /* No change */
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
     printf("(2) Exiting Path_setdiff_univdiagonals_auxinfo with\n");
     for (int i = 0; i < nnew; i++) {
       printf("new univdiagonal %u, auxinfo ",new_univdiagonals[i]);
@@ -1193,7 +1228,7 @@ Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *o
     return 0;
     
   } else {
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
     for (int i = 0; i < nold; i++) {
       printf("Old %u",old_univdiagonals[i]);
       for (Auxinfo_T p = old_auxinfo[i]; p != NULL; p = p->rest) {
@@ -1210,13 +1245,14 @@ Path_setdiff_univdiagonals_auxinfo (Univcoord_T *old_univdiagonals, Auxinfo_T *o
     }
 #endif
 
-    nnovel = setdiff_scalar(old_univdiagonals,&(old_univdiagonals[nold]),
+    nnovel = setdiff_scalar(duplicate_old_indices,nduplicates,
+			    old_univdiagonals,&(old_univdiagonals[nold]),
 			    old_auxinfo,old_pathstores,
 			    new_univdiagonals,&(new_univdiagonals[nnew]),
 			    new_auxinfo,new_pathstores,
 			    pathstorepool,intlistpool);
 
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_PATH_CORE)
     printf("(3) Exiting Path_setdiff_univdiagonals_auxinfo with\n");
     for (int i = 0; i < nnovel; i++) {
       printf("new univdiagonal %u, auxinfo ",new_univdiagonals[i]);
@@ -1400,7 +1436,7 @@ Path_merge_univdiagonals_auxinfo (Univcoord_T **_all_univdiagonals, Auxinfo_T **
     old_pathstores = *all_pathstores;
     nold = *nall;
 
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_PATH_CORE)
     for (int i = 0; i < nold; i++) {
       printf("Old %u",_old_univdiagonals[i]);
       for (Auxinfo_T p = old_auxinfo[i]; p != NULL; p = p->rest) {
@@ -1445,7 +1481,7 @@ Path_merge_univdiagonals_auxinfo (Univcoord_T **_all_univdiagonals, Auxinfo_T **
     }
 #endif
 
-#ifdef DEBUG11
+#if defined(DEBUG11) || defined(DEBUG_PATH_CORE)
     printf("(4) Path_merge returning %d univdiagonals/auxinfo\n",*nall);
     for (int i = 0; i < *nall; i++) {
       printf("%u",(*_all_univdiagonals)[i]);
@@ -1715,12 +1751,18 @@ Path_reverse_nocheck (T this) {
 /* Same as Trpath_endpoints_acceptable_p */
 bool
 Path_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
+  bool matchp = false;
   Intlist_T p;
   List_T q;
-  Junction_T junction;
+  Junction_T junction, next_junction;
   int last_endpoint;
 
   debug2(printf("Evaluating endpoints for acceptability: %s\n",Intlist_to_string(endpoints)));
+
+  if (Intlist_second_value(endpoints) > Intlist_head(endpoints)) {
+    /* Check first segment */
+    matchp = true;
+  }
 
   /* last_endpoint = 0; */
   /* Skip first endpoint */
@@ -1729,17 +1771,30 @@ Path_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
     junction = (Junction_T) List_head(q);
     /* (1) Previously used >=, but a deletion can yield duplicated endpoints */
     /* (2) Previously used >, but deletions should not yield duplicated endpoints */
-    if (last_endpoint + Junction_ninserts(junction) >= Intlist_head(Intlist_next(p))) {
-      debug2(printf("Endpoint %d + %d >= %d, so unacceptable\n",
+    if (last_endpoint + Junction_ninserts(junction) > Intlist_head(Intlist_next(p))) {
+      debug2(printf("Endpoint %d + %d > %d, so unacceptable\n",
+		    last_endpoint,Junction_ninserts(junction),Intlist_head(Intlist_next(p))));
+      return false;
+    } else if (last_endpoint + Junction_ninserts(junction) == Intlist_head(Intlist_next(p)) &&
+	       (Parameters_fix_splice_boundary_indels_p == false ||
+		q == NULL || List_next(q) == NULL ||
+		(next_junction = (Junction_T) List_head(List_next(q))) == NULL ||
+		!(((Junction_type(junction) == INS_JUNCTION || Junction_type(junction) == DEL_JUNCTION) &&
+		   Junction_type(next_junction) == SPLICE_JUNCTION) ||
+		  (Junction_type(junction) == SPLICE_JUNCTION &&
+		   (Junction_type(next_junction) == INS_JUNCTION || Junction_type(next_junction) == DEL_JUNCTION))))) {
+      debug2(printf("Endpoint %d + %d == %d without an enabled indel/splice boundary, so unacceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_head(Intlist_next(p))));
       return false;
     } else {
-      debug2(printf("Endpoint %d + %d < %d, so acceptable\n",
+      debug2(printf("Endpoint %d + %d <= %d, so acceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_head(Intlist_next(p))));
+      matchp = true;
     }
   }
 
-  return true;
+  debug2(printf("Acceptable: %d\n",matchp));
+  return matchp;
 }
 
 
@@ -1751,7 +1806,7 @@ Path_convert_simple (Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh
 		     bool plusp, bool first_read_p, int genestrand, int sensedir, int querylength,
 		     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		     Listpool_T listpool, Pathpool_T pathpool, Method_T method) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
@@ -1761,6 +1816,8 @@ Path_convert_simple (Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh
 #ifdef CHECK_ASSERTIONS
   int prev_endpoint;
 #endif
+
+  Path_final_score_clear(new);
 
   assert(sensedir == SENSE_FORWARD || sensedir == SENSE_ANTI);
 
@@ -1776,8 +1833,12 @@ Path_convert_simple (Chrnum_T chrnum, Univcoord_T chroffset, Univcoord_T chrhigh
 
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
-  new->found_score = querylength;
-  new->score_within_trims = querylength;
+  new->found_score = Intlist_sum(nmismatches) + Intlist_head(endpoints) + (querylength - Intlist_last_value(endpoints)); /* was querylength */
+  new->end_score = Intlist_last_value(endpoints);
+  if (Intlist_head(endpoints) > new->end_score) {
+    new->end_score = Intlist_head(endpoints);
+  }
+  new->score_within_trims = Intlist_sum(nmismatches); /* was querylength */
   new->genomic_diff = (char *) NULL;
   if (evalp == false) {
     new->nmatches = new->ref_nmatches = Intlist_last_value(endpoints) - Intlist_head(endpoints) - Intlist_sum(nmismatches) - Junction_total_ninserts(junctions);
@@ -1903,12 +1964,14 @@ Path_create (Univcoord_T main_univdiagonal,
 	     Altsplice_T qstart_alts, Altsplice_T qend_alts,
 	     Compress_T query_compress_fwd, Compress_T query_compress_rev,
 	     Pathpool_T pathpool, Vectorpool_T vectorpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
+
+  Path_final_score_clear(new);
   Intlist_T q;
 #ifdef CHECK_ASSERTIONS
   int prev_endpoint;
@@ -1928,8 +1991,12 @@ Path_create (Univcoord_T main_univdiagonal,
   new->ref_nmatches = -1;
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
-  new->found_score = querylength;
-  new->score_within_trims = querylength;
+  new->found_score = Intlist_sum(nmismatches) + Intlist_head(endpoints) + (querylength - Intlist_last_value(endpoints)); /* was querylength */
+  new->end_score = Intlist_last_value(endpoints);
+  if (Intlist_head(endpoints) > new->end_score) {
+    new->end_score = Intlist_head(endpoints);
+  }
+  new->score_within_trims = Intlist_sum(nmismatches); /* was querylength */
   new->genomic_diff = (char *) NULL;
 
   new->plusp = plusp;
@@ -2030,7 +2097,7 @@ T
 Path_copy (T old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	   Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool,
 	   Transcriptpool_T transcriptpool, Hitlistpool_T hitlistpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
@@ -2052,7 +2119,11 @@ Path_copy (T old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpo
   new->junction_splice_prob = old->junction_splice_prob;
   new->total_splice_prob = old->total_splice_prob;
   new->found_score = old->found_score;
+  new->end_score = old->end_score;
   new->score_within_trims = old->score_within_trims;
+  new->final_score_p = old->final_score_p;
+  new->final_read_score = old->final_read_score;
+  new->final_pair_score = old->final_pair_score;
 
   if (old->genomic_diff == NULL) {
     new->genomic_diff = (char *) NULL;
@@ -2158,6 +2229,27 @@ Path_copy (T old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpo
   return new;
 }
 
+/* Copies only the initialized graph and summary fields produced by the path
+   solver.  Fusion summary fields are live only when a fusion junction exists. */
+T
+Path_copy_solver_result (T old, Intlistpool_T intlistpool,
+			 Univcoordlistpool_T univcoordlistpool,
+			 Listpool_T listpool, Pathpool_T pathpool,
+			 Vectorpool_T vectorpool, Transcriptpool_T transcriptpool,
+			 Hitlistpool_T hitlistpool) {
+  T new = Path_copy(old,intlistpool,univcoordlistpool,listpool,pathpool,
+		    vectorpool,transcriptpool,hitlistpool);
+
+  if (old->fusion_querystart_junction != NULL ||
+      old->fusion_queryend_junction != NULL) {
+    new->fusion_splicep = old->fusion_splicep;
+    new->fusion_splicetype = old->fusion_splicetype;
+    new->fusion_ambig_prob = old->fusion_ambig_prob;
+  }
+
+  return new;
+}
+
 
 #if 0
 List_T
@@ -2181,12 +2273,14 @@ T
 Path_copy_5 (T old, bool splice5p, Splicetype_T splicetype5, double ambig_prob_5,
 	     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
+
+  Path_final_score_clear(new);
   
   assert(old->sensedir == SENSE_FORWARD || old->sensedir == SENSE_ANTI);
 
@@ -2204,6 +2298,7 @@ Path_copy_5 (T old, bool splice5p, Splicetype_T splicetype5, double ambig_prob_5
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = old->querylength;
+  new->end_score = old->querylength;
   new->score_within_trims = old->querylength;
 
   if (old->genomic_diff == NULL) {
@@ -2276,12 +2371,14 @@ T
 Path_copy_3 (T old,  bool splice3p, Splicetype_T splicetype3, double ambig_prob_3,
 	     Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	     Listpool_T listpool, Pathpool_T pathpool, Vectorpool_T vectorpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
+
+  Path_final_score_clear(new);
   
   assert(old->sensedir == SENSE_FORWARD || old->sensedir == SENSE_ANTI);
 
@@ -2299,6 +2396,7 @@ Path_copy_3 (T old,  bool splice3p, Splicetype_T splicetype3, double ambig_prob_
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = old->querylength;
+  new->end_score = old->querylength;
   new->score_within_trims = old->querylength;
 
   if (old->genomic_diff == NULL) {
@@ -2412,7 +2510,7 @@ void
 Path_free (T *old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 	   Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool,
 	   Hitlistpool_T hitlistpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
@@ -2539,7 +2637,7 @@ Path_array_gc (T *paths, int n, Intlistpool_T intlistpool, Univcoordlistpool_T u
 void
 Path_free_parent (T *old, Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool,
 		  Listpool_T listpool, Pathpool_T pathpool, Transcriptpool_T transcriptpool) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
@@ -2689,6 +2787,8 @@ Path_new_from_ends (Univcoord_T univdiagonal5, int qstart5, int qend5,
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
 
+  Path_final_score_clear(new);
+
   assert(sensedir == SENSE_FORWARD || sensedir == SENSE_ANTI);
 
   new->query_compress_fwd = query_compress_fwd;
@@ -2699,6 +2799,7 @@ Path_new_from_ends (Univcoord_T univdiagonal5, int qstart5, int qend5,
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = querylength;
+  new->end_score = querylength;
   new->score_within_trims = querylength;
   new->genomic_diff = (char *) NULL;
 
@@ -2807,7 +2908,7 @@ Path_new_exact (Univcoord_T univdiagonal, int qstart, int qend, int nmismatches,
 		Compress_T query_compress_fwd, Compress_T query_compress_rev,
 		Intlistpool_T intlistpool, Univcoordlistpool_T univcoordlistpool, Pathpool_T pathpool,
 		Method_T method) {
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_PATH_CORE)
   static int call_i = 0;
 #endif
 
@@ -2815,6 +2916,8 @@ Path_new_exact (Univcoord_T univdiagonal, int qstart, int qend, int nmismatches,
 			    pathpool_trace(__FILE__,__LINE__));
 
   assert(found_score >= 0);
+
+  Path_final_score_clear(new);
 
   new->query_compress_fwd = query_compress_fwd;
   new->query_compress_rev = query_compress_rev;
@@ -2824,6 +2927,7 @@ Path_new_exact (Univcoord_T univdiagonal, int qstart, int qend, int nmismatches,
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = found_score;
+  new->end_score = 0;
   new->score_within_trims = nmismatches;
   new->genomic_diff = (char *) NULL;
 
@@ -2948,6 +3052,8 @@ Path_new_for_qstart_extension (Univcoord_T univdiagonal, int qstart, int qend, i
 			       Pathpool_T pathpool) {
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
+
+  Path_final_score_clear(new);
   
   assert(sensedir == SENSE_FORWARD || sensedir == SENSE_ANTI);
 
@@ -2959,6 +3065,7 @@ Path_new_for_qstart_extension (Univcoord_T univdiagonal, int qstart, int qend, i
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = querylength;
+  new->end_score = querylength;
   new->score_within_trims = querylength;
   new->genomic_diff = (char *) NULL;
 
@@ -3051,6 +3158,8 @@ Path_new_for_qend_extension (Univcoord_T univdiagonal, int qstart, int qend, int
   T new = Pathpool_new_path(pathpool
 			    pathpool_trace(__FILE__,__LINE__));
 
+  Path_final_score_clear(new);
+
   assert(sensedir == SENSE_FORWARD || sensedir == SENSE_ANTI);
 
   new->query_compress_fwd = query_compress_fwd;
@@ -3061,6 +3170,7 @@ Path_new_for_qend_extension (Univcoord_T univdiagonal, int qstart, int qend, int
   new->junction_splice_prob = 0.0;
   new->total_splice_prob = 0.0;
   new->found_score = querylength;
+  new->end_score = querylength;
   new->score_within_trims = querylength;
   new->genomic_diff = (char *) NULL;
 
@@ -3208,8 +3318,8 @@ Path_print (T this) {
 
     if (this->nmatches >= 0) {
       /* Info added for new version */
-      printf("found_score:%d, within_trims:%d; nmatches:%d splice_prob:%f->%f  ",
-	     this->found_score,this->score_within_trims,this->nmatches,
+      printf("found_score:%d, end_score:%d, within_trims:%d; nmatches:%d splice_prob:%f->%f  ",
+	     this->found_score,this->end_score,this->score_within_trims,this->nmatches,
 	     this->junction_splice_prob,this->total_splice_prob);
     }
 
@@ -3358,5 +3468,3 @@ Path_setup (bool *circularp_in, bool *altlocp_in) {
   altlocp = altlocp_in;
   return;
 }
-
-

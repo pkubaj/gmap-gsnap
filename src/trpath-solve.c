@@ -6,6 +6,7 @@
 #endif
 
 #include "trpath-solve.h"
+#include "debug_groups.h"
 #include "trpath-eval.h"
 #include "path-eval.h"
 
@@ -14,7 +15,9 @@
 #include "spliceends.h"
 #include "genomebits_indel.h"
 #include "genomebits_count.h"
+#include "genomebits_mismatches.h"
 #include "genomebits_trim.h"
+#include "junction.h"
 
 static Transcriptome_T transcriptome;
 static Genomebits_T transcriptomebits;
@@ -23,9 +26,26 @@ static EF64_T transcript_ef64;
 static int max_insertionlen;
 static int max_deletionlen;
 static int index1part_tr;
+static int min_support_indel = 6;
+static int indel_support_mismatch_penalty = 3;
+static bool paired_transcript_completion_p = false;
+static bool tr_score_ranker_p = true;
+static double tr_score_match_reward = 1.0;
+static double tr_score_mismatch_penalty = 2.0;
+static double tr_score_indel_open_penalty = 2.0;
+static double tr_score_indel_extend_penalty = 2.0;
+static double tr_score_softclip_penalty = 2.0;
+static double tr_score_transcript_discordance_penalty = 0.0;
 
+#define TR_COMPLETE_MAX_SOFTCLIP 20
+#define TR_COMPLETE_MIN_ALIGNED 50
+#define TR_COMPLETE_MAX_INDEL 3
+#define TR_COMPLETE_MIN_INDEL_SUPPORT 12
 
-#define MIN_SUPPORT_INDEL 6	/* Also defined in kmer-search.c */
+static inline bool
+sufficient_indel_support_p (int support, int nmismatches) {
+  return support - indel_support_mismatch_penalty*nmismatches >= min_support_indel;
+}
 
 /* Turns out to worsen results */
 /* #define END_SUPPORT 18		-- Require transcript alignments to go this far to ends */
@@ -36,20 +56,20 @@ static int index1part_tr;
 #endif
 
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_TRPATH)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
 /* endpoints_acceptable_p */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_TRPATH)
 #define debug2(x) x
 #else
 #define debug2(x)
 #endif
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
 #define debug13(x) x
 #else
 #define debug13(x)
@@ -60,7 +80,7 @@ static int index1part_tr;
 
 
 T
-Trpath_solve_from_trdiagonal (int *found_score, bool *partialp, int sufficient_score,
+Trpath_solve_from_trdiagonal (int *found_score, int *end_score, bool *partialp, int sufficient_score,
 			      Trcoord_T trdiagonal, int tstart, int tend,
 			      
 			      Trnum_T trnum, Trcoord_T troffset, Trcoord_T trhigh,
@@ -115,6 +135,16 @@ Trpath_solve_from_trdiagonal (int *found_score, bool *partialp, int sufficient_s
       if (score < *found_score) {
 	*found_score = score;
       }
+
+      /* Compute end_score */
+      score = querylength - trimmed_tend;
+      if (trimmed_tstart > score) {
+	score = trimmed_tstart;
+      }
+      if (score < *end_score) {
+	*end_score = score;
+      }
+	
       
       /* Makes no difference if we use index1part_tr or 1 */
       if (trimmed_tstart > index1part_tr) {
@@ -133,7 +163,9 @@ Trpath_solve_from_trdiagonal (int *found_score, bool *partialp, int sufficient_s
     }
 
   } else {
-    return Trpath_solve_from_diagonals(&(*found_score),&(*partialp),sufficient_score,/*middle_trdiagonal*/trdiagonal,
+    return Trpath_solve_from_diagonals(&(*found_score),&(*end_score),&(*partialp),
+				       sufficient_score,/*middle_trdiagonal*/trdiagonal,
+
 				       trimmed_tstart,trimmed_tend,nmismatches,
 				       /*qstart_trdiag*/NULL,/*qend_trdiag*/NULL,
 				       tplusp,querylength,query_compress_tr,
@@ -158,7 +190,7 @@ attach_unknown_tstart (T trpath, Trcoord_T low_trdiagonal, int low_tstart,
   int nindels, indel_pos;
   int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j;
   int nmismatches, ref_nmismatches;
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
   int tstart;
 #endif
   
@@ -171,7 +203,7 @@ attach_unknown_tstart (T trpath, Trcoord_T low_trdiagonal, int low_tstart,
   /* Assume that left+qend gives a coordinate within genome */
   tend = Intlist_second_value(trpath->endpoints) /*+ ninserts*/;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
   if (trpath->junctions == NULL) {
     /* ninserts = 0; */
   } else {
@@ -228,9 +260,9 @@ attach_unknown_tstart (T trpath, Trcoord_T low_trdiagonal, int low_tstart,
 #if 0
       supporti = indel_pos - low_tstart;
       supportj = qend - (indel_pos + nindels);
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       }
 #endif
@@ -273,9 +305,9 @@ attach_unknown_tstart (T trpath, Trcoord_T low_trdiagonal, int low_tstart,
 #if 0
       supporti = indel_pos - low_tstart;
       supportj = qend - indel_pos;
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       }
 #endif
@@ -320,7 +352,7 @@ attach_unknown_tend (T trpath, Trcoord_T high_trdiagonal, int high_tend,
   int nindels, indel_pos;
   int nmismatches_i, nmismatches_j, ref_nmismatches_i, ref_nmismatches_j;
   int nmismatches, ref_nmismatches;
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
   int tend;
 #endif
 
@@ -343,7 +375,7 @@ attach_unknown_tend (T trpath, Trcoord_T high_trdiagonal, int high_tend,
   /* Assume that left+qstart gives a coordinate within genome */
   tstart = Intlist_second_value(trpath->endpoints) + ninserts;
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
   tend = Intlist_head(trpath->endpoints) /*+ ninserts*/;
   printf("Entering attach_unknown_tend with trdiagonal %u %d..%d and high_trdiagonal %u, high_tend %d (diff %d)\n",
 	 trdiagonal - trpath->troffset,tstart,tend,high_trdiagonal - trpath->troffset,
@@ -396,9 +428,9 @@ attach_unknown_tend (T trpath, Trcoord_T high_trdiagonal, int high_tend,
 #if 0
       supporti = indel_pos - tstart;
       supportj = high_qend - (indel_pos + nindels);
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       }
 #endif
@@ -441,9 +473,9 @@ attach_unknown_tend (T trpath, Trcoord_T high_trdiagonal, int high_tend,
 #if 0
       supporti = indel_pos - tstart;
       supportj = high_qend - indel_pos;
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       }
 #endif
@@ -479,12 +511,18 @@ attach_unknown_tend (T trpath, Trcoord_T high_trdiagonal, int high_tend,
 /* The same as Path_endpoints_acceptable_p */
 static bool
 Trpath_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
+  bool matchp = false;
   Intlist_T p;
   List_T q;
   Junction_T junction;
   int last_endpoint;
 
   debug2(printf("Evaluating endpoints for acceptability: %s\n",Intlist_to_string(endpoints)));
+
+  if (Intlist_second_value(endpoints) > Intlist_head(endpoints)) {
+    /* Check first segment */
+    matchp = true;
+  }
 
   /* last_endpoint = 0; */
   /* Skip first endpoint */
@@ -498,10 +536,12 @@ Trpath_endpoints_acceptable_p (Intlist_T endpoints, List_T junctions) {
     } else {
       debug2(printf("Endpoint %d + %d < %d, so acceptable\n",
 		    last_endpoint,Junction_ninserts(junction),Intlist_head(Intlist_next(p))));
+      matchp = true;
     }
   }
 
-  return true;
+  debug2(printf("Acceptable: %d\n",matchp));
+  return matchp;
 }
 
 static T
@@ -522,7 +562,7 @@ combine_leftright_trpaths (T tstart_trpath, T tend_trpath, Compress_T query_comp
   bool score_knownp = true;
 
 
-#ifdef DEBUG13
+#if defined(DEBUG13) || defined(DEBUG_TRPATH)
   printf("\n");
   printf("*** Entered combine_leftright_trpaths\n");
 #endif
@@ -709,9 +749,781 @@ combine_leftright_trpaths (T tstart_trpath, T tend_trpath, Compress_T query_comp
   return trpath;
 }
 
+static bool
+tr_segment_in_bounds_p (Trcoord_T trdiagonal, int qstart, int qend,
+			int querylength, Trcoord_T troffset, Trcoord_T trhigh) {
+  return (trdiagonal >= troffset + querylength - qstart &&
+	  trdiagonal <= trhigh + querylength - qend) ? true : false;
+}
+
+static bool
+tr_completion_better_p (int weighted_score, int nmismatches, int nindels,
+			int qstart, int qend,
+			int best_weighted_score, int best_nmismatches, int best_nindels,
+			int best_qstart, int best_qend) {
+  int ndiffs = nmismatches + nindels;
+  int best_ndiffs = best_nmismatches + best_nindels;
+  int coverage = qend - qstart;
+  int best_coverage = best_qend - best_qstart;
+
+  if (weighted_score < best_weighted_score) {
+    return true;
+  } else if (weighted_score > best_weighted_score) {
+    return false;
+  } else if (ndiffs < best_ndiffs) {
+    return true;
+  } else if (ndiffs > best_ndiffs) {
+    return false;
+  } else if (coverage > best_coverage) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static bool
+trpath_score_better_p (T candidate, T best, int querylength, Compress_T query_compress_tr) {
+  Trpath_score_T candidate_score, best_score;
+
+  if (tr_score_ranker_p == true) {
+    Trpath_score_read(&candidate_score,candidate,querylength,query_compress_tr,
+		      tr_score_match_reward,tr_score_mismatch_penalty,
+		      tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		      tr_score_softclip_penalty);
+    Trpath_score_read(&best_score,best,querylength,query_compress_tr,
+		      tr_score_match_reward,tr_score_mismatch_penalty,
+		      tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		      tr_score_softclip_penalty);
+
+    if (candidate_score.score > best_score.score) {
+      return true;
+    } else if (candidate_score.score < best_score.score) {
+      return false;
+    } else {
+      /* Fall through to the legacy score tie-breakers. */
+    }
+  }
+
+  if (candidate->found_score < best->found_score) {
+    return true;
+  } else if (candidate->found_score > best->found_score) {
+    return false;
+  } else if (candidate->end_score < best->end_score) {
+    return true;
+  } else if (candidate->end_score > best->end_score) {
+    return false;
+  } else if (Intlist_head(candidate->endpoints) < Intlist_head(best->endpoints)) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+static void
+trpath_score_extend_qstart (T trpath, int querylength, Compress_T query_compress_tr,
+			    int *mismatch_positions_alloc) {
+  Trpath_score_T current_score, extended_score;
+  Trcoord_T trdiagonal;
+  int old_endpoint, old_nmismatches, pos3, nmismatches;
+
+  if (tr_score_ranker_p == false ||
+      (old_endpoint = Intlist_head(trpath->endpoints)) == 0) {
+    return;
+  }
+
+  trdiagonal = Uintlist_head(trpath->trdiagonals);
+  pos3 = Intlist_second_value(trpath->endpoints);
+  if (pos3 <= 0 ||
+      tr_segment_in_bounds_p(trdiagonal,/*qstart*/0,pos3,querylength,
+			     trpath->troffset,trpath->trhigh) == false) {
+    return;
+  }
+
+  Trpath_score_read(&current_score,trpath,querylength,query_compress_tr,
+		    tr_score_match_reward,tr_score_mismatch_penalty,
+		    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		    tr_score_softclip_penalty);
+  old_nmismatches = Intlist_head(trpath->nmismatches);
+
+  nmismatches =
+    Genomebits_mismatches_fromleft(mismatch_positions_alloc,/*max_mismatches*/querylength,
+				   transcriptomebits,/*alt*/NULL,query_compress_tr,
+				   (Univcoord_T) trdiagonal,querylength,
+				   /*pos5*/0,pos3,trpath->tplusp,/*genestrand*/0);
+  Intlist_head_set(trpath->endpoints,0);
+  Intlist_head_set(trpath->nmismatches,nmismatches);
+  Trpath_score_read(&extended_score,trpath,querylength,query_compress_tr,
+		    tr_score_match_reward,tr_score_mismatch_penalty,
+		    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		    tr_score_softclip_penalty);
+
+  if (extended_score.score > current_score.score) {
+    debug13(printf("Score-based TR completion qstart extension kept: %d=>0, score %.3f=>%.3f\n",
+		   old_endpoint,current_score.score,extended_score.score));
+  } else {
+    debug13(printf("Score-based TR completion qstart extension rejected: %d=>0, score %.3f=>%.3f\n",
+		   old_endpoint,current_score.score,extended_score.score));
+    Intlist_head_set(trpath->endpoints,old_endpoint);
+    Intlist_head_set(trpath->nmismatches,old_nmismatches);
+    Trpath_score_read(&current_score,trpath,querylength,query_compress_tr,
+		      tr_score_match_reward,tr_score_mismatch_penalty,
+		      tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		      tr_score_softclip_penalty);
+  }
+
+  return;
+}
+
+static int
+trpath_last_segment_qstart (T trpath) {
+  List_T j;
+  Junction_T junction;
+
+  for (j = trpath->junctions; j != NULL; j = List_next(j)) {
+    if (List_next(j) == NULL) {
+      if ((junction = (Junction_T) List_head(j)) == NULL) {
+	return Intlist_penultimate_value(trpath->endpoints);
+      } else {
+	return Intlist_penultimate_value(trpath->endpoints) + Junction_ninserts(junction);
+      }
+    }
+  }
+
+  return Intlist_penultimate_value(trpath->endpoints);
+}
+
+static void
+trpath_score_extend_qend (T trpath, int querylength, Compress_T query_compress_tr,
+			  int *mismatch_positions_alloc) {
+  Trpath_score_T current_score, extended_score;
+  Trcoord_T trdiagonal;
+  Intlist_T last_nmismatches;
+  int old_endpoint, old_nmismatches, pos5, nmismatches;
+
+  if (tr_score_ranker_p == false ||
+      (old_endpoint = Intlist_last_value(trpath->endpoints)) == querylength) {
+    return;
+  }
+
+  trdiagonal = Uintlist_last_value(trpath->trdiagonals);
+  pos5 = trpath_last_segment_qstart(trpath);
+  if (pos5 >= querylength ||
+      tr_segment_in_bounds_p(trdiagonal,pos5,querylength,querylength,
+			     trpath->troffset,trpath->trhigh) == false) {
+    return;
+  }
+
+  Trpath_score_read(&current_score,trpath,querylength,query_compress_tr,
+		    tr_score_match_reward,tr_score_mismatch_penalty,
+		    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		    tr_score_softclip_penalty);
+  last_nmismatches = Intlist_last_elt(trpath->nmismatches);
+  old_nmismatches = Intlist_head(last_nmismatches);
+
+  nmismatches =
+    Genomebits_mismatches_fromleft(mismatch_positions_alloc,/*max_mismatches*/querylength,
+				   transcriptomebits,/*alt*/NULL,query_compress_tr,
+				   (Univcoord_T) trdiagonal,querylength,
+				   pos5,querylength,trpath->tplusp,/*genestrand*/0);
+  Intlist_last_value_set(trpath->endpoints,querylength);
+  Intlist_head_set(last_nmismatches,nmismatches);
+  Trpath_score_read(&extended_score,trpath,querylength,query_compress_tr,
+		    tr_score_match_reward,tr_score_mismatch_penalty,
+		    tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		    tr_score_softclip_penalty);
+
+  if (extended_score.score > current_score.score) {
+    debug13(printf("Score-based TR completion qend extension kept: %d=>%d, score %.3f=>%.3f\n",
+		   old_endpoint,querylength,current_score.score,extended_score.score));
+  } else {
+    debug13(printf("Score-based TR completion qend extension rejected: %d=>%d, score %.3f=>%.3f\n",
+		   old_endpoint,querylength,current_score.score,extended_score.score));
+    Intlist_last_value_set(trpath->endpoints,old_endpoint);
+    Intlist_head_set(last_nmismatches,old_nmismatches);
+    Trpath_score_read(&current_score,trpath,querylength,query_compress_tr,
+		      tr_score_match_reward,tr_score_mismatch_penalty,
+		      tr_score_indel_open_penalty,tr_score_indel_extend_penalty,
+		      tr_score_softclip_penalty);
+  }
+
+  return;
+}
+
+static T
+try_adjacent_tstart_indels (T base_path, Trcoord_T middle_trdiagonal,
+			    int middle_trdiagonal_qstart, int middle_trdiagonal_qend,
+			    int middle_nmismatches,
+			    Trnum_T trnum, Trcoord_T troffset, Trcoord_T trhigh,
+			    Chrnum_T chrnum, int transcript_genestrand,
+			    int querylength, Indelinfo_T indelinfo, Compress_T query_compress_tr,
+			    bool want_lowest_coordinate_tr_p,
+			    Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+			    Listpool_T listpool, Trpathpool_T trpathpool, Pathpool_T pathpool,
+			    Method_T method) {
+  T best_path, candidate;
+  Trcoord_T low_trdiagonal;
+  int adj;
+  int found_score_ignore, end_score_ignore;
+
+  found_score_ignore = querylength;
+  end_score_ignore = querylength;
+  Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,base_path,querylength,query_compress_tr);
+
+  best_path = base_path;
+
+  for (adj = 1; adj <= max_deletionlen; adj++) {
+    if (middle_trdiagonal < (Trcoord_T) adj) {
+      /* Skip */
+    } else {
+      low_trdiagonal = middle_trdiagonal - (Trcoord_T) adj;
+      if (tr_segment_in_bounds_p(low_trdiagonal,/*qstart*/0,/*qend*/middle_trdiagonal_qend,
+				 querylength,troffset,trhigh) == true) {
+	candidate = Trpath_new_for_tstart_extension(middle_trdiagonal,middle_trdiagonal_qstart,
+						    middle_trdiagonal_qend,middle_nmismatches,
+						    base_path->tplusp,trnum,troffset,trhigh,
+						    chrnum,transcript_genestrand,
+						    intlistpool,uintlistpool,trpathpool,method);
+	attach_unknown_tstart(candidate,low_trdiagonal,/*low_tstart*/0,
+			      trhigh,querylength,indelinfo,query_compress_tr,
+			      want_lowest_coordinate_tr_p,
+			      intlistpool,uintlistpool,listpool,pathpool);
+	if (Intlist_head(candidate->endpoints) < Intlist_head(base_path->endpoints)) {
+	  found_score_ignore = querylength;
+	  end_score_ignore = querylength;
+	  Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,candidate,querylength,query_compress_tr);
+	  if (trpath_score_better_p(candidate,best_path,querylength,query_compress_tr) == true) {
+	    if (best_path != base_path) {
+	      Trpath_free(&best_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	    }
+	    best_path = candidate;
+	  } else {
+	    Trpath_free(&candidate,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	  }
+	} else {
+	  Trpath_free(&candidate,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	}
+      }
+    }
+  }
+
+  for (adj = 1; adj <= max_insertionlen; adj++) {
+    low_trdiagonal = middle_trdiagonal + (Trcoord_T) adj;
+    if (tr_segment_in_bounds_p(low_trdiagonal,/*qstart*/0,/*qend*/middle_trdiagonal_qend,
+			       querylength,troffset,trhigh) == true) {
+      candidate = Trpath_new_for_tstart_extension(middle_trdiagonal,middle_trdiagonal_qstart,
+						  middle_trdiagonal_qend,middle_nmismatches,
+						  base_path->tplusp,trnum,troffset,trhigh,
+						  chrnum,transcript_genestrand,
+						  intlistpool,uintlistpool,trpathpool,method);
+      attach_unknown_tstart(candidate,low_trdiagonal,/*low_tstart*/0,
+			    trhigh,querylength,indelinfo,query_compress_tr,
+			    want_lowest_coordinate_tr_p,
+			    intlistpool,uintlistpool,listpool,pathpool);
+      if (Intlist_head(candidate->endpoints) < Intlist_head(base_path->endpoints)) {
+	found_score_ignore = querylength;
+	end_score_ignore = querylength;
+	Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,candidate,querylength,query_compress_tr);
+	if (trpath_score_better_p(candidate,best_path,querylength,query_compress_tr) == true) {
+	  if (best_path != base_path) {
+	    Trpath_free(&best_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	  }
+	  best_path = candidate;
+	} else {
+	  Trpath_free(&candidate,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	}
+      } else {
+	Trpath_free(&candidate,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+      }
+    }
+  }
+
+  if (best_path == base_path) {
+    return (T) NULL;
+  } else {
+    return best_path;
+  }
+}
 
 T
-Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_score, Trcoord_T middle_trdiagonal,
+Trpath_solve_tstart_adjacent_indels (T base_path, int querylength,
+				     Compress_T query_compress_tr, Indelinfo_T indelinfo,
+				     Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+				     Listpool_T listpool, Trpathpool_T trpathpool,
+				     Pathpool_T pathpool) {
+  bool want_lowest_coordinate_tr_p;
+
+  if (base_path->method != TR_EXT) {
+    return (T) NULL;
+  } else if (Uintlist_length(base_path->trdiagonals) != 1) {
+    return (T) NULL;
+  } else if (Intlist_head(base_path->endpoints) <= 0) {
+    return (T) NULL;
+  } else if (base_path->transcript_genestrand > 0) {
+    want_lowest_coordinate_tr_p = true;
+  } else {
+    want_lowest_coordinate_tr_p = false;
+  }
+
+  return try_adjacent_tstart_indels(base_path,Uintlist_head(base_path->trdiagonals),
+				    Intlist_head(base_path->endpoints),
+				    Intlist_second_value(base_path->endpoints),
+				    Intlist_head(base_path->nmismatches),
+				    base_path->trnum,base_path->troffset,base_path->trhigh,
+				    base_path->chrnum,base_path->transcript_genestrand,
+				    querylength,indelinfo,query_compress_tr,
+				    want_lowest_coordinate_tr_p,
+				    intlistpool,uintlistpool,listpool,trpathpool,pathpool,
+				    base_path->method);
+}
+
+typedef struct Tr_completion_best_T {
+  bool validp;
+  int nevents;
+  int qstart;
+  int qend;
+  int nmismatches;
+  int nindels;
+  int total_ninserts;
+  int weighted_score;
+  int endpoints[TR_COMPLETE_MAX_INDEL];
+  int nmismatches_list[TR_COMPLETE_MAX_INDEL + 1];
+  int junction_types[TR_COMPLETE_MAX_INDEL];
+  int junction_nindels[TR_COMPLETE_MAX_INDEL];
+  Trcoord_T trdiagonals[TR_COMPLETE_MAX_INDEL + 1];
+} Tr_completion_best_T;
+
+typedef struct Tr_completion_cache_T {
+  Trcoord_T diagonal_low;
+  Trcoord_T diagonal_high;
+  int ndiagonals;
+  int querylength;
+  int *prefix_counts;
+  bool *filledp;
+  int *mismatch_positions;
+  Compress_T query_compress_tr;
+  bool tplusp;
+} Tr_completion_cache_T;
+
+static bool
+trpath_has_indel_junction_p (T trpath) {
+  List_T p;
+  Junction_T junction;
+  Junctiontype_T type;
+
+  for (p = trpath->junctions; p != NULL; p = List_next(p)) {
+    if ((junction = (Junction_T) List_head(p)) != JUNCTION_UNSOLVED) {
+      type = Junction_type(junction);
+      if (type == INS_JUNCTION || type == DEL_JUNCTION) {
+	return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+static int
+tr_completion_count_mismatches (Tr_completion_cache_T *cache, Trcoord_T trdiagonal,
+				int pos5, int pos3) {
+  int ref_nmismatches, nmismatches;
+  int diag_index, offset, pos, count = 0, mismatchi = 0;
+  int *prefix;
+
+  if (pos5 >= pos3) {
+    return 0;
+  } else if (trdiagonal < cache->diagonal_low || trdiagonal > cache->diagonal_high) {
+    return Genomebits_count_mismatches_substring(&ref_nmismatches,transcriptomebits,/*alt*/NULL,
+						 cache->query_compress_tr,trdiagonal,cache->querylength,
+						 pos5,pos3,cache->tplusp,/*genestrand*/0);
+  }
+
+  diag_index = (int) (trdiagonal - cache->diagonal_low);
+  offset = diag_index * (cache->querylength + 1);
+  prefix = &(cache->prefix_counts[offset]);
+
+  if (cache->filledp[diag_index] == false) {
+    nmismatches =
+      Genomebits_mismatches_fromleft(cache->mismatch_positions,cache->querylength,
+				     transcriptomebits,/*alt*/NULL,
+				     cache->query_compress_tr,trdiagonal,cache->querylength,
+				     /*pos5*/0,/*pos3*/cache->querylength,
+				     cache->tplusp,/*genestrand*/0);
+
+    prefix[0] = 0;
+    for (pos = 0; pos < cache->querylength; pos++) {
+      while (mismatchi < nmismatches && cache->mismatch_positions[mismatchi] == pos) {
+	count++;
+	mismatchi++;
+      }
+      prefix[pos + 1] = count;
+    }
+    cache->filledp[diag_index] = true;
+  }
+
+  return prefix[pos3] - prefix[pos5];
+}
+
+static void
+tr_completion_record (Tr_completion_best_T *best,
+		      int *candidate_endpoints, int *candidate_nmismatches,
+		      int *candidate_junction_types, int *candidate_junction_nindels,
+		      Trcoord_T *candidate_trdiagonals,
+		      int nevents, int qstart, int qend, int softclip,
+		      int nmismatches, int nindels, int total_ninserts,
+		      bool want_lowest_coordinate_tr_p) {
+  int i, weighted_score;
+  bool betterp;
+
+  weighted_score = 2*(nmismatches + nindels) + softclip;
+  if (best->validp == false) {
+    betterp = true;
+  } else if (tr_completion_better_p(weighted_score,nmismatches,nindels,qstart,qend,
+				    best->weighted_score,best->nmismatches,best->nindels,
+				    best->qstart,best->qend) == true) {
+    betterp = true;
+  } else if (weighted_score == best->weighted_score &&
+	     nmismatches == best->nmismatches &&
+	     nindels == best->nindels &&
+	     qend - qstart == best->qend - best->qstart &&
+	     nevents == best->nevents) {
+    betterp = false;
+    for (i = 0; i < nevents && betterp == false; i++) {
+      if (candidate_junction_types[i] != best->junction_types[i] ||
+	  candidate_junction_nindels[i] != best->junction_nindels[i]) {
+	return;
+      } else if (want_lowest_coordinate_tr_p == true &&
+		 candidate_endpoints[i] < best->endpoints[i]) {
+	betterp = true;
+      } else if (want_lowest_coordinate_tr_p == true &&
+		 candidate_endpoints[i] > best->endpoints[i]) {
+	return;
+      } else if (want_lowest_coordinate_tr_p == false &&
+		 candidate_endpoints[i] > best->endpoints[i]) {
+	betterp = true;
+      } else if (want_lowest_coordinate_tr_p == false &&
+		 candidate_endpoints[i] < best->endpoints[i]) {
+	return;
+      }
+    }
+  } else {
+    betterp = false;
+  }
+
+  if (betterp == true) {
+    best->validp = true;
+    best->nevents = nevents;
+    best->qstart = qstart;
+    best->qend = qend;
+    best->nmismatches = nmismatches;
+    best->nindels = nindels;
+    best->total_ninserts = total_ninserts;
+    best->weighted_score = weighted_score;
+
+    for (i = 0; i < nevents; i++) {
+      best->endpoints[i] = candidate_endpoints[i];
+      best->junction_types[i] = candidate_junction_types[i];
+      best->junction_nindels[i] = candidate_junction_nindels[i];
+    }
+    for (i = 0; i <= nevents; i++) {
+      best->trdiagonals[i] = candidate_trdiagonals[i];
+      best->nmismatches_list[i] = candidate_nmismatches[i];
+    }
+  }
+
+  return;
+}
+
+static void
+tr_completion_search (Tr_completion_best_T *best,
+		      int *candidate_endpoints, int *candidate_nmismatches,
+		      int *candidate_junction_types, int *candidate_junction_nindels,
+		      Trcoord_T *candidate_trdiagonals,
+		      int nevents, int nmismatches_sofar, int nindels_sofar,
+		      int total_ninserts, int qstart, int qend, int softclip,
+		      Trcoord_T trdiagonal, int segment_qstart,
+		      Tr_completion_cache_T *cache, int querylength,
+		      Trcoord_T troffset, Trcoord_T trhigh,
+		      int max_ndiffs, int max_weighted_score, bool allow_multiple_events_p,
+		      bool want_lowest_coordinate_tr_p) {
+  Trcoord_T trdiagonal2;
+  int nindels, indel_pos, qstart2, lower_weighted_score;
+  int nmismatches;
+
+  candidate_trdiagonals[nevents] = trdiagonal;
+
+  lower_weighted_score = 2*(nmismatches_sofar + nindels_sofar) + softclip;
+  if (lower_weighted_score > max_weighted_score ||
+      (best->validp == true && lower_weighted_score > best->weighted_score) ||
+      nmismatches_sofar + nindels_sofar > max_ndiffs) {
+    return;
+  }
+
+  if (tr_segment_in_bounds_p(trdiagonal,segment_qstart,qend,querylength,
+			     troffset,trhigh) == true &&
+      (nevents == 0 || qend - segment_qstart >= TR_COMPLETE_MIN_INDEL_SUPPORT)) {
+    nmismatches = tr_completion_count_mismatches(cache,trdiagonal,segment_qstart,qend);
+    if (nmismatches_sofar + nmismatches + nindels_sofar <= max_ndiffs) {
+      candidate_nmismatches[nevents] = nmismatches;
+      tr_completion_record(best,candidate_endpoints,candidate_nmismatches,
+			   candidate_junction_types,candidate_junction_nindels,
+			   candidate_trdiagonals,nevents,qstart,qend,softclip,
+			   nmismatches_sofar + nmismatches,nindels_sofar,total_ninserts,
+			   want_lowest_coordinate_tr_p);
+    }
+  }
+
+  if (nindels_sofar >= TR_COMPLETE_MAX_INDEL ||
+      (allow_multiple_events_p == false && nevents > 0)) {
+    return;
+  }
+
+  for (nindels = 1; nindels <= TR_COMPLETE_MAX_INDEL - nindels_sofar; nindels++) {
+    /* Insertion in the read. */
+    if (trdiagonal >= (Trcoord_T) nindels) {
+      trdiagonal2 = trdiagonal - (Trcoord_T) nindels;
+      for (indel_pos = segment_qstart + TR_COMPLETE_MIN_INDEL_SUPPORT;
+	   indel_pos + nindels + TR_COMPLETE_MIN_INDEL_SUPPORT <= qend;
+	   indel_pos++) {
+	if (tr_segment_in_bounds_p(trdiagonal,segment_qstart,indel_pos,querylength,
+				   troffset,trhigh) == true) {
+	  nmismatches = tr_completion_count_mismatches(cache,trdiagonal,segment_qstart,indel_pos);
+	  if (nmismatches_sofar + nmismatches + nindels_sofar + nindels <= max_ndiffs) {
+	    candidate_nmismatches[nevents] = nmismatches;
+	    candidate_endpoints[nevents] = indel_pos;
+	    candidate_junction_types[nevents] = INS_JUNCTION;
+	    candidate_junction_nindels[nevents] = nindels;
+	    qstart2 = indel_pos + nindels;
+	    tr_completion_search(best,candidate_endpoints,candidate_nmismatches,
+				 candidate_junction_types,candidate_junction_nindels,
+				 candidate_trdiagonals,nevents + 1,
+				 nmismatches_sofar + nmismatches,nindels_sofar + nindels,
+				 total_ninserts + nindels,qstart,qend,softclip,
+				 trdiagonal2,qstart2,cache,querylength,
+				 troffset,trhigh,max_ndiffs,max_weighted_score,allow_multiple_events_p,
+				 want_lowest_coordinate_tr_p);
+	  }
+	}
+      }
+    }
+
+    /* Deletion in the transcript. */
+    trdiagonal2 = trdiagonal + (Trcoord_T) nindels;
+    for (indel_pos = segment_qstart + TR_COMPLETE_MIN_INDEL_SUPPORT;
+	 indel_pos + TR_COMPLETE_MIN_INDEL_SUPPORT <= qend;
+	 indel_pos++) {
+      if (tr_segment_in_bounds_p(trdiagonal,segment_qstart,indel_pos,querylength,
+				 troffset,trhigh) == true) {
+	nmismatches = tr_completion_count_mismatches(cache,trdiagonal,segment_qstart,indel_pos);
+	if (nmismatches_sofar + nmismatches + nindels_sofar + nindels <= max_ndiffs) {
+	  candidate_nmismatches[nevents] = nmismatches;
+	  candidate_endpoints[nevents] = indel_pos;
+	  candidate_junction_types[nevents] = DEL_JUNCTION;
+	  candidate_junction_nindels[nevents] = nindels;
+	  tr_completion_search(best,candidate_endpoints,candidate_nmismatches,
+			       candidate_junction_types,candidate_junction_nindels,
+			       candidate_trdiagonals,nevents + 1,
+			       nmismatches_sofar + nmismatches,nindels_sofar + nindels,
+			       total_ninserts,qstart,qend,softclip,
+			       trdiagonal2,indel_pos,cache,querylength,
+			       troffset,trhigh,max_ndiffs,max_weighted_score,allow_multiple_events_p,
+			       want_lowest_coordinate_tr_p);
+	}
+      }
+    }
+  }
+
+  return;
+}
+
+static T
+complete_bounded_indel_trpath (T partial_trpath, Trcoord_T middle_trdiagonal,
+			       Compress_T query_compress_tr, int querylength,
+			       Intlistpool_T intlistpool, Uintlistpool_T uintlistpool,
+			       Listpool_T listpool, Trpathpool_T trpathpool,
+			       Pathpool_T pathpool, Method_T method) {
+  T completed_trpath = (T) NULL;
+  Intlist_T endpoints, nmismatches_list;
+  Uintlist_T trdiagonals;
+  List_T junctions;
+  Junction_T junction;
+  Trcoord_T scan_low, scan_high, cache_low, cache_high, trdiagonal;
+  int min_aligned, max_weighted_score, max_ndiffs;
+  int qstart, qend, softclip;
+  int i;
+  Tr_completion_best_T best;
+  Tr_completion_cache_T cache;
+  int candidate_endpoints[TR_COMPLETE_MAX_INDEL];
+  int candidate_nmismatches[TR_COMPLETE_MAX_INDEL + 1];
+  int candidate_junction_types[TR_COMPLETE_MAX_INDEL];
+  int candidate_junction_nindels[TR_COMPLETE_MAX_INDEL];
+  Trcoord_T candidate_trdiagonals[TR_COMPLETE_MAX_INDEL + 1];
+  int found_score_ignore = querylength, end_score_ignore = querylength;
+  bool want_lowest_coordinate_tr_p, partial_has_indel_junction_p;
+
+  min_aligned = querylength - TR_COMPLETE_MAX_SOFTCLIP;
+  if (min_aligned < TR_COMPLETE_MIN_ALIGNED) {
+    min_aligned = TR_COMPLETE_MIN_ALIGNED;
+  }
+  max_weighted_score = 2*querylength/5;
+  if (max_weighted_score < 24) {
+    max_weighted_score = 24;
+  }
+  max_ndiffs = querylength/8;
+  if (max_ndiffs < 10) {
+    max_ndiffs = 10;
+  }
+
+  scan_low = (middle_trdiagonal > (Trcoord_T) TR_COMPLETE_MAX_INDEL) ?
+    middle_trdiagonal - (Trcoord_T) TR_COMPLETE_MAX_INDEL : 0;
+  scan_high = middle_trdiagonal + (Trcoord_T) TR_COMPLETE_MAX_INDEL;
+  cache_low = (scan_low > (Trcoord_T) TR_COMPLETE_MAX_INDEL) ?
+    scan_low - (Trcoord_T) TR_COMPLETE_MAX_INDEL : 0;
+  cache_high = scan_high + (Trcoord_T) TR_COMPLETE_MAX_INDEL;
+
+  cache.diagonal_low = cache_low;
+  cache.diagonal_high = cache_high;
+  cache.ndiagonals = (int) (cache_high - cache_low + 1);
+  cache.querylength = querylength;
+  cache.prefix_counts = (int *) MALLOCA(cache.ndiagonals*(querylength + 1)*sizeof(int));
+  cache.filledp = (bool *) CALLOCA(cache.ndiagonals,sizeof(bool));
+  cache.mismatch_positions = (int *) MALLOCA((querylength + MISMATCH_EXTRA + 2)*sizeof(int));
+  cache.query_compress_tr = query_compress_tr;
+  cache.tplusp = partial_trpath->tplusp;
+
+  want_lowest_coordinate_tr_p = partial_trpath->transcript_genestrand > 0 ? true : false;
+  partial_has_indel_junction_p = trpath_has_indel_junction_p(partial_trpath);
+
+  best.validp = false;
+  best.nevents = 0;
+  best.qstart = -1;
+  best.qend = -1;
+  best.nmismatches = querylength + 1;
+  best.nindels = 0;
+  best.total_ninserts = 0;
+  best.weighted_score = 2*querylength + 1;
+
+  for (qstart = 0; qstart <= TR_COMPLETE_MAX_SOFTCLIP; qstart++) {
+    for (qend = querylength; qend >= querylength - TR_COMPLETE_MAX_SOFTCLIP; qend--) {
+      softclip = qstart + querylength - qend;
+      if (qend - qstart < min_aligned || softclip > TR_COMPLETE_MAX_SOFTCLIP) {
+	continue;
+      }
+
+      for (trdiagonal = scan_low; trdiagonal <= scan_high; trdiagonal++) {
+	tr_completion_search(&best,candidate_endpoints,candidate_nmismatches,
+			     candidate_junction_types,candidate_junction_nindels,
+			     candidate_trdiagonals,
+			     /*nevents*/0,/*nmismatches_sofar*/0,/*nindels_sofar*/0,
+			     /*total_ninserts*/0,qstart,qend,softclip,trdiagonal,qstart,
+			     &cache,querylength,
+			     partial_trpath->troffset,partial_trpath->trhigh,
+			     max_ndiffs,max_weighted_score,/*allow_multiple_events_p*/false,
+			     want_lowest_coordinate_tr_p);
+      }
+    }
+  }
+
+  debug13(printf("Transcript completion first pass: validp %d, weighted_score %d, max_weighted_score %d, qstart %d, qend %d, partial ",
+		 best.validp,best.weighted_score,max_weighted_score,best.qstart,best.qend));
+  debug13(Trpath_print(partial_trpath));
+
+  if (partial_has_indel_junction_p == true &&
+      best.validp == true &&
+      (best.weighted_score > max_weighted_score || best.qstart > 0 || best.qend < querylength)) {
+    debug13(printf("Transcript completion entering multi-event pass\n"));
+    for (qstart = 0; qstart <= TR_COMPLETE_MAX_SOFTCLIP; qstart++) {
+      for (qend = querylength; qend >= querylength - TR_COMPLETE_MAX_SOFTCLIP; qend--) {
+	softclip = qstart + querylength - qend;
+	if (qend - qstart < min_aligned || softclip > TR_COMPLETE_MAX_SOFTCLIP) {
+	  continue;
+	}
+
+	for (trdiagonal = scan_low; trdiagonal <= scan_high; trdiagonal++) {
+	  tr_completion_search(&best,candidate_endpoints,candidate_nmismatches,
+			       candidate_junction_types,candidate_junction_nindels,
+			       candidate_trdiagonals,
+			       /*nevents*/0,/*nmismatches_sofar*/0,/*nindels_sofar*/0,
+			       /*total_ninserts*/0,qstart,qend,softclip,trdiagonal,qstart,
+			       &cache,querylength,
+			       partial_trpath->troffset,partial_trpath->trhigh,
+			       max_ndiffs,max_weighted_score,/*allow_multiple_events_p*/true,
+			       want_lowest_coordinate_tr_p);
+	}
+      }
+    }
+  }
+
+  if (best.validp == false || best.weighted_score > max_weighted_score) {
+    completed_trpath = (T) NULL;
+  } else if (best.nevents == 0) {
+    completed_trpath = Trpath_new_exact(best.trdiagonals[0],best.qstart,best.qend,
+					best.nmismatches,partial_trpath->tplusp,
+					partial_trpath->trnum,partial_trpath->troffset,partial_trpath->trhigh,
+					partial_trpath->chrnum,partial_trpath->transcript_genestrand,
+					intlistpool,uintlistpool,trpathpool,
+					/*found_score*/best.qstart + querylength - best.qend + best.nmismatches,
+					method);
+  } else {
+    endpoints = Intlistpool_push(NULL,intlistpool,best.qend
+				 intlistpool_trace(__FILE__,__LINE__));
+    for (i = best.nevents - 1; i >= 0; i--) {
+      endpoints = Intlistpool_push(endpoints,intlistpool,best.endpoints[i]
+				   intlistpool_trace(__FILE__,__LINE__));
+    }
+    endpoints = Intlistpool_push(endpoints,intlistpool,best.qstart
+				 intlistpool_trace(__FILE__,__LINE__));
+
+    trdiagonals = (Uintlist_T) NULL;
+    for (i = best.nevents; i >= 0; i--) {
+      trdiagonals = Uintlistpool_push(trdiagonals,uintlistpool,best.trdiagonals[i]
+				      uintlistpool_trace(__FILE__,__LINE__));
+    }
+
+    nmismatches_list = (Intlist_T) NULL;
+    for (i = best.nevents; i >= 0; i--) {
+      nmismatches_list = Intlistpool_push(nmismatches_list,intlistpool,best.nmismatches_list[i]
+					  intlistpool_trace(__FILE__,__LINE__));
+    }
+
+    junctions = (List_T) NULL;
+    for (i = best.nevents - 1; i >= 0; i--) {
+      if (best.junction_types[i] == INS_JUNCTION) {
+	junction = Junction_new_insertion(best.junction_nindels[i],pathpool);
+      } else {
+	junction = Junction_new_deletion(best.junction_nindels[i],pathpool);
+      }
+      junctions = Listpool_push(junctions,listpool,(void *) junction
+				listpool_trace(__FILE__,__LINE__));
+    }
+
+    completed_trpath = Trpath_create(endpoints,trdiagonals,nmismatches_list,junctions,
+				     partial_trpath->tplusp,partial_trpath->trnum,
+				     partial_trpath->troffset,partial_trpath->trhigh,
+				     partial_trpath->chrnum,partial_trpath->transcript_genestrand,
+				     trpathpool,/*found_score*/best.qstart + querylength - best.qend + best.nmismatches,
+				     best.total_ninserts,
+				     method);
+  }
+
+  FREEA(cache.mismatch_positions);
+  FREEA(cache.filledp);
+  FREEA(cache.prefix_counts);
+
+  if (completed_trpath == NULL) {
+    return (T) NULL;
+  } else {
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,completed_trpath,querylength,query_compress_tr);
+    debug13(printf("Completed transcript path from partial seed: "));
+    debug13(Trpath_print(completed_trpath));
+    return completed_trpath;
+  }
+}
+
+
+T
+Trpath_solve_from_diagonals (int *found_score, int *end_score, bool *partialp,
+			     int sufficient_score, Trcoord_T middle_trdiagonal,
+
 			     int middle_trdiagonal_qstart, int middle_trdiagonal_qend,
 			     int middle_nmismatches,
 			     Trdiag_T qstart_trdiag, Trdiag_T qend_trdiag,
@@ -731,6 +1543,7 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
   int tstart, tend, trimpos, pos5, pos3;
   int adj;
   int found_score_ignore = querylength;
+  int end_score_ignore = querylength;
 
   bool want_lowest_coordinate_tr_p;
 
@@ -921,9 +1734,59 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
     Trpath_free(&tend_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
     return (T) NULL;
   } else {
-    Trpath_free(&tstart_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
-    Trpath_free(&tend_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
-    /* Continue below */
+    found_score_ignore = querylength;
+    end_score_ignore = querylength;
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,tstart_path,querylength,query_compress_tr);
+
+    found_score_ignore = querylength;
+    end_score_ignore = querylength;
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,tend_path,querylength,query_compress_tr);
+
+    found_score_ignore = querylength;
+    end_score_ignore = querylength;
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,trpath,querylength,query_compress_tr);
+
+    if (trpath_score_better_p(tstart_path,trpath,querylength,query_compress_tr) == true) {
+      Trpath_free(&trpath,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+      trpath = tstart_path;
+    } else {
+      Trpath_free(&tstart_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+    }
+
+    if (trpath_score_better_p(tend_path,trpath,querylength,query_compress_tr) == true) {
+      Trpath_free(&trpath,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+      trpath = tend_path;
+    } else {
+      Trpath_free(&tend_path,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+    }
+  }
+
+  if (paired_end_p == true && paired_transcript_completion_p == true &&
+      (method == TR_COMPLETE || trpath_has_indel_junction_p(trpath) == true) &&
+      (Intlist_head(trpath->endpoints) > TR_COMPLETE_MAX_SOFTCLIP ||
+       Intlist_last_value(trpath->endpoints) < querylength - TR_COMPLETE_MAX_SOFTCLIP)) {
+    T completed_trpath;
+    int coverage = Intlist_last_value(trpath->endpoints) - Intlist_head(trpath->endpoints);
+
+    if ((completed_trpath =
+	complete_bounded_indel_trpath(trpath,middle_trdiagonal,query_compress_tr,querylength,
+				       intlistpool,uintlistpool,listpool,trpathpool,pathpool,method)) != NULL) {
+      if (Intlist_last_value(completed_trpath->endpoints) - Intlist_head(completed_trpath->endpoints) >
+	  coverage + TR_COMPLETE_MIN_INDEL_SUPPORT) {
+	debug13(printf("Replacing partial transcript path coverage %d with completed coverage %d\n",
+		       coverage,Intlist_last_value(completed_trpath->endpoints) -
+		       Intlist_head(completed_trpath->endpoints)));
+	Trpath_free(&trpath,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+	trpath = completed_trpath;
+      } else {
+	Trpath_free(&completed_trpath,intlistpool,uintlistpool,listpool,trpathpool,pathpool);
+      }
+    }
+  }
+
+  if (method == TR_COMPLETE) {
+    trpath_score_extend_qstart(trpath,querylength,query_compress_tr,mismatch_positions_alloc);
+    trpath_score_extend_qend(trpath,querylength,query_compress_tr,mismatch_positions_alloc);
   }
 
   /* Final filtering.  Requires attempts at final extension to qstart and qend */
@@ -933,16 +1796,16 @@ Trpath_solve_from_diagonals (int *found_score, bool *partialp, int sufficient_sc
   if (Intlist_head(trpath->endpoints) > index1part_tr) {
     /* Doesn't extend to the end, and not due to a single mismatch */
     *partialp = true;
-    Trpath_eval_nmatches(&found_score_ignore,trpath,querylength,query_compress_tr);
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,trpath,querylength,query_compress_tr);
 
   } else if (Intlist_last_value(trpath->endpoints) < querylength - index1part_tr) {
     /* Doesn't extend to the end, and not due to a single mismatch */
     *partialp = true;
-    Trpath_eval_nmatches(&found_score_ignore,trpath,querylength,query_compress_tr);
+    Trpath_eval_nmatches(&found_score_ignore,&end_score_ignore,trpath,querylength,query_compress_tr);
 
   } else {
     *partialp = false;
-    Trpath_eval_nmatches(&(*found_score),trpath,querylength,query_compress_tr);
+    Trpath_eval_nmatches(&(*found_score),&(*end_score),trpath,querylength,query_compress_tr);
   }
 
   *partialp = false;
@@ -963,7 +1826,7 @@ Trpath_solve_from_trstart (Trcoord_T trdiagonal,
   /* int trimpos, pos5; */
   /* int adj; */
 
-  int nmismatches_to_trimpos, found_score;
+  int nmismatches_to_trimpos, found_score, end_score;
   int tend;
 
   Trnum_T trnum;
@@ -983,6 +1846,8 @@ Trpath_solve_from_trstart (Trcoord_T trdiagonal,
 
   } else {
     found_score = (querylength - tend) + nmismatches_to_trimpos;
+    end_score = querylength - tend;
+
     trnum = EF64_trnum(&troffset,&trhigh,transcript_ef64,trdiagonal - querylength,trdiagonal);
     chrnum = Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
     return Trpath_new_exact(trdiagonal,/*tstart*/0,tend,
@@ -1001,7 +1866,7 @@ Trpath_solve_from_trend (Trcoord_T trdiagonal,
   /* T trpath; */
   /* int trimpos, pos3; */
   /* int adj; */
-  int nmismatches_to_trimpos, found_score;
+  int nmismatches_to_trimpos, found_score, end_score;
   int tstart;
 
   Trnum_T trnum;
@@ -1021,6 +1886,8 @@ Trpath_solve_from_trend (Trcoord_T trdiagonal,
     return (T) NULL;
   } else {
     found_score = tstart + nmismatches_to_trimpos;
+    end_score = tstart;
+
     trnum = EF64_trnum(&troffset,&trhigh,transcript_ef64,trdiagonal - querylength,trdiagonal);
     chrnum = Transcriptome_chrnum(&transcript_genestrand,transcriptome,trnum);
     return Trpath_new_exact(trdiagonal,tstart,/*tend*/querylength,
@@ -1032,7 +1899,7 @@ Trpath_solve_from_trend (Trcoord_T trdiagonal,
 
 
 T
-Trpath_solve_from_ends (int *found_score,
+Trpath_solve_from_ends (int *found_score, int *end_score,
 			Trcoord_T trdiagonal_i, int pos5_0, int pos3_0,
 			Trcoord_T trdiagonal_j, int pos5_1, int pos3_1,
 			bool tplusp, int querylength, Compress_T query_compress_tr,
@@ -1100,10 +1967,10 @@ Trpath_solve_from_ends (int *found_score,
     } else {
       supporti = indel_pos - tstart;
       supportj = tend - (indel_pos + nindels);
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
 	
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	trpath = Trpath_new_from_ends(trdiagonal_i,pos5_0,pos3_0,trdiagonal_j,pos5_1,pos3_1,
@@ -1144,9 +2011,9 @@ Trpath_solve_from_ends (int *found_score,
     } else {
       supporti = indel_pos - tstart;
       supportj = tend - indel_pos;
-      if (supporti - 3*nmismatches_i < MIN_SUPPORT_INDEL) {
+      if (sufficient_indel_support_p(supporti,nmismatches_i) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supporti,nmismatches_i));
-      } else if (supportj - 3*nmismatches_j < MIN_SUPPORT_INDEL) {
+      } else if (sufficient_indel_support_p(supportj,nmismatches_j) == false) {
 	debug13(printf("Not enough support for indel: supporti %d and mismatches %d\n",supportj,nmismatches_j));
       } else {
 	trpath = Trpath_new_from_ends(trdiagonal_i,/*tstart5*/pos5_0,/*tend5*/pos3_0,
@@ -1185,7 +2052,7 @@ Trpath_solve_from_ends (int *found_score,
 
   } else {
     /* Need to set found_score */
-    Trpath_eval_nmatches(&(*found_score),trpath,querylength,query_compress_tr);
+    Trpath_eval_nmatches(&(*found_score),&(*end_score),trpath,querylength,query_compress_tr);
     return trpath;
   }
 }
@@ -1193,8 +2060,16 @@ Trpath_solve_from_ends (int *found_score,
 
 void
 Trpath_solve_setup (Transcriptome_T transcriptome_in,
-		    Genomebits_T transcriptomebits_in, EF64_T transcript_ef64_in,
-		    int max_insertionlen_in, int max_deletionlen_in, int index1part_tr_in) {
+			    Genomebits_T transcriptomebits_in, EF64_T transcript_ef64_in,
+			    int max_insertionlen_in, int max_deletionlen_in, int index1part_tr_in,
+			    int min_support_indel_in, int indel_support_mismatch_penalty_in,
+			    bool paired_transcript_completion_p_in,
+			    bool tr_score_ranker_p_in, double tr_score_match_reward_in,
+			    double tr_score_mismatch_penalty_in,
+			    double tr_score_indel_open_penalty_in,
+			    double tr_score_indel_extend_penalty_in,
+			    double tr_score_softclip_penalty_in,
+			    double tr_score_transcript_discordance_penalty_in) {
 
   transcriptome = transcriptome_in;
   transcriptomebits = transcriptomebits_in;
@@ -1202,6 +2077,16 @@ Trpath_solve_setup (Transcriptome_T transcriptome_in,
   max_insertionlen = max_insertionlen_in;
   max_deletionlen = max_deletionlen_in;
   index1part_tr = index1part_tr_in;
+  min_support_indel = min_support_indel_in;
+  indel_support_mismatch_penalty = indel_support_mismatch_penalty_in;
+  paired_transcript_completion_p = paired_transcript_completion_p_in;
+  tr_score_ranker_p = tr_score_ranker_p_in;
+  tr_score_match_reward = tr_score_match_reward_in;
+  tr_score_mismatch_penalty = tr_score_mismatch_penalty_in;
+  tr_score_indel_open_penalty = tr_score_indel_open_penalty_in;
+  tr_score_indel_extend_penalty = tr_score_indel_extend_penalty_in;
+  tr_score_softclip_penalty = tr_score_softclip_penalty_in;
+  tr_score_transcript_discordance_penalty = tr_score_transcript_discordance_penalty_in;
 
   return;
 }

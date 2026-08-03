@@ -2,10 +2,13 @@
 #include "config.h"
 #endif
 #include "localdb-read.h"
+#include "debug_groups.h"
+#include "accel-profile-stats.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/mman.h>		/* For munmap */
 
 #include "assert.h"
@@ -18,47 +21,35 @@
 #include "genomebits_trim.h"
 /* #include "merge-uint4.h" -- for get_by_bisection */
 #include "intersect-uint2.h"
-#include "mergeinfo.h"
 
-#include "merge-method.h"
-#ifdef USE_HEAP_MERGE
-#include "merge-diagonals-heap-uint4.h"
-#elif defined(USE_SIMD_MERGE)
-#include "merge-diagonals-simd-uint4.h"
-#endif
+#include "simd.h"
 
-#ifdef LARGE_GENOMES
-#ifdef USE_HEAP_MERGE
-#include "merge-diagonals-heap-uint8.h"
-#elif defined(USE_SIMD_MERGE)
-#include "merge-diagonals-simd-uint8.h"
-#endif
-#endif
+#define EPI16_MAX 0x8000
 
 
 /* Print univdiagonals */
-#ifdef DEBUG0
+#if defined(DEBUG0) || defined(DEBUG_LOCALDB_DEEP)
 #define debug0(x) x
 #else
 #define debug0(x)
 #endif
 
 /* Method used */
-#ifdef DEBUG
+#if defined(DEBUG) || defined(DEBUG_LOCALDB)
 #define debug(x) x
 #else
 #define debug(x)
 #endif
 
 /* Details of suffix array search */
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
 #define debug1(x) x
 #else
 #define debug1(x)
 #endif
 
 /* get_exhaustive */
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_LOCALDB_DEEP)
 #define debug2(x) x
 #else
 #define debug2(x)
@@ -72,7 +63,7 @@
 #endif
 
 /* Dump each suffix array contents */
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_LOCALDB_DEEP)
 #define debug9(x) x
 #else
 #define debug9(x)
@@ -90,6 +81,14 @@
 #define debug15(x) x
 #else
 #define debug15(x)
+#endif
+
+
+/* binary search */
+#ifdef DEBUG20
+#define debug20(x) x
+#else
+#define debug20(x)
 #endif
 
 
@@ -150,6 +149,445 @@ struct T {
   size_t sasort16_len;
 };
 
+#if defined(__GNUC__)
+#define LOCALDB_CACHE_TLS __thread
+#else
+#define LOCALDB_CACHE_TLS _Thread_local
+#endif
+
+#define LOCALDB_CACHE_INITIAL_NSLOTS 32768
+/* Table growth ceiling: at the cap the table holds LOCALDB_CACHE_MAX_NSLOTS
+   entries (~ nslots * sizeof(entry) of index overhead per worker thread). */
+#define LOCALDB_CACHE_MAX_NSLOTS (1 << 17)
+/* Result-payload ceiling per worker thread.  Exceeding it evicts the coldest
+   half of the cache (approximate LRU) rather than disabling storage, so the
+   pathological tail keeps its hot working set instead of running uncached. */
+#define LOCALDB_CACHE_MAX_BYTES (64 * 1024 * 1024)
+/* Single results too large to be worth their footprint are not cached; a miss
+   just recomputes the identical value. */
+#define LOCALDB_CACHE_MAX_RESULTS_PER_ENTRY 8192
+
+/* Memoization is a pure per-pair value cache (Localdb_get is a pure function of
+   its behavioral key; localdb_tally/localdb_overflowp are scratch, not outputs).
+   It is unconditional in production and disabled only for the legacy
+   request-graph statistics build, which must count every logical execution. */
+#ifdef GSNAP_STATS_LEGACY_REQUEST_GRAPH
+static const bool localdb_memoize_enabled_p = false;
+#else
+static const bool localdb_memoize_enabled_p = true;
+#endif
+
+struct Localdb_cache_entry_T {
+  bool occupiedp;
+  unsigned long long hash;
+  unsigned long long last_used;
+  T localdb;
+  Genomebits_T genomebits;
+  Compress_T query_compress;
+  char *queryptr;
+  int pos5;
+  int pos3;
+  int querylength;
+  Univcoord_T low_univdiagonal;
+  Univcoord_T high_univdiagonal;
+  bool plusp;
+  int genestrand;
+  int nhits;
+  int matchlength;
+  bool sortedp;
+  bool trimmedp;
+  struct Univdiag_T *results;
+  size_t result_bytes;
+};
+
+static LOCALDB_CACHE_TLS struct Localdb_cache_entry_T *localdb_cache_entries = NULL;
+static LOCALDB_CACHE_TLS int *localdb_cache_used_slots = NULL;
+static LOCALDB_CACHE_TLS int localdb_cache_nslots = 0;
+static LOCALDB_CACHE_TLS int localdb_cache_nused = 0;
+static LOCALDB_CACHE_TLS int localdb_cache_nentries = 0;
+static LOCALDB_CACHE_TLS size_t localdb_cache_bytes = 0U;
+static LOCALDB_CACHE_TLS unsigned long long localdb_cache_tick = 0ULL;
+
+static unsigned long long
+localdb_cache_mix (unsigned long long hash, unsigned long long value) {
+  int i;
+
+  for (i = 0; i < 8; i++) {
+    hash ^= (value & 0xffU);
+    hash *= 1099511628211ULL;
+    value >>= 8;
+  }
+
+  return hash;
+}
+
+static unsigned long long
+localdb_cache_hash (T this, Genomebits_T genomebits, Compress_T query_compress, char *queryptr,
+		    int pos5, int pos3, int querylength,
+		    Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+		    bool plusp, int genestrand) {
+  unsigned long long hash = 1469598103934665603ULL;
+  int pos;
+
+  hash = localdb_cache_mix(hash,(unsigned long long) (uintptr_t) this);
+  hash = localdb_cache_mix(hash,(unsigned long long) (uintptr_t) genomebits);
+  hash = localdb_cache_mix(hash,(unsigned long long) (uintptr_t) query_compress);
+  hash = localdb_cache_mix(hash,(unsigned long long) pos5);
+  hash = localdb_cache_mix(hash,(unsigned long long) pos3);
+  hash = localdb_cache_mix(hash,(unsigned long long) querylength);
+  hash = localdb_cache_mix(hash,(unsigned long long) low_univdiagonal);
+  hash = localdb_cache_mix(hash,(unsigned long long) high_univdiagonal);
+  hash = localdb_cache_mix(hash,(unsigned long long) plusp);
+  hash = localdb_cache_mix(hash,(unsigned long long) genestrand);
+
+  if (queryptr != NULL) {
+    for (pos = pos5; pos < pos3; pos++) {
+      hash ^= (unsigned char) queryptr[pos];
+      hash *= 1099511628211ULL;
+    }
+  }
+
+  return hash;
+}
+
+static bool
+localdb_cache_key_matches_p (struct Localdb_cache_entry_T *entry, unsigned long long hash,
+			     T this, Genomebits_T genomebits, Compress_T query_compress, char *queryptr,
+			     int pos5, int pos3, int querylength,
+			     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+			     bool plusp, int genestrand) {
+  int span = pos3 - pos5;
+
+  if (entry->hash != hash ||
+      entry->localdb != this ||
+      entry->genomebits != genomebits ||
+      entry->query_compress != query_compress ||
+      entry->pos5 != pos5 ||
+      entry->pos3 != pos3 ||
+      entry->querylength != querylength ||
+      entry->low_univdiagonal != low_univdiagonal ||
+      entry->high_univdiagonal != high_univdiagonal ||
+      entry->plusp != plusp ||
+      entry->genestrand != genestrand) {
+    return false;
+
+  } else if (span <= 0) {
+    return true;
+
+  } else if (entry->queryptr == NULL || queryptr == NULL) {
+    return entry->queryptr == queryptr ? true : false;
+
+  } else if (memcmp(&(entry->queryptr[pos5]),&(queryptr[pos5]),span) == 0) {
+    return true;
+
+  } else {
+    return false;
+  }
+}
+
+static bool
+localdb_cache_allocated_p (void) {
+  if (localdb_cache_entries != NULL) {
+    return true;
+  }
+
+  localdb_cache_nslots = LOCALDB_CACHE_INITIAL_NSLOTS;
+  localdb_cache_entries =
+    (struct Localdb_cache_entry_T *) CALLOC(localdb_cache_nslots,
+					   sizeof(struct Localdb_cache_entry_T));
+  localdb_cache_used_slots = (int *) MALLOC(localdb_cache_nslots * sizeof(int));
+  return true;
+}
+
+static void
+localdb_cache_grow (void) {
+  struct Localdb_cache_entry_T *old_entries = localdb_cache_entries;
+  int *old_used_slots = localdb_cache_used_slots;
+  int old_nused = localdb_cache_nused;
+  int old_nslots = localdb_cache_nslots;
+  unsigned int slot, mask;
+  int i;
+
+  localdb_cache_nslots *= 2;
+  mask = (unsigned int) localdb_cache_nslots - 1U;
+  localdb_cache_entries =
+    (struct Localdb_cache_entry_T *) CALLOC(localdb_cache_nslots,
+					   sizeof(struct Localdb_cache_entry_T));
+  localdb_cache_used_slots = (int *) MALLOC(localdb_cache_nslots * sizeof(int));
+  localdb_cache_nused = 0;
+
+  for (i = 0; i < old_nused; i++) {
+    struct Localdb_cache_entry_T entry = old_entries[old_used_slots[i]];
+    slot = (unsigned int) entry.hash & mask;
+    while (localdb_cache_entries[slot].occupiedp == true) {
+      slot = (slot + 1U) & mask;
+    }
+    localdb_cache_entries[slot] = entry;
+    localdb_cache_used_slots[localdb_cache_nused++] = (int) slot;
+  }
+
+  FREE(old_used_slots);
+  FREE(old_entries);
+  (void) old_nslots;
+}
+
+static int
+localdb_cache_tick_cmp (const void *a, const void *b) {
+  unsigned long long x = *(const unsigned long long *) a;
+  unsigned long long y = *(const unsigned long long *) b;
+
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+/* Approximate-LRU eviction: drop the coldest ~half of the cache by last-used
+   tick and rehash the survivors into a fresh same-size table.  A cache miss
+   only recomputes the identical value, so eviction never changes alignment
+   output; it only trades a bounded memory footprint for some recomputation on
+   the pathological tail. */
+static void
+localdb_cache_evict_half (void) {
+  struct Localdb_cache_entry_T *old_entries = localdb_cache_entries;
+  int *old_used_slots = localdb_cache_used_slots;
+  int old_nused = localdb_cache_nused;
+  unsigned long long *ticks, threshold;
+  unsigned int slot, mask;
+  int i, keep_count;
+
+  if (old_nused <= 0) {
+    return;
+  }
+
+  keep_count = old_nused / 2;
+  if (keep_count == 0) {
+    /* Degenerate (defensive): nothing worth keeping, drop everything. */
+    for (i = 0; i < old_nused; i++) {
+      struct Localdb_cache_entry_T *entry = &(old_entries[old_used_slots[i]]);
+      if (entry->results != NULL) {
+	FREE(entry->results);
+      }
+      memset(entry,0,sizeof(*entry));
+    }
+    localdb_cache_nused = 0;
+    localdb_cache_nentries = 0;
+    localdb_cache_bytes = 0U;
+    return;
+  }
+
+  ticks = (unsigned long long *) MALLOC(old_nused * sizeof(unsigned long long));
+  for (i = 0; i < old_nused; i++) {
+    ticks[i] = old_entries[old_used_slots[i]].last_used;
+  }
+  qsort(ticks,old_nused,sizeof(unsigned long long),localdb_cache_tick_cmp);
+  threshold = ticks[old_nused - keep_count]; /* keep the freshest keep_count entries */
+  FREE(ticks);
+
+  mask = (unsigned int) localdb_cache_nslots - 1U;
+  localdb_cache_entries =
+    (struct Localdb_cache_entry_T *) CALLOC(localdb_cache_nslots,
+					   sizeof(struct Localdb_cache_entry_T));
+  localdb_cache_used_slots = (int *) MALLOC(localdb_cache_nslots * sizeof(int));
+  localdb_cache_nused = 0;
+  localdb_cache_nentries = 0;
+  localdb_cache_bytes = 0U;
+
+  for (i = 0; i < old_nused; i++) {
+    struct Localdb_cache_entry_T entry = old_entries[old_used_slots[i]];
+    if (entry.last_used >= threshold) {
+      slot = (unsigned int) entry.hash & mask;
+      while (localdb_cache_entries[slot].occupiedp == true) {
+	slot = (slot + 1U) & mask;
+      }
+      localdb_cache_entries[slot] = entry; /* moves results ownership to survivor */
+      localdb_cache_used_slots[localdb_cache_nused++] = (int) slot;
+      localdb_cache_nentries++;
+      localdb_cache_bytes += entry.result_bytes;
+    } else if (entry.results != NULL) {
+      FREE(entry.results);
+    }
+  }
+
+  FREE(old_used_slots);
+  FREE(old_entries);
+}
+
+void
+Localdb_cache_reset (void) {
+  struct Localdb_cache_entry_T *entry;
+  int i, slot;
+
+  if (localdb_cache_entries == NULL) {
+    return;
+  }
+
+  for (i = 0; i < localdb_cache_nused; i++) {
+    slot = localdb_cache_used_slots[i];
+    entry = &(localdb_cache_entries[slot]);
+    if (entry->results != NULL) {
+      FREE(entry->results);
+    }
+    memset(entry,0,sizeof(*entry));
+  }
+
+  localdb_cache_nused = 0;
+  localdb_cache_nentries = 0;
+  localdb_cache_bytes = 0U;
+  localdb_cache_tick = 0ULL;
+  return;
+}
+
+void
+Localdb_cache_free (void) {
+  Localdb_cache_reset();
+  if (localdb_cache_used_slots != NULL) {
+    FREE(localdb_cache_used_slots);
+  }
+  if (localdb_cache_entries != NULL) {
+    FREE(localdb_cache_entries);
+  }
+  localdb_cache_used_slots = NULL;
+  localdb_cache_entries = NULL;
+  localdb_cache_nslots = 0;
+  localdb_cache_nused = 0;
+  localdb_cache_nentries = 0;
+  localdb_cache_bytes = 0U;
+  localdb_cache_tick = 0ULL;
+  return;
+}
+
+static struct Localdb_cache_entry_T *
+localdb_cache_lookup (unsigned long long hash, T this, Genomebits_T genomebits,
+		      Compress_T query_compress, char *queryptr, int pos5, int pos3, int querylength,
+		      Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+		      bool plusp, int genestrand) {
+  struct Localdb_cache_entry_T *entry;
+  unsigned int slot;
+  int probe;
+
+  if (localdb_cache_entries == NULL) {
+    return (struct Localdb_cache_entry_T *) NULL;
+  }
+
+  slot = (unsigned int) hash & ((unsigned int) localdb_cache_nslots - 1U);
+  for (probe = 0; probe < localdb_cache_nslots; probe++) {
+    entry = &(localdb_cache_entries[slot]);
+    if (entry->occupiedp == false) {
+      return (struct Localdb_cache_entry_T *) NULL;
+    } else if (localdb_cache_key_matches_p(entry,hash,this,genomebits,query_compress,queryptr,
+					   pos5,pos3,querylength,
+					   low_univdiagonal,high_univdiagonal,
+					   plusp,genestrand) == true) {
+      entry->last_used = ++localdb_cache_tick;
+      return entry;
+    } else {
+      slot = (slot + 1U) & ((unsigned int) localdb_cache_nslots - 1U);
+    }
+  }
+
+  return (struct Localdb_cache_entry_T *) NULL;
+}
+
+static void
+localdb_cache_replay (bool *sortedp, bool *trimmedp, int *matchlength,
+		      Univdiag_T *univdiags_alloc,
+		      struct Localdb_cache_entry_T *entry) {
+  int i;
+
+  *sortedp = entry->sortedp;
+  *trimmedp = entry->trimmedp;
+  *matchlength = entry->matchlength;
+  for (i = 0; i < entry->nhits; i++) {
+    Univdiag_transfer(univdiags_alloc[i],&(entry->results[i]));
+  }
+
+  return;
+}
+
+static void
+localdb_cache_insert (unsigned long long hash, T this, Genomebits_T genomebits,
+		      Compress_T query_compress, char *queryptr, int pos5, int pos3, int querylength,
+		      Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+		      bool plusp, int genestrand,
+		      int nhits, int matchlength, bool sortedp, bool trimmedp,
+		      Univdiag_T *univdiags_alloc) {
+  struct Localdb_cache_entry_T *entry;
+  size_t result_bytes;
+  unsigned int slot;
+  int i, probe;
+
+  if (nhits > LOCALDB_CACHE_MAX_RESULTS_PER_ENTRY) {
+    /* Oversized single result: cheaper to recompute than to hold. */
+    return;
+  }
+  result_bytes = (size_t) nhits * sizeof(struct Univdiag_T);
+  if (localdb_cache_allocated_p() == false) {
+    return;
+  }
+
+  /* Bound result-payload memory: evict the coldest half until the new entry
+     fits under the byte ceiling. */
+  while (localdb_cache_nentries > 0 &&
+	 localdb_cache_bytes + result_bytes > LOCALDB_CACHE_MAX_BYTES) {
+    localdb_cache_evict_half();
+  }
+
+  /* Bound table size: grow while under the slot ceiling, otherwise evict to
+     free slots. */
+  if ((localdb_cache_nentries + 1) * 10 >= localdb_cache_nslots * 7) {
+    if (localdb_cache_nslots * 2 <= LOCALDB_CACHE_MAX_NSLOTS) {
+      localdb_cache_grow();
+    } else {
+      localdb_cache_evict_half();
+    }
+  }
+
+  slot = (unsigned int) hash & ((unsigned int) localdb_cache_nslots - 1U);
+  for (probe = 0; probe < localdb_cache_nslots; probe++) {
+    entry = &(localdb_cache_entries[slot]);
+    if (entry->occupiedp == false) {
+      entry->occupiedp = true;
+      entry->hash = hash;
+      entry->localdb = this;
+      entry->genomebits = genomebits;
+      entry->query_compress = query_compress;
+      entry->queryptr = queryptr;
+      entry->pos5 = pos5;
+      entry->pos3 = pos3;
+      entry->querylength = querylength;
+      entry->low_univdiagonal = low_univdiagonal;
+      entry->high_univdiagonal = high_univdiagonal;
+      entry->plusp = plusp;
+      entry->genestrand = genestrand;
+      entry->nhits = nhits;
+      entry->matchlength = matchlength;
+      entry->sortedp = sortedp;
+      entry->trimmedp = trimmedp;
+      entry->result_bytes = result_bytes;
+      entry->last_used = ++localdb_cache_tick;
+      if (nhits > 0) {
+	entry->results = (struct Univdiag_T *) MALLOC(result_bytes);
+	for (i = 0; i < nhits; i++) {
+	  Univdiag_transfer(&(entry->results[i]),univdiags_alloc[i]);
+	}
+      }
+      localdb_cache_bytes += result_bytes;
+      localdb_cache_used_slots[localdb_cache_nused++] = (int) slot;
+      localdb_cache_nentries++;
+      return;
+
+    } else if (localdb_cache_key_matches_p(entry,hash,this,genomebits,query_compress,queryptr,
+					   pos5,pos3,querylength,
+					   low_univdiagonal,high_univdiagonal,
+					   plusp,genestrand) == true) {
+      return;
+
+    } else {
+      slot = (slot + 1U) & ((unsigned int) localdb_cache_nslots - 1U);
+    }
+  }
+
+  return;
+}
+
 
 void
 Localdb_free (T *old) {
@@ -183,6 +621,7 @@ Localdb_free (T *old) {
 }
 
 
+#if 0
 /* Position 10470: CGGTACCC */
 /* TODO: Write get char that works on genomebits */
 
@@ -199,7 +638,7 @@ sarray_search_uint1 (int *matchlength, int *initptr, int *finalptr, uint8_t *SA,
   int seglength = pos3 - pos5;
   char mismatch_char;
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
   char *Buffer;
   Buffer = (char *) MALLOC((seglength+2)*sizeof(char));
 #endif
@@ -216,7 +655,7 @@ sarray_search_uint1 (int *matchlength, int *initptr, int *finalptr, uint8_t *SA,
 
     pos = region_term + SA[mid];
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
     printf("low %d, high %d, mid %d => position %u\n",low,high,mid,pos);
     Genome_fill_buffer_simple(genomecomp,/*left*/pos,seglength,Buffer);
     if (SA[mid] + seglength >= n) {
@@ -281,7 +720,7 @@ sarray_search_uint1 (int *matchlength, int *initptr, int *finalptr, uint8_t *SA,
   }
 
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
   printf("sarray_search_uint1 returning %d..%d with matchlength %d\n",*initptr,*finalptr,*matchlength);
   for (mid = *initptr; mid < *finalptr; mid++) {
     printf("%u\n",region_term + SA[mid]);
@@ -289,15 +728,17 @@ sarray_search_uint1 (int *matchlength, int *initptr, int *finalptr, uint8_t *SA,
   printf("\n");
 #endif
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
   FREE(Buffer);
 #endif
 
   return;
 }
+#endif
 
 
-#ifdef DEBUG2
+
+#if defined(DEBUG2) || defined(DEBUG_LOCALDB_DEEP)
 static void
 oligo_nt (char nt[], int oligo, int oligosize) {
   int i, j;
@@ -372,6 +813,7 @@ revise_oligo_byte (unsigned char oligo, char c) {
 }
 
 
+#if 0
 static void
 sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *saindex, uint16_t *SA, int n,
 		     char *query, int querylength, int pos5, int pos3, int min_matchlength, Univcoord_T region_term,
@@ -383,7 +825,7 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
   int seglength = pos3 - pos5;
   char mismatch_char;
 
-#if defined(DEBUG1) || defined(DEBUG9)
+#if defined(DEBUG1) || defined(DEBUG9) || defined(DEBUG_LOCALDB_DEEP)
   char *suffix;
   suffix = (char *) MALLOC((seglength+2)*sizeof(char)); /* Add 2 so we can print $ at position n */
 #endif
@@ -391,7 +833,7 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
   debug1(printf("Entered sarray_search_uint2\n"));
 
   
-#ifdef DEBUG9
+#if defined(DEBUG9) || defined(DEBUG_LOCALDB_DEEP)
   int i;
   unsigned int k = 0;
 
@@ -440,7 +882,7 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
     *matchlength = 0;
     *initptr = *finalptr = low;
     debug1(printf("sarray_search_uint2 returning %d..%d\n\n",*initptr,*finalptr));
-#if defined(DEBUG1) || defined(DEBUG9)
+#if defined(DEBUG1) || defined(DEBUG9) || defined(DEBUG_LOCALDB_DEEP)
     FREE(suffix);
 #endif
     return;
@@ -453,7 +895,7 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
 
     pos = region_term + SA[mid];
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
     printf("low %d, high %d, mid %d => position %u\n",low,high,mid,pos);
     Genome_fill_buffer_simple(genomecomp,/*left*/pos,seglength,suffix);
     if (SA[mid] + seglength >= n) {
@@ -522,7 +964,7 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
   }
 
 
-#ifdef DEBUG1
+#if defined(DEBUG1) || defined(DEBUG_LOCALDB_DEEP)
   printf("sarray_search_uint2 returning %d..%d with matchlength %d\n",*initptr,*finalptr,*matchlength);
   for (mid = *initptr; mid < *finalptr; mid++) {
     printf("%u\n",region_term + SA[mid]);
@@ -530,79 +972,12 @@ sarray_search_uint2 (int *matchlength, int *initptr, int *finalptr, uint16_t *sa
   printf("\n");
 #endif
   
-#if defined(DEBUG1) || defined(DEBUG9)
+#if defined(DEBUG1) || defined(DEBUG9) || defined(DEBUG_LOCALDB_DEEP)
   FREE(suffix);
 #endif
 
   return;
 }
-
-
-#if 0
-    /* Binary search for finalptr.  ? More accurate than marching because of the terminating character */
-    high = n;
-
-    while (low < high) {
-      /* Compute mid for unsigned ints.  Want ceil((low+high)/2). */
-      /* low 0, high 2, mid = 1.  low 0, high 3, mid = 2.  low 1, high 2, mid = 2.  low 1, high 3, mid = 2 */
-      mid = low + (high - low + 1)/2;
-
-      pos = region_term + SA[mid];
-
-#ifdef DEBUG1
-      printf("low %d, high %d, mid %d => position %u\n",low,high,mid,pos);
-      Genome_fill_buffer_simple(genomecomp,/*left*/pos,seglength,Buffer);
-      if (SA[mid] + seglength >= n) {
-	Buffer[n - SA[mid]] = '$';
-	Buffer[n - SA[mid] + 1] = '\0';
-      }
-      printf("%d\t%d\t%s\n",mid,SA[mid],Buffer);
-      printf("query\t\t%.*s\n",seglength,&(query[pos5]));
-#endif
-
-      nmatches = Genomebits_consecutive_matches_wmm(&mismatch_char,genomebits,query_compress,
-						    /*univdiagonal*/pos-pos5+querylength,querylength,
-						    pos5,pos3,plusp,/*genestrand*/0);
-      if (SA[mid] + nmatches >= n) {
-	/* Terminating char is always less than query */
-	debug1(printf("nmatches %d, genomic char $\n",nmatches));
-	low = mid;
-      } else if (nmatches >= seglength) {
-	debug1(printf("nmatches %d >= seglength\n",nmatches));
-	low = mid;
-      } else if (Genome_bits_get_char(pos+nmatches) < query[pos5+nmatches]) {
-	debug1(printf("nmatches %d, genomic char %c < query %c\n",nmatches,
-		     Genome_bits_get_char(pos+nmatches),query[pos5+nmatches]));
-	low = mid;
-      } else {
-	debug1(printf("nmatches %d, genomic char %c >= query %c\n",nmatches,
-		     Genome_bits_get_char(pos+nmatches),query[pos5+nmatches]));
-	high = mid - 1;
-      }
-    }
-  }
-  *finalptr = high;
-
-
-  low--;
-  high = n;
-
-  while (low < high) {
-    /* Compute mid for unsigned ints.  Want ceil((low+high)/2). */
-    /* low 0, high 2, mid = 1.  low 0, high 3, mid = 2.  low 1, high 2, mid = 2.  low 1, high 3, mid = 2 */
-    mid = low + (high - low + 1)/2;
-
-    pos = region_term + SA[mid];
-    nmatches = Genomebits_consecutive_matches_wmm(&mismatch_char,genomebits,query_compress,
-						  /*univdiagonal*/pos-pos5+querylength,querylength,
-						  pos5,pos3,plusp,/*genestrand*/0);
-    if (nmatches == seglength || (c = Genome_bits_get_char(pos+nmatches)) < query[pos5+nmatches]) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  *finalptr = high;
 #endif
 
 
@@ -623,6 +998,7 @@ univcoord_compare (const void *a, const void *b) {
 #endif
 
 
+#if 0
 /* Hard to find maximum matchlength without scanning first */
 static int
 get_general (int *matchlength, Univdiag_T *univdiags, T this,
@@ -833,6 +1209,7 @@ get_general (int *matchlength, Univdiag_T *univdiags, T this,
     return nentries;
   }
 }
+#endif
 
 
 #if 0
@@ -850,7 +1227,7 @@ print_univdiagonals (Univcoord_T *diagonals, int nentries) {
 }
 #endif
 
-#if defined(DEBUG0) || defined(DEBUG2)
+#if defined(DEBUG0) || defined(DEBUG2) || defined(DEBUG_LOCALDB_DEEP)
 static void
 print_univdiags (Univdiag_T *univdiags, int nentries) {
   int i;
@@ -913,7 +1290,11 @@ check_univdiagonals_general (Univcoord_T *diagonals, int nentries, T this,
 #endif
 
 
+#if 0
 /* ? Do results need to be sorted */
+/* This is time-consuming compared with get_by_ends and
+   get_exhaustive, because of the calls to
+   Genomebits_consecutive_matches_wmm */
 static int
 get_by_sarray (int *matchlength, Univdiag_T *univdiags, T this,
 	       char *queryptr, int pos5, int pos3, int querylength, int min_matchlength,
@@ -1721,6 +2102,8 @@ get_by_sarray (int *matchlength, Univdiag_T *univdiags, T this,
 #endif
   }
 }
+#endif
+
 
 
 #if 0
@@ -1749,7 +2132,7 @@ remove_duplicate_diagonals (Univcoord_T *diagonals, int ndiagonals) {
    an end, so allow it only with zero mismatches, or require that the
    mismatch is in the middle */
 static int
-get_by_ends (int *nmismatches, Univdiag_T *univdiags,
+get_by_ends (Univdiag_T *univdiags,
 	     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
 	     char *queryptr, int pos5, int pos3, int querylength,
 	     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
@@ -1771,7 +2154,7 @@ get_by_ends (int *nmismatches, Univdiag_T *univdiags,
   unsigned short *ignore_ptr;
 #endif
   
-#ifdef DEBUG2
+#if defined(DEBUG2) || defined(DEBUG_LOCALDB_DEEP)
   char nt[5];
 #endif
 
@@ -1891,115 +2274,71 @@ get_by_ends (int *nmismatches, Univdiag_T *univdiags,
     } else {
       nentries = out - univdiags;
       debug2(print_univdiags(univdiags,nentries));
-      *nmismatches = best_nmismatches;
+      /* *nmismatches = best_nmismatches; */
       return nentries;
     }
   }
 }
 
 
-
-/* Copied from kmer-search.c */
-static int
-most_prevalent_count (Univcoord_T *values, int nvalues) {
-  int max_count, count;
-  Univcoord_T *ptr, *end, *first;
-
-  assert(nvalues > 0);
-
-  ptr = values;
-  end = &(values[nvalues]);
-
-  max_count = 1;
-  while (ptr < end) {
-    first = ptr;
-    debug0(printf("DIAGONAL %u\n",*first));
-    if (ptr + max_count - 1 >= end) {
-      /* End of list fails */
-      debug0(printf(" => Goes beyond end of list\n"));
-      ptr = end;
-
-    } else if (ptr[max_count - 1] != *first) {
-      /* Fails */
-      debug0(printf(" => Fails\n"));
-      if (ptr[max_count - 1] != ptr[max_count - 2]) {
-	/* Can jump immediately */
-	ptr += max_count - 1;
-      } else {
-	/* Advance forward until we see a new value */
-	while (ptr < end && *ptr == *first) {
-	  ptr++;
-	}
-      }
-
-    } else {
-      /* Contender */
-      ptr += max_count;
-      while (ptr < end && *ptr == *first) {
-	ptr++;
-      }
-      debug0(printf(" => Count %ld\n",ptr - first));
-      if ((count = ptr - first) > max_count) {
-	max_count = count;
-      }
-    }
-  }
-
-  return max_count;
-}
-
-
-/* Modified from kmer-search.c */
-/* Overwrites values */
-static void
-find_prevalent (int *nloci, Univcoord_T *values, int nvalues, int subopt_count) {
-  Univcoord_T *out, *ptr, *end, *first;
-  /* int querystart, queryend; */
-  /* int nmismatches5, nmismatches3; */
-
-  out = &(values[0]);		/* overwrite */
-
-  /* Get all values that have subopt_count or more */
-  ptr = values;
-  end = &(values[nvalues]);
-  while (ptr < end) {
-    first = ptr;
-    debug0(printf("DIAGONAL %u\n",*first));
-    if (ptr + subopt_count - 1 >= end) {
-      /* End of list fails */
-      debug0(printf(" => Goes beyond end of list\n"));
-      ptr = end;
-
-    } else if (ptr[subopt_count - 1] != *first) {
-      /* Fails */
-      debug0(printf(" => Fails\n"));
-      if (ptr[subopt_count - 1] != ptr[subopt_count - 2]) {
-	/* Can jump immediately */
-	ptr += subopt_count - 1;
-      } else {
-	/* Advance forward until we see a new value */
-	while (ptr < end && *ptr == *first) {
-	  ptr++;
-	}
-      }
-
-    } else {
-      /* Contender */
-      *out++ = *first;
-      
-      ptr += subopt_count;
-      while (ptr < end && *ptr == *first) {
-	ptr++;
-      }
-    }
-  }
-
-  *nloci = out - &(values[0]);
-  return;
-}
-
-
 #define SUBOPT 2
+
+
+/* Taken from segmentring.c */
+/* Unlike other binary search algorithms in the code, these expect
+   highi to be (length - 1).  They are a little faster because they
+   remove one if condition */
+
+/* Returns first value greater than or equal to the goal */
+static int
+binary_search_ge (int lowi, int highi, const uint16_t *positions, uint16_t goal) {
+  int answer = highi + 1, middlei;
+
+  debug20(printf("entered binary_search_ge with lowi=%d, highi=%d, goal=%u\n",lowi,highi,goal));
+
+  while (lowi <= highi) {
+    middlei = lowi + ((highi - lowi) / 2);
+    debug20(printf("  binary: %d:%u %d:%u %d:%u   vs. %u\n",
+		   lowi,positions[lowi],middlei,positions[middlei],
+		   highi,positions[highi],goal));
+    if (positions[middlei] >= goal) {
+      answer = middlei;
+      highi = middlei - 1;
+    } else {
+      lowi = middlei + 1;
+    }
+  }
+
+  debug20(printf("binary_search_ge returns %d (lowi %d, middlei %d, highi %d)\n",
+		 answer,lowi,middlei,highi));
+  return answer;
+}
+
+/* Returns first value less than or equal to the goal */
+static int
+binary_search_le (int lowi, int highi, const uint16_t *positions, uint16_t goal) {
+  int answer = lowi - 1, middlei;
+
+  debug20(printf("entered binary_search_le with lowi=%d, highi=%d, goal=%u\n",lowi,highi,goal));
+
+  while (lowi <= highi) {
+    middlei = lowi + ((highi - lowi) / 2);
+    debug20(printf("  binary: %d:%u %d:%u %d:%u   vs. %u\n",
+		   lowi,positions[lowi],middlei,positions[middlei],
+		   highi,positions[highi],goal));
+    if (positions[middlei] <= goal) {
+      answer = middlei;
+      lowi = middlei + 1;
+    } else {
+      highi = middlei - 1;
+    }
+  }
+
+  debug20(printf("binary_search_le returns %d (lowi %d, middlei %d, highi %d)\n",
+		 answer,lowi,middlei,highi));
+  return answer;
+}
+
 
 
 /* Gets positions of 4-mers from low_position to high_position.  We do
@@ -2009,44 +2348,48 @@ find_prevalent (int *nloci, Univcoord_T *values, int nvalues, int subopt_count) 
    can be performed.  Otherwise, medial trimming is not done, since
    we want to know what that solution yields. */
 static int
-get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdiag_T *univdiags,
-		T this, int streamspace_max_alloc, Univcoord_T *streamspace_alloc, 
-		Univcoord_T **streamptr_alloc, int *streamsize_alloc, int max_nstreams, Mergeinfo_T mergeinfo,
+get_exhaustive (bool *trimmedp, int *best_matchlength, Univdiag_T *univdiags,
+		T this, int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		char *queryptr, int pos5, int pos3, int querylength,
-		Univcoord_T anchor_univdiagonal,
 		Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
-		Compress_T query_compress, bool plusp, int genestrand, Genomebits_T genomebits,
-		bool extend5p, bool trim5p, bool trim3p) {
+		struct Accel_profile_localdb_work_T *profile_work) {
   int nentries;
   Univdiag_T *q, univdiag;
-  Univcoord_T low_position_start, high_position_start, last_diagonal, *p;
-  int initptr, finalptr, ptr, n;
+  Univcoord_T low_position_start, high_position_start, univdiagonal;
+  int rel_univdiagonal, ii, i;
+
+  int goal;
+  int initptr, finalptr, ptr, lowi, highi, n;
   uint16_t *saindex16;
   uint16_t *sasort16;
   Univcoord_T low_regioni, high_regioni, regioni;
   Univcoord_T region_term;
 
-  List_T allocated = NULL, a;
-  int streami = 0;
+  bool overflow_exists_p = false;
+  int16_t max_count = 0, subopt_count, count; /* signed so we can use SIMD _cmpgt_epi16 */
+  int *qstarts, *qends;
+  int nblocks, npositions;
 
-  /* _stream and _merged are aligned */
-  Univcoord_T *merged_start, *_merged, *_stream, *last_space, *out;
-  int streamsize, spacesize, last_spacesize;
-  int nmerged, merged_low, merged_high;
-
-  int max_count, subopt_count, lowi, highi;
   int pos;
   unsigned char oligo;
   
-#ifdef MEASURE_WHOLE_END
-  int best_mismatches, ref_nmismatches, mm;
-#else
-  int matchlength, trimpos5, trimpos3, ninserts;
-  int nmismatches_to_trimpos;
-  int best_nmatches, nmatches;
+  int matchlength;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long profile_t0 = 0ULL;
 #endif
 
-#ifdef DEBUG2
+#if !defined(HAVE_SSE2)
+#elif !defined(HAVE_AVX2)
+  __m128i _tally, _overflowp, _cmp, _threshold;
+#elif !defined(HAVE_AVX512)
+  __m256i _tally, _overflowp, _cmp, _threshold;
+#else
+  __m512i _tally, _overflowp, _cmp, _threshold;
+  __mmask32 result;
+#endif
+
+
+#if defined(DEBUG2) || defined(DEBUG_LOCALDB_DEEP)
   char nt[OLIGOSIZE + 1];
 #endif
 
@@ -2057,8 +2400,6 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
   /* trim5p = trim3p = true; */
 
   debug2(printf("Entering get_exhaustive with %.*s\n",pos3-pos5,&(queryptr[pos5])));
-  last_space = streamspace_alloc;
-  last_spacesize = 0;
 
   if (low_univdiagonal < (Univcoord_T) (querylength - pos5)) {
     low_position_start = 0U;
@@ -2071,16 +2412,75 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
     high_position_start = high_univdiagonal - querylength + pos5;
   }
 
+  npositions = high_univdiagonal - low_univdiagonal + 1;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->npositions = npositions;
+
+  profile_t0 = Accel_profile_now_us();
+#endif
+#if !defined(HAVE_SSE2)
+  /* localdb_tally = (int16_t *) CALLOC((high_univdiagonal - low_univdiagonal + 1),sizeof(int16_t)); */
+  /* localdb_overflowp = (int16_t *) CALLOC((high_univdiagonal - low_univdiagonal + 1),sizeof(int16_t)); */
+  nblocks = npositions;
+  assert(nblocks <= max_nblocks);
+
+  memset((void *) localdb_tally,0,nblocks * sizeof(int16_t));
+  memset((void *) localdb_overflowp,0,nblocks * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX2)
+  nblocks = (npositions + 7)/8;
+  assert(nblocks <= max_nblocks);
+
+  /* localdb_tally = (int16_t *) MALLOC_ALIGN(nblocks * 8 * sizeof(int16_t)); */
+  /* localdb_overflowp = (int16_t *) MALLOC_ALIGN(nblocks * 8 * sizeof(int16_t)); */
+  memset((void *) localdb_tally,0,nblocks * 8 * sizeof(int16_t));
+  memset((void *) localdb_overflowp,0,nblocks * 8 * sizeof(int16_t));
+
+#elif !defined(HAVE_AVX512)
+  nblocks = (npositions + 15)/16;
+  assert(nblocks <= max_nblocks);
+
+  /* localdb_tally = (int16_t *) MALLOC_ALIGN(nblocks * 16 * sizeof(int16_t)); */
+  /* localdb_overflowp = (int16_t *) MALLOC_ALIGN(nblocks * 16 * sizeof(int16_t)); */
+  memset((void *) localdb_tally,0,nblocks * 16 * sizeof(int16_t));
+  memset((void *) localdb_overflowp,0,nblocks * 16 * sizeof(int16_t));
+
+#else
+  nblocks = (npositions + 31)/32;
+  if (nblocks > max_nblocks) {
+    fprintf(stderr,"npositions %d, nblocks %d, max_nblocks %d\n",npositions,nblocks,max_nblocks);
+    exit(9);
+  }
+  assert(nblocks <= max_nblocks);
+
+  /* localdb_tally = (int16_t *) MALLOC_ALIGN(nblocks * 32 * sizeof(int16_t)); */
+  /* localdb_overflowp = (int16_t *) MALLOC_ALIGN(nblocks * 32 * sizeof(int16_t)); */
+  memset((void *) localdb_tally,0,nblocks * 32 * sizeof(int16_t));
+  memset((void *) localdb_overflowp,0,nblocks * 32 * sizeof(int16_t));
+#endif
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->nblocks = nblocks;
+  profile_work->memset_us += Accel_profile_now_us() - profile_t0;
+
+  profile_t0 = Accel_profile_now_us();
+#endif
+  qstarts = (int *) MALLOC(npositions * sizeof(int));
+  qends = (int *) MALLOC(npositions * sizeof(int));
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->qalloc_us += Accel_profile_now_us() - profile_t0;
+#endif
+
+
   low_regioni = low_position_start/SARRAY16_LENGTH;
   high_regioni = high_position_start/SARRAY16_LENGTH;
-
-  if ((high_regioni - low_regioni + 1) * (pos3 - pos5) > (Univcoord_T) max_nstreams) {
-    debug2(printf("Too many streams from regions (%d) * segment_length (%d).  Would exceed max_nstreams %d\n",
-		  high_regioni - low_regioni + 1,pos3 - pos5,max_nstreams));
-    return 0;
-  }
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->region_count = (int) (high_regioni - low_regioni + 1);
+#endif
 
   region_term = low_regioni * SARRAY16_LENGTH;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_t0 = Accel_profile_now_us();
+#endif
   for (regioni = low_regioni; regioni <= high_regioni; regioni++) {
     saindex16 = &(this->saindex16[regioni * SAINDEX16_LENGTH]);
     sasort16 = &(this->sasort16[region_term]);
@@ -2090,6 +2490,10 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
       oligo = nt_oligo_byte(&(queryptr[pos5]),OLIGOSIZE - 1);
     }
     for (pos = pos5; pos + OLIGOSIZE <= pos3; pos++) {
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+      profile_work->oligo_probe_count++;
+      profile_work->sa_range_count++;
+#endif
       /* printf("Revising oligo with %c\n",queryptr[pos + OLIGOSIZE - 1]); */
       if ((oligo = revise_oligo_byte(oligo,queryptr[pos + OLIGOSIZE - 1])) == SAINDEX16_LENGTH - 1) {
 	initptr = saindex16[oligo];
@@ -2099,274 +2503,319 @@ get_exhaustive (bool *trimmedp, int *best_matchlength, int *nmismatches, Univdia
 	finalptr = saindex16[oligo+1];
       }
 
-      lowi = initptr;
-      if (regioni == low_regioni || regioni == low_regioni + 1) { /* Check over two regions, in case we are near a boundary */
+      /* printf("regioni %d compared with low_regioni %d and high_regioni %d\n",
+	 regioni,low_regioni,high_regioni); */
+      if (regioni > low_regioni + 1) { /* Check over two regions, in case we are near a boundary */
+	lowi = initptr;
+      } else if ((goal = (low_univdiagonal - querylength + pos) - region_term) < 0) {
+	/* All of the array elements pass */
+	lowi = initptr;
+      } else if (goal > 65535) {
+	/* None of the array elements pass */
+	lowi = finalptr;
+      } else {
 	/* Filter diagonals */
-	while (lowi < finalptr && (region_term + sasort16[lowi]) - pos + querylength < low_univdiagonal) {
-	  lowi++;
-	}
+	/* printf("Goal is low_univdiagonal %u - querylength %d + pos %d - region_term %u = %d\n",
+	   low_univdiagonal,querylength,pos,region_term,(low_univdiagonal - querylength + pos) - region_term); */
+	lowi = binary_search_ge(/*lowi*/initptr,/*highi*/finalptr - 1,sasort16,(uint16_t) goal);
       }
-      highi = finalptr - 1;
-      if (regioni == high_regioni || regioni == high_regioni - 1) { /* Check over two regions, in case we are near a boundary */
+
+      if (high_regioni > 1 && regioni < high_regioni - 1) {
+	highi = finalptr - 1;
+      } else if ((goal = (high_univdiagonal - querylength + pos) - region_term) > 65535) {
+	/* All of the array elements pass */
+	highi = finalptr - 1;
+      } else if (goal < 0) {
+	/* None of the array elements pass */
+	highi = initptr - 1;
+      } else {
 	/* Filter diagonals */
-	while (highi >= initptr && (region_term + sasort16[highi]) - pos + querylength > high_univdiagonal) {
-	  highi--;
-	}
+	/* printf("Goal is high_univdiagonal %u - querylength %d + pos %d - region_term %u = %d\n",
+	   high_univdiagonal,querylength,pos,region_term,(high_univdiagonal - querylength + pos) - region_term); */
+	highi = binary_search_le(lowi,/*highi*/finalptr - 1,sasort16,(uint16_t) goal);
       }
 
       debug2(oligo_nt(nt,oligo,4));
       debug2(printf("oligo %d (%s) => initptr %d, finalptr %d => lowi %d, highi %d\n",
 		    oligo,nt,initptr,finalptr,lowi,highi));
       /* lowi and highi are inclusive */
-      
+#ifdef GSNAP_ACCEL_PROFILE_STATS
       if (highi >= lowi) {
-	streamsize = highi - lowi + 1;
-	spacesize = streamsize + 1; /* Add extra value for Sedgesort */
+	profile_work->tally_increment_count += (unsigned long long) (highi - lowi + 1);
+      }
+#endif
+      
+      for (ptr = lowi; ptr <= highi; ptr++) {
+	univdiagonal = region_term + sasort16[ptr] - pos + querylength; /* diagonal */
+	/* printf("univdiagonal %u = region_term %u + %d - pos %d + querylength %d, low_univdiagonal %u, high_univdiagonal %u\n", 
+	   univdiagonal,region_term,sasort16[ptr],pos,querylength,low_univdiagonal,high_univdiagonal); */
+	assert(univdiagonal >= low_univdiagonal && univdiagonal <= high_univdiagonal);
 
-	_stream = &(last_space[(last_spacesize + 31)/32 * 32]); /* Find an aligned position */
-	if (_stream + spacesize >= streamspace_alloc + streamspace_max_alloc) {
-	  /* About to overflow streamspace_alloc, so align instead */
-	  debug2(printf("Space of %d would overflow, so allocating instead\n",spacesize));
-	  _stream = (Univcoord_T *) MALLOC_ALIGN(spacesize*sizeof(Univcoord_T));
-	  allocated = List_push(allocated,(void *) _stream);
-	} else {
-	  last_space = _stream;
-	  last_spacesize = spacesize;
+	rel_univdiagonal = (int) (univdiagonal - low_univdiagonal);
+	if ((count = ++localdb_tally[rel_univdiagonal]) < 0) {
+	  /* printf("Got overflow of %d at rel position %d\n",count,rel_univdiagonal); */
+	  localdb_tally[rel_univdiagonal] = 0;
+	  localdb_overflowp[rel_univdiagonal] = 1;
+	  overflow_exists_p = true;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+	  profile_work->overflow_count++;
+#endif
+
+	} else if (localdb_overflowp[rel_univdiagonal] == true) {
+	  /* Don't change qstart or max_count */
+
+	} else if (count == 1) {
+	  qstarts[rel_univdiagonal] = pos;
+
+	} else if (count > max_count) {
+	  max_count = count;
 	}
-
-	/* assert(streami < ((shortsplicedist + 65536)/65536 + 1) * querylength); */
-	out = _stream;
-	streamptr_alloc[streami] = _stream;
-	streamsize_alloc[streami] = streamsize;
-
-	for (ptr = lowi; ptr <= highi; ptr++) {
-	  *out++ = region_term + sasort16[ptr] - pos + querylength; /* diagonal */
-	}
-	debug2(printf("regioni %u in %u..%u, at querypos %d, %d entries\n",
-		      regioni,low_regioni,high_regioni,pos,streamsize));
-	streami++;
+	qends[rel_univdiagonal] = pos + OLIGOSIZE;
       }
     }
 
     region_term += SARRAY16_LENGTH;
   }
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->vote_us += Accel_profile_now_us() - profile_t0;
+#endif
+  debug2(printf("max_count is %d\n",max_count));
 
-  /* Merge streams */
-  if (streami == 0) {
-    return 0;
+  if ((subopt_count = max_count - SUBOPT) < 1) {
+    subopt_count = 1;
+  }
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->max_count = max_count;
+  profile_work->subopt_count = subopt_count;
+
+  profile_t0 = Accel_profile_now_us();
+#endif
+  *best_matchlength = 0;
+  q = univdiags;
+
+#if !defined(HAVE_SSE2)
+  if (overflow_exists_p == true) {
+    for (i = 0; i < npositions; i++) {
+      if (localdb_overflowp[i] > 0) {
+	if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	  *best_matchlength = matchlength;
+	}
+	
+	univdiag = *q++;
+	univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	univdiag->qstart = qstarts[i];
+	univdiag->qend = qends[i];
+	univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+      }
+    }
 
   } else {
-#ifdef LARGE_GENOMES
-    _merged = Merge_diagonals_uint8(&nmerged,streamptr_alloc,streamsize_alloc,/*nstreams*/streami,mergeinfo);
-#else
-    _merged = Merge_diagonals_uint4(&nmerged,streamptr_alloc,streamsize_alloc,/*nstreams*/streami,mergeinfo);
-#endif
-
-    for (a = allocated; a != NULL; a = List_next(a)) {
-      _stream = (Univcoord_T *) List_head(a);
-      FREE_ALIGN(_stream);
-    }
-    List_free(&allocated);
-
-
-    /* Remove univdiagonals outside the bounds */
-    merged_low = 0;
-    while (merged_low < nmerged && _merged[merged_low] < low_univdiagonal) {
-      merged_low++;
-    }
-
-    merged_high = nmerged - 1;
-    while (merged_high >= 0 && _merged[merged_high] > high_univdiagonal) {
-      merged_high--;
-    }
-
-    merged_start = &(_merged[merged_low]);
-    nmerged = merged_high - merged_low + 1;
-
-    max_count = most_prevalent_count(merged_start,nmerged);
-    debug2(printf("max_count is %d\n",max_count));
-    if ((subopt_count = max_count - SUBOPT) < 1) {
-      subopt_count = 1;
-    }
-    find_prevalent(&nentries,merged_start,nmerged,subopt_count);
-
-
-  /* Remove repetitive diagonals */
-#ifdef DEBUG2
-    printf("\n");
-    printf("%d entries before removing repetitive:\n",nentries);
-    for (int i = 0; i < nentries; i++) {
-      if (anchor_univdiagonal == 0) {
-	printf(" %u (%u from low_univdiagonal; %u from high_univdiagonal)\n",
-	       merged_start[i],merged_start[i] - low_univdiagonal,high_univdiagonal - merged_start[i]);
-      } else if (extend5p == true) {
-	printf(" %u (%d from anchor_univdiagonal)\n",merged_start[i],anchor_univdiagonal - merged_start[i]);
-      } else {
-	printf(" %u (%d from anchor_univdiagonal)\n",merged_start[i],merged_start[i] - anchor_univdiagonal);
-      }
-
-      assert(merged_start[i] >= low_univdiagonal && merged_start[i] <= high_univdiagonal);
-    }
-    printf("\n");
-#endif
-
-    /* Skip repetitive diagonals and store those with the fewest mismatches */
-
-    q = univdiags;
-    last_diagonal = 0;
-    best_nmatches = 0;
-    *best_matchlength = 0;
-
-    for (p = &(merged_start[0]); p < &(merged_start[nentries]); p++) {
-      if (*p == last_diagonal) {
-	/* Skip: repetitive */
-      } else {
-	if (extend5p == true) {
-	  /* Perform medial trim first, where we expect mismatches for an insertion */
-	  /* printf("(3' medial) Comparing %u with %u (%d)\n",(*p),anchor_univdiagonal,anchor_univdiagonal - (*p)); */
-	  if (anchor_univdiagonal == 0 || (*p) <= anchor_univdiagonal) {
-	    ninserts = 0;
-	  } else {
-	    ninserts = (*p) - anchor_univdiagonal;
-	    pos3 -= ninserts;
-	    /* printf("Reducing pos3 by %d: %d..%d\n",ninserts,pos5,pos3); */
-	  }
-
-	  if (trim3p == false) {
-	    trimpos3 = pos3;
-	  } else if (pos5 > pos3) {
-	    /* From modification above for an insertion */
-	    trimpos3 = pos3;
-	  } else {
-	    trimpos3 = Genomebits_trim_qend(&nmismatches_to_trimpos,query_compress,genomebits,
-					    /*univdiagonal*/(*p),querylength,pos5,pos3,plusp,genestrand);
-	    /* printf("(3' medial) pos3 %d, trimpos3 %d\n",pos3,trimpos3); */
-	  }
-
-	  if (trimpos3 <= pos5) {
-	    trimpos5 = pos5;
-	  } else {
-	    /* Always trim, but check later to see if it was too much */
-	    trimpos5 = Genomebits_trim_qstart(&nmismatches_to_trimpos,query_compress,genomebits,
-					      /*univdiagonal*/(*p),querylength,pos5,trimpos3,plusp,genestrand);
-	  }
-
-	} else {
-	  /* Perform medial trim first, where we expect mismatches for an insertion */
-	  /* printf("(5' medial) Comparing %u with %u (%d)\n",(*p),anchor_univdiagonal,(*p) - anchor_univdiagonal); */
-	  if (anchor_univdiagonal == 0 || (*p) >= anchor_univdiagonal) {
-	    ninserts = 0;
-	  } else {
-	    ninserts = anchor_univdiagonal - (*p);
-	    pos5 += ninserts;
-	    /* printf("Increasing pos5 by %d: %d..%d\n",ninserts,pos5,pos3); */
-	  }
-
-	  if (trim5p == false) {
-	    trimpos5 = pos5;
-	  } else if (pos5 > pos3) {
-	    /* From modification above for an insertion */
-	    trimpos5 = pos5;
-	  } else {
-	    trimpos5 = Genomebits_trim_qstart(&nmismatches_to_trimpos,query_compress,genomebits,
-					      /*univdiagonal*/(*p),querylength,pos5,pos3,plusp,genestrand);
-	    /* printf("(5' medial) pos5 %d, trimpos5 %d\n",pos5,trimpos5); */
-	  }
-
-	  if (trimpos5 >= pos3) {
-	    trimpos3 = pos3;
-	  } else {
-	    trimpos3 = Genomebits_trim_qend(&nmismatches_to_trimpos,query_compress,genomebits,
-					    /*univdiagonal*/(*p),querylength,trimpos5,pos3,plusp,genestrand);
-	  }
-	}
-
-	if ((matchlength = trimpos3 - trimpos5) <= 0) {
-	  /* Skip */
-	  debug2(printf("%u has trimpos %d..%d\n",(*p),trimpos5,trimpos3));
-
-#if 0
-	} else if (trim5p == false && trimpos5 - pos5 > 3) {
-	  /* Skip */
-	  debug2(printf("%u has pos5 %d => trimpos5 %d\n",(*p),pos5,trimpos5));
-
-	} else if (trim3p == false && pos3 - trimpos3 > 3) {
-	  /* Skip */
-	  debug2(printf("%u has pos3 %d => trimpos3 %d\n",(*p),pos3,trimpos3));
-#endif
-
-	} else if ((nmatches = matchlength - nmismatches_to_trimpos) > best_nmatches &&
-		   matchlength > (*best_matchlength)) {
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => more so resetting q\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
-	  /* New winner */
-	  best_nmatches = nmatches;
-
-	  univdiag = *q++;
-	  univdiag->univdiagonal = *p;
-	  univdiag->qstart = trimpos5;
-	  univdiag->qend = trimpos3;
-	  univdiag->nmismatches = (trimpos3 - trimpos5) - best_nmatches;
-
+    for (i = 0; i < npositions; i++) {
+      if (localdb_tally[i] >= subopt_count) {
+	if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
 	  *best_matchlength = matchlength;
-	  *trimmedp = false;
-	  if (trimpos5 != pos5 || trimpos3 != pos3) {
-	    *trimmedp = true;
-	  }
-
-#if 0
-	} else if (nmatches == best_nmatches && matchlength < (*best_matchlength)) {
-	  /* More compact way to achieve best_nmatches */
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d => shorter so resetting q\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength));
-	  /* New winner */
-	  q = univdiags;
-	  univdiag = *q++;
-	  univdiag->univdiagonal = *p;
-	  univdiag->qstart = trimpos5;
-	  univdiag->qend = trimpos3;
-	  univdiag->nmismatches = (trimpos3 - trimpos5) - best_nmatches;
-
-	  *best_matchlength = matchlength;
-	  *trimmedp = false;
-	  if (trimpos5 != pos5 || trimpos3 != pos3) {
-	    *trimmedp = true;
-	  }
-#endif
-
-	} else if (nmatches + ninserts >= best_nmatches || matchlength + ninserts >= (*best_matchlength)) {
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d, ninserts %d => same so saving and advancing q\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength,ninserts));
-	  univdiag = *q++;
-	  univdiag->univdiagonal = *p;
-	  univdiag->qstart = trimpos5;
-	  univdiag->qend = trimpos3;
-	  univdiag->nmismatches = (trimpos3 - trimpos5) - best_nmatches;
-
-	  /* Tie */
-	  if (trimpos5 != pos5 || trimpos3 != pos3) {
-	    *trimmedp = true;
-	  }
-	  
-	} else {
-	  debug2(printf("%u has %d mismatches to trimpos %d..%d => %d matches, matchlength %d, ninserts %d => fewer so skipping\n",
-			(*p),nmismatches_to_trimpos,trimpos5,trimpos3,nmatches,matchlength,ninserts));
-	  /* Worse */
 	}
+	
+	univdiag = *q++;
+	univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	univdiag->qstart = qstarts[i];
+	univdiag->qend = qends[i];
+	univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
       }
-      last_diagonal = *p;
     }
-
-    FREE_ALIGN(_merged);
-
-    assert((*best_matchlength) >= best_nmatches);
-    *nmismatches = (*best_matchlength) - best_nmatches;
-
-    nentries = q - univdiags;
-
-    debug2(print_univdiags(univdiags,nentries));
-    return nentries;
   }
+
+  /* FREE(localdb_tally); */
+  /* FREE(localdb_overflowp); */
+
+#elif !defined(HAVE_AVX2)
+  /* Using SSE2 commands */
+  /* _epi16_offset = _mm_set1_epi16(EPI16_MAX); -- Could subtract from both terms if we want epu16 arithmetic */
+
+  if (overflow_exists_p == true) {
+    for (ii = 0; ii < nblocks * 8; ii += 8) {
+      _overflowp = _mm_load_si128((const __m128i *) &(localdb_overflowp[ii]));
+
+#ifdef SSE4_1
+      if (_mm_testz_si128(_overflowp, _overflowp)) {
+#else
+      if (!_mm_movemask_epi8(_overflowp)) {
+#endif
+      } else {
+	for (i = ii; i < ii + 8; i++) {
+	  if (localdb_overflowp[i] > 0) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+
+  } else {
+    _threshold = _mm_set1_epi16(subopt_count - 1); /* Subtract 1 because only cmpgt is available not cmpge */
+
+    for (ii = 0; ii < nblocks * 8; ii += 8) {
+      _tally = _mm_load_si128((const __m128i *) &(localdb_tally[ii]));
+      _cmp = _mm_cmpgt_epi16(_tally, _threshold);
+
+#ifdef SSE4_1
+      if (_mm_testz_si128(_cmp, _cmp)) {
+#else
+      if (!_mm_movemask_epi8(_cmp)) {
+#endif
+      } else {
+	for (i = ii; i < ii + 8; i++) {
+	  if (localdb_tally[i] >= subopt_count) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+  }
+
+  /* FREE_ALIGN(localdb_tally); */
+  /* FREE_ALIGN(localdb_overflowp); */
+
+#elif !defined(HAVE_AVX512)
+  /* Using AVX2 commands */
+  /* _epi16_offset = _mm256_set1_epi16(EPI16_MAX); -- Could subtract from both terms if we want epu16 arithmetic */
+
+  if (overflow_exists_p == true) {
+    for (ii = 0; ii < nblocks * 16; ii += 16) {
+      _overflowp = _mm256_load_si256((const __m256i *) &(localdb_overflowp[ii]));
+
+      if (_mm256_testz_si256(_overflowp, _overflowp)) {
+	/* Skip */
+      } else {
+	for (i = ii; i < ii + 16; i++) {
+	  if (localdb_tally[i] >= subopt_count) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+
+  } else {
+    _threshold = _mm256_set1_epi16(subopt_count - 1); /* Subtract 1 because only cmpgt is available not cmpge */
+
+    for (ii = 0; ii < nblocks * 16; ii += 16) {
+      _tally = _mm256_load_si256((const __m256i *) &(localdb_tally[ii]));
+      _cmp = _mm256_cmpgt_epi16(_tally, _threshold);
+
+      if (_mm256_testz_si256(_cmp, _cmp)) {
+	/* Skip */
+      } else {
+	for (i = ii; i < ii + 16; i++) {
+	  if (localdb_tally[i] >= subopt_count) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+  }
+
+  /* FREE_ALIGN(localdb_tally); */
+  /* FREE_ALIGN(localdb_overflowp); */
+
+#else
+  /* Using AVX512 commands */
+  /* _epi16_offset = _mm512_set1_epi16(EPI16_MAX); -- Could subtract from both terms if we want epu16 arithmetic */
+
+  if (overflow_exists_p == true) {
+    for (ii = 0; ii < nblocks * 32; ii += 32) {
+      _overflowp = _mm512_load_si512((const __m512i *) &(localdb_overflowp[ii]));
+
+      if ((uint32_t) _mm512_test_epi16_mask(_overflowp, _overflowp) == 0) {
+	/* Skip */
+      } else {
+	for (i = ii; i < ii + 32; i++) {
+	  if (localdb_tally[i] >= subopt_count) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+
+  } else {
+    _threshold = _mm512_set1_epi32(subopt_count - 1); /* Subtract 1 because only cmpgt is available not cmpge */
+
+    for (ii = 0; ii < nblocks * 32; ii += 32) {
+      _tally = _mm512_load_si512((const __m512i *) &(localdb_tally[ii]));
+      if ((uint32_t) _mm512_cmpgt_epi16_mask(_tally, _threshold) == 0) {
+	/* Skip */
+      } else {
+	for (i = ii; i < ii + 32; i++) {
+	  if (localdb_tally[i] >= subopt_count) {
+	    if ((matchlength = qends[i] - qstarts[i]) > *best_matchlength) {
+	      *best_matchlength = matchlength;
+	    }
+
+	    univdiag = *q++;
+	    univdiag->univdiagonal = low_univdiagonal + (Univcoord_T) i;
+	    univdiag->qstart = qstarts[i];
+	    univdiag->qend = qends[i];
+	    univdiag->nmismatches = matchlength - localdb_tally[i]; /* This is not quite correct */
+	  }
+	}
+      }
+    }
+  }
+
+  /* FREE_ALIGN(localdb_tally); */
+  /* FREE_ALIGN(localdb_overflowp); */
+#endif
+
+  FREE(qstarts);
+  FREE(qends);
+
+  /* *nmismatches = (*best_matchlength) - best_nmatches; */
+  nentries = q - univdiags;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  profile_work->nentries = nentries;
+  profile_work->emit_us += Accel_profile_now_us() - profile_t0;
+#endif
+
+  debug2(print_univdiags(univdiags,nentries));
+  return nentries;
 }
 
 
@@ -2394,52 +2843,90 @@ check_ascending (Univcoord_T *coords, int n) {
 
 
 
-/* localdb_alloc is needed for the results of the first and last sasort entries in get_by_ends */
+/* univdiags_alloc are needed for storing output */
+/* diagonals_alloc and localdb_alloc are needed for the results of the first and last sasort entries in get_by_ends */
+/* localdb_tally and localdb_overflowp are needed for get_exhaustive */
 int
-Localdb_get (bool *sortedp, bool *trimmedp,
-	     int *matchlength, int *nmismatches, Univdiag_T *univdiags_alloc, 
+Localdb_get (bool *sortedp, bool *trimmedp, int *matchlength, Univdiag_T *univdiags_alloc, 
 	     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-	     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+	     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 	     char *queryptr, int pos5, int pos3, int querylength,
-	     Univcoord_T anchor_univdiagonal, Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
+	     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 	     Compress_T query_compress, bool plusp, int genestrand,
-	     Genomebits_T genomebits, int nmismatches_allowed,
-	     bool extend5p, bool trim5p, bool trim3p) {
+	     Genomebits_T genomebits) {
   int nhits;
-
-  Univcoord_T **streamptr_alloc = stage1->streamptr_alloc;
-  int *streamsize_alloc = stage1->streamsize_alloc;
-  Mergeinfo_T mergeinfo = stage1->mergeinfo;
+  unsigned long long cache_hash = 0;
+  struct Localdb_cache_entry_T *cache_entry;
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  unsigned long long profile_start_us;
+#endif
+  struct Accel_profile_localdb_work_T profile_work;
 
 
   debug(printf("\nEntered Localdb_get with low_univdiagonal %u, high_univdiagonal %u, plusp %d, pos5 %d, pos3 %d, query %s, compress_fwdp %d\n",
 	       low_univdiagonal,high_univdiagonal,plusp,pos5,pos3,queryptr,Compress_fwdp(query_compress)));
   assert(Compress_fwdp(query_compress) == plusp);
 
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+  Accel_profile_localdb_work_init(&profile_work);
+  profile_start_us = Accel_profile_now_us();
+#endif
   *matchlength = pos3 - pos5;	/* Needed for get_by_ends */
 
   if (pos5 >= pos3) {
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_localdb_record("empty",queryptr,pos5,pos3,querylength,
+				 low_univdiagonal,high_univdiagonal,plusp,genestrand,
+				 /*nhits*/0,*matchlength,/*trimmedp*/false,/*sortedp*/false,
+				 Accel_profile_now_us() - profile_start_us,&profile_work);
+#endif
     return 0;
 
   } else if (high_univdiagonal < low_univdiagonal) {
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_localdb_record("empty",queryptr,pos5,pos3,querylength,
+				 low_univdiagonal,high_univdiagonal,plusp,genestrand,
+				 /*nhits*/0,*matchlength,/*trimmedp*/false,/*sortedp*/false,
+				 Accel_profile_now_us() - profile_start_us,&profile_work);
+#endif
     return 0;
 
+#if 0
   } else if ((nhits = get_by_sarray(&(*matchlength),&(*univdiags_alloc),this,
 				    queryptr,pos5,pos3,querylength,
  				    /*min_matchlength*/(pos3 - pos5),low_univdiagonal,high_univdiagonal,
 				    query_compress,plusp,genomebits)) > 0) {
+    /* Too time-consuming */
     /* Previously required pos3 - pos5 < index1part + index1interval because otherwise we would have found it from indexdb */
     /* assert(pos3 - pos5 < index1part + index1interval); */
 
     debug(printf("Localdb_get using get_by_sarray (and no mismatches allowed).  Returning %d hits\n",nhits));
     /* Not guaranteed to be ascending */
-    *nmismatches = 0;
     *sortedp = false;
     *trimmedp = false;		/* Entire string matches */
     return nhits;
+#endif
+
+  } else if (localdb_memoize_enabled_p == true &&
+	     (cache_hash = localdb_cache_hash(this,genomebits,query_compress,queryptr,pos5,pos3,querylength,
+					     low_univdiagonal,high_univdiagonal,
+					     plusp,genestrand),
+	      cache_entry = localdb_cache_lookup(cache_hash,this,genomebits,query_compress,queryptr,
+						 pos5,pos3,querylength,
+						 low_univdiagonal,high_univdiagonal,
+						 plusp,genestrand)) !=
+	     (struct Localdb_cache_entry_T *) NULL) {
+    localdb_cache_replay(&(*sortedp),&(*trimmedp),&(*matchlength),univdiags_alloc,cache_entry);
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_localdb_record("cache_hit",queryptr,pos5,pos3,querylength,
+				 low_univdiagonal,high_univdiagonal,plusp,genestrand,
+				 cache_entry->nhits,*matchlength,*trimmedp,*sortedp,
+				 Accel_profile_now_us() - profile_start_us,&profile_work);
+#endif
+    return cache_entry->nhits;
 
   } else if (pos3 - pos5 > 2*OLIGOSIZE &&
-	     (nhits = get_by_ends(&(*nmismatches),&(*univdiags_alloc),
+	     (nhits = get_by_ends(&(*univdiags_alloc),
 				  this,diagonals_alloc,localdb_alloc,queryptr,pos5,pos3,querylength,
 				  low_univdiagonal,high_univdiagonal,query_compress,
 				  plusp,genestrand,genomebits,/*nmismatches_allowed*/0)) > 0) {
@@ -2450,17 +2937,38 @@ Localdb_get (bool *sortedp, bool *trimmedp,
     debug(printf("Localdb_get using get_by_ends and no mismatches allowed.  Returning %d hits\n",nhits));
     *sortedp = true;
     *trimmedp = false;		/* Both ends match */
+    if (localdb_memoize_enabled_p == true) {
+      localdb_cache_insert(cache_hash,this,genomebits,query_compress,queryptr,pos5,pos3,querylength,
+			   low_univdiagonal,high_univdiagonal,plusp,genestrand,
+			   nhits,*matchlength,*sortedp,*trimmedp,univdiags_alloc);
+    }
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_localdb_record("by_ends",queryptr,pos5,pos3,querylength,
+				 low_univdiagonal,high_univdiagonal,plusp,genestrand,
+				 nhits,*matchlength,*trimmedp,*sortedp,
+				 Accel_profile_now_us() - profile_start_us,&profile_work);
+#endif
     return nhits;
 
   } else {
+    nhits = get_exhaustive(&(*trimmedp),&(*matchlength),&(*univdiags_alloc),this,
+			   localdb_tally,localdb_overflowp,max_nblocks,
+			   queryptr,pos5,pos3,querylength,low_univdiagonal,high_univdiagonal,
+			   &profile_work);
     debug(printf("Localdb_get using get_exhaustive and %d mismatches allowed.  Returning %d hits\n",
 		 (pos3 - pos5)/2,nhits));
-    nhits = get_exhaustive(&(*trimmedp),&(*matchlength),&(*nmismatches),&(*univdiags_alloc),this,
-			   streamspace_max_alloc,streamspace_alloc,streamptr_alloc,streamsize_alloc,
-			   stage1->max_nstreams,mergeinfo,queryptr,pos5,pos3,querylength,
-			   anchor_univdiagonal,low_univdiagonal,high_univdiagonal,
-			   query_compress,plusp,genestrand,genomebits,extend5p,trim5p,trim3p);
     *sortedp = true;
+    if (localdb_memoize_enabled_p == true) {
+      localdb_cache_insert(cache_hash,this,genomebits,query_compress,queryptr,pos5,pos3,querylength,
+			   low_univdiagonal,high_univdiagonal,plusp,genestrand,
+			   nhits,*matchlength,*sortedp,*trimmedp,univdiags_alloc);
+    }
+#ifdef GSNAP_ACCEL_PROFILE_STATS
+    Accel_profile_localdb_record("exhaustive",queryptr,pos5,pos3,querylength,
+				 low_univdiagonal,high_univdiagonal,plusp,genestrand,
+				 nhits,*matchlength,*trimmedp,*sortedp,
+				 Accel_profile_now_us() - profile_start_us,&profile_work);
+#endif
     return nhits;
   }
 }
@@ -2469,24 +2977,23 @@ Localdb_get (bool *sortedp, bool *trimmedp,
 Univcoord_T
 Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 		     T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		     Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		     int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		     char *queryptr, int querylength,
 		     Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		     Compress_T query_compress, bool plusp, int genestrand,
-		     Genomebits_T genomebits, int nmismatches_allowed) {
+		     Genomebits_T genomebits) {
   Univcoord_T lowest;
   bool sortedp, trimmedp;
-  int matchlength, nmismatches;
+  int matchlength;
   int nunivdiags, i;
 
-  if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&nmismatches,univdiags_alloc,
-				this,diagonals_alloc,localdb_alloc,
-				stage1,streamspace_max_alloc,streamspace_alloc,
+  Accel_profile_localdb_site("mate_rescue_low");
+  if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,univdiags_alloc,
+				this,diagonals_alloc,localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
 				queryptr,/*pos5*/0,/*pos3*/querylength,querylength,
-				/*anchor_univdiagonal*/low_univdiagonal,
+				/*anchor_univdiagonal:low_univdiagonal,*/
 				low_univdiagonal,high_univdiagonal,
-				query_compress,plusp,genestrand,genomebits,nmismatches_allowed,
-				/*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
+				query_compress,plusp,genestrand,genomebits)) == 0) {
     return (Univcoord_T) 0;
 
   } else if (nunivdiags == 1) {
@@ -2517,25 +3024,23 @@ Localdb_get_one_low (Univdiag_T *univdiags_alloc,
 Univcoord_T
 Localdb_get_one_high (Univdiag_T *univdiags_alloc, 
 		      T this, Univcoord_T *diagonals_alloc, unsigned short *localdb_alloc,
-		      Stage1_T stage1, int streamspace_max_alloc, Univcoord_T *streamspace_alloc,
+		      int16_t *localdb_tally, int16_t *localdb_overflowp, int max_nblocks,
 		      char *queryptr, int querylength,
 		      Univcoord_T low_univdiagonal, Univcoord_T high_univdiagonal,
 		      Compress_T query_compress, bool plusp, int genestrand,
-		      Genomebits_T genomebits, int nmismatches_allowed) {
+		      Genomebits_T genomebits) {
   Univcoord_T highest;
   bool sortedp, trimmedp;
-  int matchlength, nmismatches;
+  int matchlength;
   int nunivdiags, i;
 
-  if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,&nmismatches,univdiags_alloc,
-				this,diagonals_alloc,localdb_alloc,
-				stage1,streamspace_max_alloc,streamspace_alloc,
+  Accel_profile_localdb_site("mate_rescue_high");
+  if ((nunivdiags = Localdb_get(&sortedp,&trimmedp,&matchlength,univdiags_alloc,
+				this,diagonals_alloc,localdb_alloc,localdb_tally,localdb_overflowp,max_nblocks,
 				queryptr,/*pos5*/0,/*pos3*/querylength,querylength,
-				/*anchor_univdiagonal*/high_univdiagonal,
+				/*anchor_univdiagonal:high_univdiagonal,*/
 				low_univdiagonal,high_univdiagonal,
-				query_compress,plusp,genestrand,genomebits,nmismatches_allowed,
-				/*extend5p*/true,/*trim5p*/true,/*trim3p*/true)) == 0) {
-    
+				query_compress,plusp,genestrand,genomebits)) == 0) {
     return (Univcoord_T) 0;
 
   } else if (nunivdiags == 1) {
