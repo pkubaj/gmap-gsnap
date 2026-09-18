@@ -34,7 +34,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 		       Width_T index1interval, Width_T msize,
 		       bool genome_lc_p, char *fileroot, bool mask_lowercase_p);
 
-#ifndef PMAP
+#if 0
 extern void
 Indexdb_write_pure_minimizer_stats (char *destdir, FILE *sequence_fp, Univ_IIT_T chromosome_iit,
 				    Width_T index1part, Width_T index1interval,

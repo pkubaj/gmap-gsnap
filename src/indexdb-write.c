@@ -62,7 +62,6 @@
 #include "indexdbdef.h"
 #include "iit-read-univ.h"
 #include "indexdb.h"
-#include "minpure.h"
 
 #include "bitpack64-read.h"
 #include "bitpack64-write.h"
@@ -842,7 +841,7 @@ Indexdb_write_offsets (char *destdir, char interval_char, FILE *sequence_fp, Uni
 }
 
 
-#ifndef PMAP
+#if 0
 void
 Indexdb_write_pure_minimizer_stats (char *destdir, FILE *sequence_fp, Univ_IIT_T chromosome_iit,
 				    Width_T index1part, Width_T index1interval,
